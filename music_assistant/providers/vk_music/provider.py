@@ -11,6 +11,7 @@ from music_assistant_models.errors import (
     LoginFailed,
     MediaNotFoundError,
     ProviderUnavailableError,
+    ResourceTemporarilyUnavailable,
 )
 from music_assistant_models.media_items import (
     AudioFormat,
@@ -101,21 +102,27 @@ class VKMusicProvider(MusicProvider):
 
         # Search tracks
         if MediaType.TRACK in media_types:
-            songs = await self.client.search_tracks(search_query, count=limit)
-            for song in songs[:limit]:
-                try:
-                    result.tracks = [*result.tracks, parse_track(self, song)]
-                except InvalidDataError as err:
-                    self.logger.debug("Error parsing track: %s", err)
+            try:
+                songs = await self.client.search_tracks(search_query, count=limit)
+                for song in songs[:limit]:
+                    try:
+                        result.tracks = [*result.tracks, parse_track(self, song)]
+                    except InvalidDataError as err:
+                        self.logger.debug("Error parsing track: %s", err)
+            except ResourceTemporarilyUnavailable as err:
+                self.logger.warning("Track search unavailable: %s", err)
 
         # Search playlists
         if MediaType.PLAYLIST in media_types:
-            playlists = await self.client.search_playlists(search_query, count=limit)
-            for playlist in playlists[:limit]:
-                try:
-                    result.playlists = [*result.playlists, parse_playlist(self, playlist)]
-                except InvalidDataError as err:
-                    self.logger.debug("Error parsing playlist: %s", err)
+            try:
+                playlists = await self.client.search_playlists(search_query, count=limit)
+                for playlist in playlists[:limit]:
+                    try:
+                        result.playlists = [*result.playlists, parse_playlist(self, playlist)]
+                    except InvalidDataError as err:
+                        self.logger.debug("Error parsing playlist: %s", err)
+            except ResourceTemporarilyUnavailable as err:
+                self.logger.warning("Playlist search unavailable: %s", err)
 
         return result
 
