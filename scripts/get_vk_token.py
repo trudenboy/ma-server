@@ -11,14 +11,24 @@ Usage:
     python scripts/get_vk_token.py [--oauth]
 
 Options:
-    --oauth    Use browser-based OAuth flow (recommended if blocked)
+    --oauth    Use browser-based OAuth flow (NOT recommended for audio access)
 
 Methods:
-    1. Direct login (default) - Uses vkpymusic TokenReceiver
+    1. Direct login (RECOMMENDED) - Uses vkpymusic TokenReceiver
     2. OAuth browser flow - Opens browser, you log in via VK interface
 
-The OAuth method bypasses brute-force protection because authentication
-happens through VK's own interface, not through API calls.
+IMPORTANT: VK Audio API Access Limitations
+==========================================
+VK closed public audio API access in 2016-2017. Only tokens obtained via
+DIRECT LOGIN with Kate Mobile credentials have audio API permissions.
+
+OAuth tokens (browser-based) will authenticate successfully but will NOT
+be able to play or access audio files. The VK Music provider will show
+an error about "audio API access" if you use an OAuth token.
+
+If you encounter brute-force protection during direct login, wait 15-30
+minutes before retrying. Do NOT repeatedly attempt login as this extends
+the block duration.
 
 Requirements:
     pip install vkpymusic
@@ -49,17 +59,31 @@ OAUTH_REDIRECT_URI = "https://oauth.vk.com/blank.html"
 
 
 def auth_oauth() -> str | None:
-    """Perform OAuth browser-based authentication with manual token paste."""
+    """Perform OAuth browser-based authentication with manual token paste.
+
+    WARNING: OAuth tokens do NOT have audio API access. This method is only
+    useful for testing authentication, not for actual audio playback.
+    """
     print()
     print("=" * 60)
     print("OAuth Browser Authentication")
     print("=" * 60)
     print()
-    print("This method opens your browser for VK login.")
-    print("Benefits:")
-    print("  - Bypasses brute-force protection")
-    print("  - Handles 2FA automatically")
-    print("  - More secure (password not entered in terminal)")
+    print("WARNING: OAuth tokens do NOT have audio API access!")
+    print("=" * 60)
+    print("VK closed public audio API in 2016-2017.")
+    print("OAuth tokens can authenticate but CANNOT play audio.")
+    print("For full functionality, use Direct Login (option 1) instead.")
+    print("=" * 60)
+    print()
+    print("This method is only useful for:")
+    print("  - Testing if your credentials work")
+    print("  - Accessing non-audio features")
+    print()
+    proceed = input("Do you want to proceed anyway? (y/n): ").strip().lower()
+    if proceed != "y":
+        print("Aborted. Please use Direct Login method instead.")
+        return None
     print()
 
     # Build OAuth URL using VK's blank.html redirect (works for any app)
@@ -312,16 +336,14 @@ def main() -> None:
         print()
         print("Choose authentication method:")
         print()
-        print("  1. Direct login (enter credentials here)")
-        print("  2. OAuth browser (login via VK website) [RECOMMENDED]")
+        print("  1. Direct login (enter credentials here) [RECOMMENDED]")
+        print("  2. OAuth browser (login via VK website)")
         print()
-        print("OAuth is recommended because:")
-        print("  - Bypasses brute-force protection")
-        print("  - Handles 2FA automatically")
-        print("  - More secure")
+        print("IMPORTANT: Only Direct Login grants audio API access!")
+        print("OAuth tokens will authenticate but CANNOT play audio.")
         print()
 
-        method = input("Enter choice (1/2) [default: 2]: ").strip() or "2"
+        method = input("Enter choice (1/2) [default: 1]: ").strip() or "1"
         use_oauth = method == "2"
 
     if use_oauth:

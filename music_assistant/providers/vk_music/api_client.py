@@ -15,6 +15,16 @@ from vkpymusic.vk_api import VkApiException
 
 from .constants import DEFAULT_LIMIT, DEFAULT_USER_AGENT
 
+# Error message for tokens without audio API access
+AUDIO_ACCESS_DENIED_MSG = (
+    "VK Music token does not have audio API access. "
+    "This typically happens with tokens obtained via OAuth browser flow. "
+    "VK closed public audio API access in 2016-2017. "
+    "To get a working token, use the DIRECT LOGIN method in the token script: "
+    "python scripts/get_vk_token.py (choose option 1). "
+    "Note: If you see brute-force protection errors, wait 15-30 minutes before retrying."
+)
+
 # vkpymusic lacks proper type stubs, so we use Any for its types
 type VKSong = Any
 type VKPlaylist = Any
@@ -48,7 +58,7 @@ class VKMusicClient:
         """Initialize the service and verify token validity.
 
         :return: True if connection was successful.
-        :raises LoginFailed: If the token is invalid.
+        :raises LoginFailed: If the token is invalid or lacks audio API access.
         """
         try:
             self._service = Service(self._user_agent, self._token)
@@ -58,12 +68,74 @@ class VKMusicClient:
             user_info: VKUserInfo = await self._service.get_user_info_async()
             self._user_id = user_info.userid
             LOGGER.debug("Connected to VK Music as user %s", self._user_id)
+
+            # Verify audio API access by making a test call
+            await self._verify_audio_access()
+
             return True
         except VkApiException as err:
             if "invalid" in str(err).lower() or "token" in str(err).lower():
                 raise LoginFailed("Invalid VK Music token") from err
             msg = "Error connecting to VK Music"
             raise ResourceTemporarilyUnavailable(msg) from err
+
+    async def _verify_audio_access(self) -> None:
+        """Verify that the token has audio API access.
+
+        OAuth tokens typically don't have audio permissions. We check by
+        fetching a single track from the user's library or searching.
+
+        :raises LoginFailed: If audio API access is denied.
+        """
+        service = self._ensure_connected()
+        try:
+            # Try to fetch user's audio - this tests audio API access
+            tracks = await service.get_songs_by_userid_async(self.user_id, 1, 0)
+
+            # Check if we got placeholder/dummy content instead of real audio
+            # VK returns empty URLs or placeholder data when audio access is denied
+            if tracks:
+                first_track = tracks[0]
+                # Check for missing or placeholder URL (common sign of no audio access)
+                track_url = getattr(first_track, "url", None)
+                if track_url and self._is_placeholder_url(track_url):
+                    LOGGER.warning("Token returned placeholder audio URL - audio access denied")
+                    raise LoginFailed(AUDIO_ACCESS_DENIED_MSG)
+            # If no tracks in library, try a search to verify audio access
+            else:
+                search_results = await service.search_songs_by_text_async("test", 1, 0)
+                if search_results:
+                    first_result = search_results[0]
+                    result_url = getattr(first_result, "url", None)
+                    if result_url and self._is_placeholder_url(result_url):
+                        LOGGER.warning(
+                            "Token returned placeholder audio URL in search - audio access denied"
+                        )
+                        raise LoginFailed(AUDIO_ACCESS_DENIED_MSG)
+
+            LOGGER.debug("Audio API access verified successfully")
+        except VkApiException as err:
+            error_str = str(err).lower()
+            if "access denied" in error_str or "permission" in error_str:
+                raise LoginFailed(AUDIO_ACCESS_DENIED_MSG) from err
+            # Other API errors shouldn't block connection
+            LOGGER.debug("Could not verify audio access (non-critical): %s", err)
+
+    def _is_placeholder_url(self, url: str) -> bool:
+        """Check if a URL is a placeholder indicating no audio access.
+
+        :param url: The audio URL to check.
+        :return: True if the URL appears to be a placeholder.
+        """
+        if not url:
+            return True
+        # VK sometimes returns very short URLs or specific placeholder patterns
+        # when audio access is not available
+        placeholder_patterns = [
+            "mp3/audio_api_unavailable",
+            "audio_api_unavailable",
+        ]
+        return any(pattern in url.lower() for pattern in placeholder_patterns)
 
     async def disconnect(self) -> None:
         """Disconnect the client."""
