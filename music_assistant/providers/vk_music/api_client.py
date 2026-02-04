@@ -56,7 +56,7 @@ class VKMusicClient:
             if not is_valid:
                 raise LoginFailed("Invalid VK Music token")
             user_info: VKUserInfo = await self._service.get_user_info_async()
-            self._user_id = user_info.id
+            self._user_id = user_info.userid
             LOGGER.debug("Connected to VK Music as user %s", self._user_id)
             return True
         except VkApiException as err:
