@@ -5,13 +5,12 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING
 
-from music_assistant_models.enums import ContentType, ImageType
+from music_assistant_models.enums import ContentType, ImageType, MediaType
 from music_assistant_models.media_items import (
     Artist,
     AudioFormat,
     ItemMapping,
     MediaItemImage,
-    MediaType,
     Playlist,
     ProviderMapping,
     Track,

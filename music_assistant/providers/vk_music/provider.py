@@ -14,11 +14,13 @@ from music_assistant_models.errors import (
 )
 from music_assistant_models.media_items import (
     AudioFormat,
-    BrowseFolder,
     ItemMapping,
     Playlist,
+    ProviderMapping,
+    RecommendationFolder,
     SearchResults,
     Track,
+    UniqueList,
 )
 from music_assistant_models.streamdetails import StreamDetails
 
@@ -151,9 +153,7 @@ class VKMusicProvider(MusicProvider):
         access_key = parts[2] if len(parts) > 2 else None
 
         # VK API doesn't have direct get_playlist - verify it exists by fetching tracks
-        await self.client.get_playlist_tracks(
-            owner_id, playlist_id, access_key, count=1, offset=0
-        )
+        await self.client.get_playlist_tracks(owner_id, playlist_id, access_key, count=1, offset=0)
 
         # Create minimal playlist object
         return Playlist(
@@ -162,6 +162,13 @@ class VKMusicProvider(MusicProvider):
             name=f"Playlist {playlist_id}",
             owner="VK Music",
             is_editable=False,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=prov_playlist_id,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                )
+            },
         )
 
     # Get related items
@@ -236,12 +243,12 @@ class VKMusicProvider(MusicProvider):
 
     # Recommendations
 
-    async def recommendations(self) -> list[BrowseFolder]:
+    async def recommendations(self) -> list[RecommendationFolder]:
         """Get VK Music recommendations.
 
         :return: List of recommendation folders.
         """
-        recommendations = []
+        result: list[RecommendationFolder] = []
 
         # Popular tracks
         try:
@@ -251,14 +258,13 @@ class VKMusicProvider(MusicProvider):
                 with contextlib.suppress(InvalidDataError):
                     popular_tracks.append(parse_track(self, song))
             if popular_tracks:
-                recommendations.append(
-                    BrowseFolder(
+                result.append(
+                    RecommendationFolder(
                         item_id="popular",
                         provider=self.instance_id,
                         path="popular",
                         name="Popular Tracks",
-                        label="popular",
-                        items=popular_tracks,
+                        items=UniqueList(popular_tracks),
                     )
                 )
         except Exception as err:
@@ -266,28 +272,25 @@ class VKMusicProvider(MusicProvider):
 
         # User recommendations
         try:
-            recs = await self.client.get_recommendations(
-                user_id=self.client.user_id, count=25
-            )
+            recs = await self.client.get_recommendations(user_id=self.client.user_id, count=25)
             rec_tracks = []
             for song in recs:
                 with contextlib.suppress(InvalidDataError):
                     rec_tracks.append(parse_track(self, song))
             if rec_tracks:
-                recommendations.append(
-                    BrowseFolder(
+                result.append(
+                    RecommendationFolder(
                         item_id="recommended",
                         provider=self.instance_id,
                         path="recommended",
                         name="Recommended For You",
-                        label="recommended",
-                        items=rec_tracks,
+                        items=UniqueList(rec_tracks),
                     )
                 )
         except Exception as err:
             self.logger.debug("Error fetching recommendations: %s", err)
 
-        return recommendations
+        return result
 
     # Streaming
 

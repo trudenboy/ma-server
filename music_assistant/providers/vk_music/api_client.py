@@ -87,7 +87,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.get_songs_by_userid_async(self.user_id, count, offset)
+            return await service.get_songs_by_userid_async(  # type: ignore[no-any-return]
+                self.user_id, count, offset
+            )
         except VkApiException as err:
             LOGGER.error("Error fetching user tracks: %s", err)
             raise ResourceTemporarilyUnavailable("Failed to fetch user tracks") from err
@@ -103,7 +105,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.get_playlists_by_userid_async(self.user_id, count, offset)
+            return await service.get_playlists_by_userid_async(  # type: ignore[no-any-return]
+                self.user_id, count, offset
+            )
         except VkApiException as err:
             LOGGER.error("Error fetching playlists: %s", err)
             raise ResourceTemporarilyUnavailable("Failed to fetch playlists") from err
@@ -122,7 +126,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.search_songs_by_text_async(query, count, offset)
+            return await service.search_songs_by_text_async(  # type: ignore[no-any-return]
+                query, count, offset
+            )
         except VkApiException as err:
             LOGGER.error("Search tracks error: %s", err)
             raise ResourceTemporarilyUnavailable("Search failed") from err
@@ -139,7 +145,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.search_playlists_by_text_async(query, count, offset)
+            return await service.search_playlists_by_text_async(  # type: ignore[no-any-return]
+                query, count, offset
+            )
         except VkApiException as err:
             LOGGER.error("Search playlists error: %s", err)
             raise ResourceTemporarilyUnavailable("Search failed") from err
@@ -156,7 +164,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.search_albums_by_text_async(query, count, offset)
+            return await service.search_albums_by_text_async(  # type: ignore[no-any-return]
+                query, count, offset
+            )
         except VkApiException as err:
             LOGGER.error("Search albums error: %s", err)
             raise ResourceTemporarilyUnavailable("Search failed") from err
@@ -185,7 +195,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.get_songs_by_id_async(track_ids)
+            return await service.get_songs_by_id_async(  # type: ignore[no-any-return]
+                track_ids
+            )
         except VkApiException as err:
             LOGGER.error("Error fetching tracks: %s", err)
             return []
@@ -209,7 +221,7 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.get_songs_by_playlist_id_async(
+            return await service.get_songs_by_playlist_id_async(  # type: ignore[no-any-return]
                 owner_id, playlist_id, access_key or "", count, offset
             )
         except VkApiException as err:
@@ -227,7 +239,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.get_popular_async(count, offset)
+            return await service.get_popular_async(  # type: ignore[no-any-return]
+                count, offset
+            )
         except VkApiException as err:
             LOGGER.error("Error fetching popular tracks: %s", err)
             return []
@@ -249,7 +263,9 @@ class VKMusicClient:
         """
         service = self._ensure_connected()
         try:
-            return await service.get_recommendations_async(user_id, song_id, count, offset)
+            return await service.get_recommendations_async(  # type: ignore[no-any-return]
+                user_id, song_id, count, offset
+            )
         except VkApiException as err:
             LOGGER.error("Error fetching recommendations: %s", err)
             return []
