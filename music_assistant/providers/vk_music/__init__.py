@@ -60,7 +60,7 @@ async def get_config_entries(
             type=ConfigEntryType.SECURE_STRING,
             label="VK Music Token",
             description="Enter your VK Music access token. "
-            "You can obtain it using vkpymusic TokenReceiver or other VK API tools.",
+            "Use vkpymusic TokenReceiver with direct login to obtain a valid token.",
             required=True,
             hidden=is_authenticated,
             value=cast("str", values.get(CONF_TOKEN)) if values else None,

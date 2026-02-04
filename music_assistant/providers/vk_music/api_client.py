@@ -20,9 +20,7 @@ AUDIO_ACCESS_DENIED_MSG = (
     "VK Music token does not have audio API access. "
     "This typically happens with tokens obtained via OAuth browser flow. "
     "VK closed public audio API access in 2016-2017. "
-    "To get a working token, use the DIRECT LOGIN method in the token script: "
-    "python scripts/get_vk_token.py (choose option 1). "
-    "Note: If you see brute-force protection errors, wait 15-30 minutes before retrying."
+    "Use vkpymusic TokenReceiver with direct login method to get a working token."
 )
 
 # vkpymusic lacks proper type stubs, so we use Any for its types
