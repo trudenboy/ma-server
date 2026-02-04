@@ -14,6 +14,7 @@ from music_assistant_models.errors import (
     ResourceTemporarilyUnavailable,
 )
 from music_assistant_models.media_items import (
+    Artist,
     AudioFormat,
     ItemMapping,
     Playlist,
@@ -140,6 +141,28 @@ class VKMusicProvider(MusicProvider):
         if not song:
             raise MediaNotFoundError(f"Track {prov_track_id} not found")
         return parse_track(self, song)
+
+    async def get_artist(self, prov_artist_id: str) -> Artist:
+        """Get artist details by ID.
+
+        VK Music does not provide a direct API for fetching artist info.
+        We return a minimal Artist object based on the ID (which is the artist name).
+
+        :param prov_artist_id: The provider artist ID (artist name).
+        :return: Artist object.
+        """
+        return Artist(
+            item_id=prov_artist_id,
+            provider=self.instance_id,
+            name=prov_artist_id,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=prov_artist_id,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                )
+            },
+        )
 
     @use_cache(3600 * 24 * 30)
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
