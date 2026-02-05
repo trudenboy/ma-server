@@ -192,6 +192,15 @@ class YandexMusicClient:
             result = await client.tracks(track_ids)
             return result or []
         except (BadRequestError, NetworkError) as err:
+            err_str = str(err).lower()
+            if "timeout" in err_str or "timed out" in err_str:
+                LOGGER.warning("Fetching tracks timed out, retrying once: %s", err)
+                try:
+                    result = await client.tracks(track_ids)
+                    return result or []
+                except (BadRequestError, NetworkError) as retry_err:
+                    LOGGER.error("Error fetching tracks (retry failed): %s", retry_err)
+                    return []
             LOGGER.error("Error fetching tracks: %s", err)
             return []
 
