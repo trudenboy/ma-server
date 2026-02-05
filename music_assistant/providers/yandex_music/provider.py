@@ -11,6 +11,7 @@ from music_assistant_models.errors import (
     LoginFailed,
     MediaNotFoundError,
     ProviderUnavailableError,
+    ResourceTemporarilyUnavailable,
 )
 from music_assistant_models.media_items import (
     Album,
@@ -266,16 +267,22 @@ class YandexMusicProvider(MusicProvider):
 
         playlist = await self.client.get_playlist(owner_id, kind)
         if not playlist:
-            return []
+            raise MediaNotFoundError(f"Playlist {prov_playlist_id} not found")
 
         # API sometimes returns playlist without tracks on first load; fetch explicitly if needed
         tracks_list = list(playlist.tracks) if playlist.tracks else []
         if not tracks_list and (getattr(playlist, "track_count", 0) or 0) > 0:
             try:
-                tracks_list = await playlist.fetch_tracks_async()
-            except Exception as err:  # noqa: BLE001
+                fetched = await playlist.fetch_tracks_async()
+                tracks_list = list(fetched) if fetched else []
+            except Exception as err:
                 self.logger.debug("fetch_tracks_async failed: %s", err)
         if not tracks_list:
+            track_count = getattr(playlist, "track_count", 0) or 0
+            if track_count > 0:
+                raise ResourceTemporarilyUnavailable(
+                    "Playlist tracks temporarily unavailable; please retry"
+                )
             return []
 
         # Yandex returns TrackShort objects, we need to fetch full track info
@@ -294,6 +301,10 @@ class YandexMusicProvider(MusicProvider):
         for i in range(0, len(track_ids), batch_size):
             batch_ids = track_ids[i : i + batch_size]
             full_tracks.extend(await self.client.get_tracks(batch_ids))
+        if not full_tracks and track_ids:
+            raise ResourceTemporarilyUnavailable(
+                "Failed to load playlist tracks (timeout or error); please retry"
+            )
         tracks = []
         for track in full_tracks:
             try:

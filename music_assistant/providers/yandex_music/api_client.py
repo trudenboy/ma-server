@@ -301,6 +301,7 @@ class YandexMusicClient:
         :param user_id: User ID (owner of the playlist).
         :param playlist_id: Playlist ID (kind).
         :return: Playlist object or None if not found.
+        :raises ResourceTemporarilyUnavailable: On network errors.
         """
         client = self._ensure_connected()
         try:
@@ -308,7 +309,10 @@ class YandexMusicClient:
             if isinstance(result, list):
                 return result[0] if result else None
             return result
-        except (BadRequestError, NetworkError) as err:
+        except NetworkError as err:
+            LOGGER.warning("Network error fetching playlist %s/%s: %s", user_id, playlist_id, err)
+            raise ResourceTemporarilyUnavailable("Failed to fetch playlist") from err
+        except BadRequestError as err:
             LOGGER.error("Error fetching playlist %s/%s: %s", user_id, playlist_id, err)
             return None
 
