@@ -186,21 +186,22 @@ class YandexMusicClient:
 
         :param track_ids: List of track IDs.
         :return: List of track objects.
+        :raises ResourceTemporarilyUnavailable: On network errors after retry.
         """
         client = self._ensure_connected()
         try:
             result = await client.tracks(track_ids)
             return result or []
-        except (BadRequestError, NetworkError) as err:
-            err_str = str(err).lower()
-            if "timeout" in err_str or "timed out" in err_str:
-                LOGGER.warning("Fetching tracks timed out, retrying once: %s", err)
-                try:
-                    result = await client.tracks(track_ids)
-                    return result or []
-                except (BadRequestError, NetworkError) as retry_err:
-                    LOGGER.error("Error fetching tracks (retry failed): %s", retry_err)
-                    return []
+        except NetworkError as err:
+            # Retry once on network errors (timeout, disconnect, etc.)
+            LOGGER.warning("Network error fetching tracks, retrying once: %s", err)
+            try:
+                result = await client.tracks(track_ids)
+                return result or []
+            except NetworkError as retry_err:
+                LOGGER.error("Error fetching tracks (retry failed): %s", retry_err)
+                raise ResourceTemporarilyUnavailable("Failed to fetch tracks") from retry_err
+        except BadRequestError as err:
             LOGGER.error("Error fetching tracks: %s", err)
             return []
 
