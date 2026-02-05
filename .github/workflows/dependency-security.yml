@@ -4,10 +4,10 @@
 name: Dependency Security Check
 
 on:
-  pull_request:
+  pull_request_target:
     paths:
-      - 'requirements_all.txt'
-      - '**/manifest.json'
+      - "requirements_all.txt"
+      - "**/manifest.json"
     branches:
       - stable
       - dev
@@ -15,7 +15,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write  # Needed to post PR comments (PRs are issues in GitHub API)
+  issues: write # Needed to post PR comments
 
 jobs:
   security-check:
@@ -24,7 +24,8 @@ jobs:
       - name: Check out code from GitHub
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # Need full history for diff
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0 # Need full history for diff
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -231,6 +232,9 @@ jobs:
           fi
 
           cat security_report.md
+
+          # Add to GitHub job summary (always available, even for forks)
+          cat security_report.md >> $GITHUB_STEP_SUMMARY
 
       # Step 6: Post comment to PR
       - name: Post security report to PR
