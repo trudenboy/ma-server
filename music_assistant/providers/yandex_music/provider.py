@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import MediaType
@@ -63,6 +64,8 @@ class YandexMusicProvider(MusicProvider):
 
         self._client = YandexMusicClient(str(token))
         await self._client.connect()
+        # Suppress yandex_music library DEBUG dumps (full API request/response JSON)
+        logging.getLogger("yandex_music").setLevel(self.logger.level + 10)
         self._streaming = YandexMusicStreamingManager(self)
         self.logger.info("Successfully connected to Yandex Music")
 
