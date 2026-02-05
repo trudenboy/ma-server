@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import ContentType, MediaType, StreamType
@@ -57,6 +58,13 @@ class VKMusicProvider(MusicProvider):
 
         self._client = VKMusicClient(str(token))
         await self._client.connect()
+        # Prevent vkpymusic from writing its own log files into project logs/
+        vkpymusic_logger = logging.getLogger("vkpymusic")
+        for handler in list(vkpymusic_logger.handlers):
+            if isinstance(handler, logging.FileHandler):
+                vkpymusic_logger.removeHandler(handler)
+                handler.close()
+        vkpymusic_logger.setLevel(self.logger.level + 10)
         self.logger.info("Successfully connected to VK Music")
 
     async def unload(self, is_removed: bool = False) -> None:
