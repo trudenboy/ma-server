@@ -1,4 +1,4 @@
-"""API client wrapper for Yandex Music."""
+"""API client wrapper for KION Music (MTS Music)."""
 
 from __future__ import annotations
 
@@ -27,18 +27,18 @@ from .constants import DEFAULT_LIMIT
 # Prefer flac-mp4/aac-mp4 (Yandex API moved to these formats around 2025)
 GET_FILE_INFO_CODECS = "flac-mp4,flac,aac-mp4,aac,he-aac,mp3,he-aac-mp4"
 # get-file-info: same host as library (all requests go through one API)
-GET_FILE_INFO_BASE_URL = "https://api.music.yandex.net"
+GET_FILE_INFO_BASE_URL = "https://music.mts.ru/ya_api"
 
 LOGGER = logging.getLogger(__name__)
 
 
-class YandexMusicClient:
-    """Wrapper around yandex-music-api ClientAsync."""
+class KionMusicClient:
+    """Wrapper around yandex-music-api ClientAsync for KION Music."""
 
     def __init__(self, token: str) -> None:
-        """Initialize the Yandex Music client.
+        """Initialize the KION Music client.
 
-        :param token: Yandex Music OAuth token.
+        :param token: KION Music OAuth token.
         """
         self._token = token
         self._client: ClientAsync | None = None
@@ -62,12 +62,12 @@ class YandexMusicClient:
             if self._client.me is None or self._client.me.account is None:
                 raise LoginFailed("Failed to get account info")
             self._user_id = self._client.me.account.uid
-            LOGGER.debug("Connected to Yandex Music as user %s", self._user_id)
+            LOGGER.debug("Connected to KION Music as user %s", self._user_id)
             return True
         except UnauthorizedError as err:
-            raise LoginFailed("Invalid Yandex Music token") from err
+            raise LoginFailed("Invalid KION Music token") from err
         except NetworkError as err:
-            msg = "Network error connecting to Yandex Music"
+            msg = "Network error connecting to KION Music"
             raise ResourceTemporarilyUnavailable(msg) from err
 
     async def disconnect(self) -> None:
@@ -325,7 +325,6 @@ class YandexMusicClient:
         :param user_id: User ID (owner of the playlist).
         :param playlist_id: Playlist ID (kind).
         :return: Playlist object or None if not found.
-        :raises ResourceTemporarilyUnavailable: On network errors.
         """
         client = self._ensure_connected()
         try:
@@ -333,10 +332,7 @@ class YandexMusicClient:
             if isinstance(result, list):
                 return result[0] if result else None
             return result
-        except NetworkError as err:
-            LOGGER.warning("Network error fetching playlist %s/%s: %s", user_id, playlist_id, err)
-            raise ResourceTemporarilyUnavailable("Failed to fetch playlist") from err
-        except BadRequestError as err:
+        except (BadRequestError, NetworkError) as err:
             LOGGER.error("Error fetching playlist %s/%s: %s", user_id, playlist_id, err)
             return None
 
@@ -407,8 +403,8 @@ class YandexMusicClient:
                 getattr(err, "message", str(err)) or repr(err),
             )
             LOGGER.debug(
-                "If you have Yandex Music Plus and this track has lossless, "
-                "try a token from the web client (music.yandex.ru)."
+                "If you have KION Music Plus and this track has lossless, "
+                "try a token from the web client (music.mts.ru)."
             )
             params_raw = {**base_params, "transports": "raw"}
             try:
