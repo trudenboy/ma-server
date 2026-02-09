@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from music_assistant.providers.msx_bridge.provider import MSXBridgeProvider
@@ -53,13 +54,15 @@ async def test_handle_async_init_default_port(mass_mock: Mock, manifest_mock: Mo
 async def test_loaded_in_mass_starts_timeout_task(provider: MSXBridgeProvider) -> None:
     """loaded_in_mass should start idle timeout task and/or register default player."""
     mock_task = Mock()
-    provider.mass.create_task = Mock(return_value=mock_task)
+    object.__setattr__(provider.mass, "create_task", Mock(return_value=mock_task))
 
     await provider.loaded_in_mass()
 
     # Our impl: starts timeout task. MA-server bundled: may register default player.
-    assert provider.mass.create_task.called or provider.mass.players.register.called
-    if provider.mass.create_task.called:
+    create_task_mock = cast("Mock", provider.mass.create_task)
+    register_mock = cast("Mock", provider.mass.players.register)
+    assert create_task_mock.called or register_mock.called
+    if create_task_mock.called:
         assert provider._timeout_task is mock_task
 
 
@@ -71,18 +74,18 @@ async def test_unload_stops_server_first(provider: MSXBridgeProvider) -> None:
     mock_player = Mock()
     mock_player.display_name = "Test TV"
     mock_player.player_id = "msx_test"
-    provider.mass.players.all.return_value = [mock_player]
+    cast("Mock", provider.mass.players.all).return_value = [mock_player]
 
     await provider.unload()
 
     mock_server.stop.assert_awaited_once()
-    provider.mass.players.unregister.assert_awaited_once_with("msx_test")
+    cast("Mock", provider.mass.players.unregister).assert_awaited_once_with("msx_test")
 
 
 async def test_unload_no_server(provider: MSXBridgeProvider) -> None:
     """Unload should not crash when http_server is None."""
     provider.http_server = None
-    provider.mass.players.all.return_value = []
+    cast("Mock", provider.mass.players.all).return_value = []
 
     await provider.unload()  # should not raise
 

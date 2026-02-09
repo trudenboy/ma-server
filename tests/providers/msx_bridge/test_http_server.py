@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, patch
 from urllib.parse import quote
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+if TYPE_CHECKING:
+    from aiohttp.web import Application, Request
+
 from music_assistant.providers.msx_bridge.http_server import MSXHTTPServer
 from music_assistant.providers.msx_bridge.player import MSXPlayer
+from music_assistant.providers.msx_bridge.provider import MSXBridgeProvider
 
 # --- Bootstrap and CORS ---
 
 
-async def test_health(http_client: TestClient) -> None:
+async def test_health(http_client: TestClient[Request, Application]) -> None:
     """GET /health should return 200 with status ok."""
     resp = await http_client.get("/health")
     assert resp.status == 200
@@ -23,7 +29,7 @@ async def test_health(http_client: TestClient) -> None:
     assert data["provider"] == "msx_bridge"
 
 
-async def test_root_html(http_client: TestClient) -> None:
+async def test_root_html(http_client: TestClient[Request, Application]) -> None:
     """GET / should return 200 with text/html content."""
     resp = await http_client.get("/")
     assert resp.status == 200
@@ -32,7 +38,7 @@ async def test_root_html(http_client: TestClient) -> None:
     assert "MSX" in body
 
 
-async def test_start_json(http_client: TestClient) -> None:
+async def test_start_json(http_client: TestClient[Request, Application]) -> None:
     """GET /msx/start.json should return interaction mode config."""
     resp = await http_client.get("/msx/start.json")
     assert resp.status == 200
@@ -43,7 +49,7 @@ async def test_start_json(http_client: TestClient) -> None:
     assert "scripts" not in data
 
 
-async def test_plugin_html(http_client: TestClient) -> None:
+async def test_plugin_html(http_client: TestClient[Request, Application]) -> None:
     """GET /msx/plugin.html should return HTML with interaction plugin."""
     resp = await http_client.get("/msx/plugin.html")
     assert resp.status == 200
@@ -53,14 +59,14 @@ async def test_plugin_html(http_client: TestClient) -> None:
     assert "handleRequest" in body
 
 
-async def test_tvx_lib(http_client: TestClient) -> None:
+async def test_tvx_lib(http_client: TestClient[Request, Application]) -> None:
     """GET /msx/tvx-plugin-module.min.js should return JS library."""
     resp = await http_client.get("/msx/tvx-plugin-module.min.js")
     assert resp.status == 200
     assert "javascript" in resp.headers["Content-Type"]
 
 
-async def test_cors_headers(http_client: TestClient) -> None:
+async def test_cors_headers(http_client: TestClient[Request, Application]) -> None:
     """Responses should include CORS Access-Control-Allow-Origin header."""
     resp = await http_client.get("/health")
     assert resp.headers.get("Access-Control-Allow-Origin") == "*"
@@ -69,20 +75,20 @@ async def test_cors_headers(http_client: TestClient) -> None:
 # --- Stream proxy ---
 
 
-async def test_stream_player_not_found(http_client: TestClient) -> None:
+async def test_stream_player_not_found(http_client: TestClient[Request, Application]) -> None:
     """GET /stream/nonexistent should return 404."""
     resp = await http_client.get("/stream/nonexistent")
     assert resp.status == 404
 
 
-async def test_stream_no_media(provider: object, mass_mock: Mock) -> None:
+async def test_stream_no_media(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /stream/{id} should return 404 when player has no current media."""
     mock_player = Mock(spec=MSXPlayer)
     mock_player.current_media = None
     mass_mock.players.get.return_value = mock_player
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/stream/msx_test")
@@ -93,14 +99,14 @@ async def test_stream_no_media(provider: object, mass_mock: Mock) -> None:
         await client.close()
 
 
-async def test_stream_not_msx_player(provider: object, mass_mock: Mock) -> None:
+async def test_stream_not_msx_player(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /stream/{id} should return 400 for a non-MSX player."""
     # Return a plain Mock (not spec=MSXPlayer)
     non_msx_player = Mock()
     mass_mock.players.get.return_value = non_msx_player
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/stream/other_player")
@@ -112,7 +118,7 @@ async def test_stream_not_msx_player(provider: object, mass_mock: Mock) -> None:
 
 
 @pytest.mark.skip(reason="stream test hangs with TestClient/streaming on some platforms")
-async def test_stream_success(provider: object, mass_mock: Mock) -> None:
+async def test_stream_success(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /stream/{id} should stream audio via internal API."""
     mock_player = Mock(spec=MSXPlayer)
     mock_media = Mock()
@@ -128,7 +134,7 @@ async def test_stream_success(provider: object, mass_mock: Mock) -> None:
     mass_mock.streams.get_stream = Mock(return_value=_async_iter([b"pcm-data"]))
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         chunks = [b"encoded-chunk-1", b"encoded-chunk-2"]
@@ -149,7 +155,7 @@ async def test_stream_success(provider: object, mass_mock: Mock) -> None:
 # --- Library API ---
 
 
-async def test_albums(http_client: TestClient) -> None:
+async def test_albums(http_client: TestClient[Request, Application]) -> None:
     """GET /api/albums should return items list."""
     resp = await http_client.get("/api/albums")
     assert resp.status == 200
@@ -158,7 +164,7 @@ async def test_albums(http_client: TestClient) -> None:
     assert "total" in data
 
 
-async def test_albums_with_data(provider: object, mass_mock: Mock) -> None:
+async def test_albums_with_data(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /api/albums should format album data correctly."""
     album = Mock()
     album.item_id = 1
@@ -172,7 +178,7 @@ async def test_albums_with_data(provider: object, mass_mock: Mock) -> None:
     mass_mock.music.albums.library_items.return_value = mock_result
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/api/albums")
@@ -186,7 +192,7 @@ async def test_albums_with_data(provider: object, mass_mock: Mock) -> None:
         await client.close()
 
 
-async def test_album_tracks(http_client: TestClient) -> None:
+async def test_album_tracks(http_client: TestClient[Request, Application]) -> None:
     """GET /api/albums/{id}/tracks should return items list."""
     resp = await http_client.get("/api/albums/1/tracks")
     assert resp.status == 200
@@ -194,7 +200,7 @@ async def test_album_tracks(http_client: TestClient) -> None:
     assert "items" in data
 
 
-async def test_artists(http_client: TestClient) -> None:
+async def test_artists(http_client: TestClient[Request, Application]) -> None:
     """GET /api/artists should return items list."""
     resp = await http_client.get("/api/artists")
     assert resp.status == 200
@@ -203,7 +209,7 @@ async def test_artists(http_client: TestClient) -> None:
     assert "total" in data
 
 
-async def test_playlists(http_client: TestClient) -> None:
+async def test_playlists(http_client: TestClient[Request, Application]) -> None:
     """GET /api/playlists should return items list."""
     resp = await http_client.get("/api/playlists")
     assert resp.status == 200
@@ -212,7 +218,7 @@ async def test_playlists(http_client: TestClient) -> None:
     assert "total" in data
 
 
-async def test_tracks(http_client: TestClient) -> None:
+async def test_tracks(http_client: TestClient[Request, Application]) -> None:
     """GET /api/tracks should return items list."""
     resp = await http_client.get("/api/tracks")
     assert resp.status == 200
@@ -221,10 +227,10 @@ async def test_tracks(http_client: TestClient) -> None:
     assert "total" in data
 
 
-async def test_search(provider: object, mass_mock: Mock) -> None:
+async def test_search(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /api/search?q=test should return search results."""
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/api/search?q=test")
@@ -239,7 +245,7 @@ async def test_search(provider: object, mass_mock: Mock) -> None:
         await client.close()
 
 
-async def test_search_missing_query(http_client: TestClient) -> None:
+async def test_search_missing_query(http_client: TestClient[Request, Application]) -> None:
     """GET /api/search without q parameter should return 400."""
     resp = await http_client.get("/api/search")
     assert resp.status == 400
@@ -250,10 +256,10 @@ async def test_search_missing_query(http_client: TestClient) -> None:
 # --- Playback control ---
 
 
-async def test_play_track(provider: object, mass_mock: Mock) -> None:
+async def test_play_track(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """POST /api/play should call player_queues.play_media."""
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.post(
@@ -268,7 +274,7 @@ async def test_play_track(provider: object, mass_mock: Mock) -> None:
         await client.close()
 
 
-async def test_play_invalid_body(http_client: TestClient) -> None:
+async def test_play_invalid_body(http_client: TestClient[Request, Application]) -> None:
     """POST /api/play with invalid JSON should return 400."""
     resp = await http_client.post(
         "/api/play",
@@ -278,10 +284,10 @@ async def test_play_invalid_body(http_client: TestClient) -> None:
     assert resp.status == 400
 
 
-async def test_pause(provider: object, mass_mock: Mock) -> None:
+async def test_pause(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """POST /api/pause/{id} should call cmd_pause."""
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.post("/api/pause/msx_test")
@@ -291,10 +297,10 @@ async def test_pause(provider: object, mass_mock: Mock) -> None:
         await client.close()
 
 
-async def test_stop(provider: object, mass_mock: Mock) -> None:
+async def test_stop(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """POST /api/stop/{id} should call cmd_stop."""
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.post("/api/stop/msx_test")
@@ -351,7 +357,7 @@ def _make_playlist_mock(item_id: int = 1, name: str = "Test Playlist") -> Mock:
     return playlist
 
 
-async def test_msx_albums_have_action(provider: object, mass_mock: Mock) -> None:
+async def test_msx_albums_have_action(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/albums.json items should have content: action for drill-down."""
     album = _make_album_mock()
     mock_result = Mock()
@@ -359,7 +365,7 @@ async def test_msx_albums_have_action(provider: object, mass_mock: Mock) -> None
     mass_mock.music.albums.library_items.return_value = mock_result
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/albums.json")
@@ -373,7 +379,7 @@ async def test_msx_albums_have_action(provider: object, mass_mock: Mock) -> None
         await client.close()
 
 
-async def test_msx_artists_have_action(provider: object, mass_mock: Mock) -> None:
+async def test_msx_artists_have_action(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/artists.json items should have content: action for drill-down."""
     artist = _make_artist_mock()
     mock_result = Mock()
@@ -381,7 +387,7 @@ async def test_msx_artists_have_action(provider: object, mass_mock: Mock) -> Non
     mass_mock.music.artists.library_items.return_value = mock_result
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/artists.json")
@@ -395,7 +401,7 @@ async def test_msx_artists_have_action(provider: object, mass_mock: Mock) -> Non
         await client.close()
 
 
-async def test_msx_playlists_have_action(provider: object, mass_mock: Mock) -> None:
+async def test_msx_playlists_have_action(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/playlists.json items should have content: action for drill-down."""
     playlist = _make_playlist_mock()
     mock_result = Mock()
@@ -403,7 +409,7 @@ async def test_msx_playlists_have_action(provider: object, mass_mock: Mock) -> N
     mass_mock.music.playlists.library_items.return_value = mock_result
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/playlists.json")
@@ -417,7 +423,7 @@ async def test_msx_playlists_have_action(provider: object, mass_mock: Mock) -> N
         await client.close()
 
 
-async def test_msx_tracks_have_action(provider: object, mass_mock: Mock) -> None:
+async def test_msx_tracks_have_action(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/tracks.json items should have audio: action for playback."""
     track = _make_track_mock()
     mock_result = Mock()
@@ -425,7 +431,7 @@ async def test_msx_tracks_have_action(provider: object, mass_mock: Mock) -> None
     mass_mock.music.tracks.library_items.return_value = mock_result
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/tracks.json")
@@ -445,13 +451,13 @@ async def test_msx_tracks_have_action(provider: object, mass_mock: Mock) -> None
 # --- MSX detail pages ---
 
 
-async def test_msx_album_tracks(provider: object, mass_mock: Mock) -> None:
+async def test_msx_album_tracks(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/albums/{id}/tracks.json should return tracks with audio actions."""
     track = _make_track_mock()
     mass_mock.music.albums.tracks.return_value = [track]
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/albums/1/tracks.json")
@@ -467,13 +473,13 @@ async def test_msx_album_tracks(provider: object, mass_mock: Mock) -> None:
         await client.close()
 
 
-async def test_msx_artist_albums(provider: object, mass_mock: Mock) -> None:
+async def test_msx_artist_albums(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/artists/{id}/albums.json should return albums with content actions."""
     album = _make_album_mock()
     mass_mock.music.artists.albums.return_value = [album]
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/artists/1/albums.json")
@@ -489,11 +495,11 @@ async def test_msx_artist_albums(provider: object, mass_mock: Mock) -> None:
         await client.close()
 
 
-async def test_msx_playlist_tracks(provider: object, mass_mock: Mock) -> None:
+async def test_msx_playlist_tracks(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/playlists/{id}/tracks.json should return tracks with audio actions."""
     track = _make_track_mock()
 
-    async def _mock_playlist_tracks(*_args: object, **_kwargs: object):
+    async def _mock_playlist_tracks(*_args: object, **_kwargs: object) -> AsyncIterator[Any]:
         yield track
 
     mass_mock.music.playlists.tracks = Mock(
@@ -501,7 +507,7 @@ async def test_msx_playlist_tracks(provider: object, mass_mock: Mock) -> None:
     )
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/playlists/1/tracks.json")
@@ -519,7 +525,7 @@ async def test_msx_playlist_tracks(provider: object, mass_mock: Mock) -> None:
 # --- MSX audio endpoint ---
 
 
-async def test_msx_audio_missing_uri(http_client: TestClient) -> None:
+async def test_msx_audio_missing_uri(http_client: TestClient[Request, Application]) -> None:
     """GET /msx/audio/msx_default without ?uri= should return 400."""
     resp = await http_client.get("/msx/audio/msx_default")
     assert resp.status == 400
@@ -527,19 +533,19 @@ async def test_msx_audio_missing_uri(http_client: TestClient) -> None:
     assert "Missing uri" in body
 
 
-async def test_msx_audio_player_not_found(http_client: TestClient) -> None:
+async def test_msx_audio_player_not_found(http_client: TestClient[Request, Application]) -> None:
     """GET /msx/audio/nonexistent?uri=x should return 404."""
     resp = await http_client.get("/msx/audio/nonexistent?uri=library://track/1")
     assert resp.status == 404
 
 
-async def test_msx_audio_not_msx_player(provider: object, mass_mock: Mock) -> None:
+async def test_msx_audio_not_msx_player(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
     """GET /msx/audio/{id}?uri=x should return 400 for non-MSX player."""
     non_msx_player = Mock()
     mass_mock.players.get.return_value = non_msx_player
 
     server = MSXHTTPServer(provider, 0)
-    client = TestClient(TestServer(server.app))
+    client: TestClient[Request, Application] = TestClient(TestServer(server.app))
     await client.start_server()
     try:
         resp = await client.get("/msx/audio/other?uri=library://track/1")
@@ -553,7 +559,7 @@ async def test_msx_audio_not_msx_player(provider: object, mass_mock: Mock) -> No
 # --- Duration in track formatting ---
 
 
-def test_format_msx_track_includes_duration(provider: object) -> None:
+def test_format_msx_track_includes_duration(provider: MSXBridgeProvider) -> None:
     """_format_msx_track should include duration in label."""
     server = MSXHTTPServer(provider, 0)
     track = _make_track_mock()  # duration=180
@@ -564,7 +570,7 @@ def test_format_msx_track_includes_duration(provider: object) -> None:
     assert item["background"] == item["image"]
 
 
-def test_format_msx_track_no_duration(provider: object) -> None:
+def test_format_msx_track_no_duration(provider: MSXBridgeProvider) -> None:
     """_format_msx_track should handle zero/missing duration gracefully."""
     server = MSXHTTPServer(provider, 0)
     track = _make_track_mock()
@@ -573,7 +579,7 @@ def test_format_msx_track_no_duration(provider: object) -> None:
     assert item["label"] == "Test Artist"
 
 
-def test_format_msx_track_duration_only(provider: object) -> None:
+def test_format_msx_track_duration_only(provider: MSXBridgeProvider) -> None:
     """_format_msx_track should show only duration when no artist."""
     server = MSXHTTPServer(provider, 0)
     track = _make_track_mock()
@@ -585,7 +591,7 @@ def test_format_msx_track_duration_only(provider: object) -> None:
 # --- Async iteration helpers for stream mocking ---
 
 
-async def _async_iter(items: list) -> None:
+async def _async_iter(items: list[bytes]) -> AsyncIterator[bytes]:
     """Async generator helper for mocking iter_chunked."""
     for item in items:
         yield item
