@@ -11,13 +11,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from music_assistant_models.config_entries import ConfigEntry
-from music_assistant_models.enums import ConfigEntryType
+from music_assistant_models.enums import ConfigEntryType, ProviderFeature
 
 from .constants import (
+    CONF_ABORT_STREAM_FIRST,
     CONF_HTTP_PORT,
     CONF_OUTPUT_FORMAT,
     CONF_PLAYER_IDLE_TIMEOUT,
     CONF_SHOW_STOP_NOTIFICATION,
+    DEFAULT_ABORT_STREAM_FIRST,
     DEFAULT_HTTP_PORT,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_PLAYER_IDLE_TIMEOUT,
@@ -27,13 +29,12 @@ from .provider import MSXBridgeProvider
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
-    from music_assistant_models.enums import ProviderFeature
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
 
-SUPPORTED_FEATURES: set[ProviderFeature] = set()
+SUPPORTED_FEATURES: set[ProviderFeature] = {ProviderFeature.SYNC_PLAYERS}
 
 
 async def setup(
@@ -82,5 +83,16 @@ async def get_config_entries(
             required=False,
             default_value=DEFAULT_SHOW_STOP_NOTIFICATION,
             description="Show confirmation dialog on MSX when stopping playback from MA.",
+        ),
+        ConfigEntry(
+            key=CONF_ABORT_STREAM_FIRST,
+            type=ConfigEntryType.BOOLEAN,
+            label="Abort stream before broadcast stop",
+            required=False,
+            default_value=DEFAULT_ABORT_STREAM_FIRST,
+            description=(
+                "When stopping: abort stream first, then send WebSocket stop. "
+                "May stop playback faster on some TVs."
+            ),
         ),
     )
