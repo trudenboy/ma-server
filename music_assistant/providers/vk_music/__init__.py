@@ -1,20 +1,17 @@
-"""Yandex Music provider support for Music Assistant."""
+"""VK Music provider support for Music Assistant."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
+from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
 from music_assistant_models.enums import ConfigEntryType, ProviderFeature
 
 from .constants import (
     CONF_ACTION_CLEAR_AUTH,
-    CONF_QUALITY,
     CONF_TOKEN,
-    QUALITY_HIGH,
-    QUALITY_LOSSLESS,
 )
-from .provider import YandexMusicProvider
+from .provider import VKMusicProvider
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ProviderConfig
@@ -25,18 +22,10 @@ if TYPE_CHECKING:
 
 
 SUPPORTED_FEATURES = {
-    ProviderFeature.LIBRARY_ARTISTS,
-    ProviderFeature.LIBRARY_ALBUMS,
     ProviderFeature.LIBRARY_TRACKS,
     ProviderFeature.LIBRARY_PLAYLISTS,
-    ProviderFeature.ARTIST_ALBUMS,
-    ProviderFeature.ARTIST_TOPTRACKS,
     ProviderFeature.SEARCH,
-    ProviderFeature.LIBRARY_ARTISTS_EDIT,
-    ProviderFeature.LIBRARY_ALBUMS_EDIT,
-    ProviderFeature.LIBRARY_TRACKS_EDIT,
     ProviderFeature.BROWSE,
-    ProviderFeature.SIMILAR_TRACKS,
     ProviderFeature.RECOMMENDATIONS,
 }
 
@@ -45,7 +34,7 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return YandexMusicProvider(mass, manifest, config, SUPPORTED_FEATURES)
+    return VKMusicProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
 async def get_config_entries(
@@ -69,9 +58,9 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Yandex Music Token",
-            description="Enter your Yandex Music OAuth token. "
-            "See the documentation for how to obtain it.",
+            label="VK Music Token",
+            description="Enter your VK Music access token. "
+            "Use vkpymusic TokenReceiver with direct login to obtain a valid token.",
             required=True,
             hidden=is_authenticated,
             value=cast("str", values.get(CONF_TOKEN)) if values else None,
@@ -83,16 +72,5 @@ async def get_config_entries(
             description="Clear the current authentication details.",
             action=CONF_ACTION_CLEAR_AUTH,
             hidden=not is_authenticated,
-        ),
-        ConfigEntry(
-            key=CONF_QUALITY,
-            type=ConfigEntryType.STRING,
-            label="Audio quality",
-            description="Select preferred audio quality.",
-            options=[
-                ConfigValueOption("High (320 kbps)", QUALITY_HIGH),
-                ConfigValueOption("Lossless (FLAC)", QUALITY_LOSSLESS),
-            ],
-            default_value=QUALITY_HIGH,
         ),
     )
