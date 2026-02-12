@@ -38,15 +38,19 @@ from .constants import (
     CONF_BASE_URL,
     CONF_BROWSE_INITIAL_TRACKS,
     CONF_DISCOVERY_INITIAL_TRACKS,
+    CONF_ENABLE_LIKED_TRACKS_BROWSE,
+    CONF_ENABLE_LIKED_TRACKS_PLAYLIST,
     CONF_ENABLE_MY_WAVE_BROWSE,
     CONF_ENABLE_MY_WAVE_PLAYLIST,
     CONF_ENABLE_MY_WAVE_RADIO,
     CONF_ENABLE_RECOMMENDATIONS,
+    CONF_LIKED_TRACKS_MAX_TRACKS,
     CONF_MY_WAVE_BATCH_SIZE,
     CONF_MY_WAVE_MAX_TRACKS,
     CONF_TOKEN,
     CONF_TRACK_BATCH_SIZE,
     DEFAULT_BASE_URL,
+    LIKED_TRACKS_PLAYLIST_ID,
     MY_WAVE_PLAYLIST_ID,
     PLAYLIST_ID_SPLITTER,
     RADIO_TRACK_ID_SEP,
@@ -316,7 +320,10 @@ class YandexMusicProvider(MusicProvider):
                     is_playable=True,
                 )
             )
-        if ProviderFeature.LIBRARY_TRACKS in self.supported_features:
+        # Only add Liked Tracks folder if enabled
+        if ProviderFeature.LIBRARY_TRACKS in self.supported_features and self.config.get_value(
+            CONF_ENABLE_LIKED_TRACKS_BROWSE, True
+        ):
             folders.append(
                 BrowseFolder(
                     item_id="tracks",
@@ -455,10 +462,11 @@ class YandexMusicProvider(MusicProvider):
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get playlist details by ID.
 
-        Supports virtual playlist MY_WAVE_PLAYLIST_ID (My Wave). Real playlists
-        use format "owner_id:kind".
+        Supports virtual playlists MY_WAVE_PLAYLIST_ID (My Wave) and
+        LIKED_TRACKS_PLAYLIST_ID (Liked Tracks). Real playlists use format "owner_id:kind".
 
-        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind" or my_wave).
+        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind",
+            my_wave, or liked_tracks).
         :return: Playlist object.
         :raises MediaNotFoundError: If playlist not found.
         """
@@ -472,6 +480,24 @@ class YandexMusicProvider(MusicProvider):
                 provider_mappings={
                     ProviderMapping(
                         item_id=MY_WAVE_PLAYLIST_ID,
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                        is_unique=True,
+                    )
+                },
+                is_editable=False,
+            )
+
+        if prov_playlist_id == LIKED_TRACKS_PLAYLIST_ID:
+            names = self._get_browse_names()
+            return Playlist(
+                item_id=LIKED_TRACKS_PLAYLIST_ID,
+                provider=self.instance_id,
+                name=names["tracks"],
+                owner="Yandex Music",
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=LIKED_TRACKS_PLAYLIST_ID,
                         provider_domain=self.domain,
                         provider_instance=self.instance_id,
                         is_unique=True,
@@ -559,6 +585,79 @@ class YandexMusicProvider(MusicProvider):
                 self.logger.debug("Error parsing My Wave track: %s", err)
         if first_track_id_this_batch is not None:
             self._my_wave_playlist_next_cursor = first_track_id_this_batch
+        return tracks
+
+    async def _get_liked_tracks_playlist_tracks(self, page: int) -> list[Track]:
+        """Get liked tracks for virtual playlist (sorted in reverse chronological order).
+
+        :param page: Page number (0 = all tracks limited by config, >0 = empty for pagination).
+        :return: List of Track objects.
+        """
+        self.logger.debug(f"_get_liked_tracks_playlist_tracks called with page={page}")
+        # Liked tracks API returns all tracks at once, so only return tracks on page 0
+        if page > 0:
+            self.logger.debug("Returning empty list for page > 0")
+            return []
+
+        max_tracks_config = int(
+            self.config.get_value(CONF_LIKED_TRACKS_MAX_TRACKS) or 500  # type: ignore[arg-type]
+        )
+        self.logger.debug(f"Max tracks config: {max_tracks_config}")
+
+        # Fetch liked tracks (already sorted in reverse chronological order by api_client)
+        track_shorts = await self.client.get_liked_tracks()
+        self.logger.debug(f"Got {len(track_shorts)} liked tracks from API")
+        if not track_shorts:
+            self.logger.warning("No liked tracks found!")
+            return []
+
+        # Apply max tracks limit
+        track_shorts = track_shorts[:max_tracks_config]
+        self.logger.debug(f"After limit, processing {len(track_shorts)} tracks")
+
+        # Fetch full track details in batches
+        track_ids = [str(ts.track_id) for ts in track_shorts if ts.track_id]
+        self.logger.debug(f"Extracted {len(track_ids)} track IDs. First 3: {track_ids[:3]}")
+
+        batch_size = int(
+            self.config.get_value(CONF_TRACK_BATCH_SIZE) or 50  # type: ignore[arg-type]
+        )
+        full_tracks = []
+        batch_to_ids = {}  # Map batch results back to original compound IDs
+        for i in range(0, len(track_ids), batch_size):
+            batch_ids = track_ids[i : i + batch_size]
+            self.logger.debug(f"Fetching batch {i // batch_size + 1}: {len(batch_ids)} tracks")
+            batch_result = await self.client.get_tracks(batch_ids)
+            self.logger.debug(f"Batch returned {len(batch_result)} tracks")
+            # Map each returned track back to its original compound ID
+            for j, track in enumerate(batch_result):
+                if j < len(batch_ids):
+                    batch_to_ids[str(track.id) if hasattr(track, "id") else None] = batch_ids[j]
+            full_tracks.extend(batch_result)
+
+        self.logger.debug(f"Total full_tracks fetched: {len(full_tracks)}")
+
+        # Create track ID to full track mapping using compound IDs
+        track_map = {}
+        for t in full_tracks:
+            if hasattr(t, "id") and t.id:
+                # Use the compound ID from our mapping
+                compound_id = batch_to_ids.get(str(t.id), str(t.id))
+                track_map[compound_id] = t
+        self.logger.debug(f"Created track_map with {len(track_map)} entries")
+
+        # Parse tracks in the original order (reverse chronological)
+        tracks = []
+        for track_id in track_ids:
+            if track_id in track_map:
+                try:
+                    tracks.append(parse_track(self, track_map[track_id]))
+                except InvalidDataError as err:
+                    self.logger.debug(f"Error parsing liked track {track_id}: {err}")
+            else:
+                self.logger.debug(f"Track ID {track_id} not found in track_map")
+
+        self.logger.debug(f"Successfully parsed {len(tracks)} tracks")
         return tracks
 
     # Get related items
@@ -696,12 +795,24 @@ class YandexMusicProvider(MusicProvider):
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
         """Get playlist tracks.
 
-        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind" or my_wave).
+        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind",
+            my_wave, or liked_tracks).
         :param page: Page number for pagination.
         :return: List of Track objects.
         """
+        self.logger.info(
+            f"get_playlist_tracks called: prov_playlist_id={prov_playlist_id}, page={page}"
+        )
+
         if prov_playlist_id == MY_WAVE_PLAYLIST_ID:
+            self.logger.info("Fetching My Wave tracks")
             return await self._get_my_wave_playlist_tracks(page)
+
+        if prov_playlist_id == LIKED_TRACKS_PLAYLIST_ID:
+            self.logger.info("Fetching Liked Tracks for virtual playlist")
+            result = await self._get_liked_tracks_playlist_tracks(page)
+            self.logger.info(f"Liked Tracks playlist returned {len(result)} tracks")
+            return result
 
         # Yandex Music API returns all playlist tracks in one call (no server-side pagination).
         # Return empty list for page > 0 so the controller pagination loop terminates.
@@ -860,11 +971,19 @@ class YandexMusicProvider(MusicProvider):
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Retrieve library playlists from Yandex Music.
 
-        Includes the virtual My Wave playlist first (if enabled), then user playlists.
+        Includes virtual playlists (My Wave and Liked Tracks if enabled), then user playlists.
         """
-        # Only include My Wave playlist if enabled
-        if self.config.get_value(CONF_ENABLE_MY_WAVE_PLAYLIST, True):
+        # Include My Wave playlist if enabled
+        my_wave_enabled = self.config.get_value(CONF_ENABLE_MY_WAVE_PLAYLIST, True)
+        self.logger.debug(f"My Wave playlist enabled: {my_wave_enabled}")
+        if my_wave_enabled:
             yield await self.get_playlist(MY_WAVE_PLAYLIST_ID)
+        # Include Liked Tracks playlist if enabled
+        liked_tracks_enabled = self.config.get_value(CONF_ENABLE_LIKED_TRACKS_PLAYLIST, True)
+        self.logger.debug(f"Liked Tracks playlist enabled: {liked_tracks_enabled}")
+        if liked_tracks_enabled:
+            self.logger.debug(f"Yielding Liked Tracks playlist with ID: {LIKED_TRACKS_PLAYLIST_ID}")
+            yield await self.get_playlist(LIKED_TRACKS_PLAYLIST_ID)
         playlists = await self.client.get_user_playlists()
         for playlist in playlists:
             try:
