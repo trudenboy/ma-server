@@ -3,7 +3,7 @@
   "domain": "kion_music",
   "stage": "beta",
   "name": "KION Music",
-  "description": "Stream music from KION Music (MTS) service",
+  "description": "Stream music from KION Music (MTS) service.",
   "codeowners": ["@TrudenBoy"],
   "documentation": "https://beta.music-assistant.io/music-providers/kion-music/",
   "requirements": ["yandex-music==2.2.0"],
