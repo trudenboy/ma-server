@@ -200,7 +200,7 @@ async def get_config_entries(
             label="API Base URL",
             description="API endpoint base URL. "
             "Only change if KION Music changes their API endpoint. "
-            "Default: https://music.mts.ru/ya_proxy_api",
+            "Default: https://api.music.yandex.net",
             default_value=DEFAULT_BASE_URL,
             required=False,
             advanced=True,
