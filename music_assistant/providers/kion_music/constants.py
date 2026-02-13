@@ -21,9 +21,11 @@ LABEL_AUTH_INSTRUCTIONS = "auth_instructions_label"
 DEFAULT_LIMIT: Final[int] = 50
 DEFAULT_BASE_URL: Final[str] = "https://music.mts.ru/ya_proxy_api"
 
-# Quality options
-QUALITY_HIGH = "high"
-QUALITY_LOSSLESS = "lossless"
+# Quality options (matching reference implementation)
+QUALITY_EFFICIENT = "efficient"  # Low quality, efficient bandwidth (~64kbps AAC)
+QUALITY_BALANCED = "balanced"  # Medium quality, balanced performance (~192kbps AAC)
+QUALITY_HIGH = "high"  # High quality, lossy (~320kbps MP3)
+QUALITY_SUPERB = "superb"  # Highest quality, lossless (FLAC)
 
 # Configuration keys for My Mix behavior
 CONF_MY_MIX_MAX_TRACKS: Final[str] = "my_mix_max_tracks"
@@ -35,6 +37,11 @@ CONF_ENABLE_RECOMMENDATIONS: Final[str] = "enable_recommendations"
 CONF_ENABLE_MY_MIX_BROWSE: Final[str] = "enable_my_mix_browse"
 CONF_ENABLE_MY_MIX_PLAYLIST: Final[str] = "enable_my_mix_playlist"
 CONF_ENABLE_MY_MIX_RADIO: Final[str] = "enable_my_mix_radio"
+
+# Configuration keys for Liked Tracks behavior
+CONF_LIKED_TRACKS_MAX_TRACKS: Final[str] = "liked_tracks_max_tracks"
+CONF_ENABLE_LIKED_TRACKS_BROWSE: Final[str] = "enable_liked_tracks_browse"
+CONF_ENABLE_LIKED_TRACKS_PLAYLIST: Final[str] = "enable_liked_tracks_playlist"
 
 # Image sizes
 IMAGE_SIZE_SMALL = "200x200"
@@ -49,6 +56,9 @@ ROTOR_STATION_MY_MIX: Final[str] = "user:onyourwave"
 
 # Virtual playlist ID for My Mix (used in get_playlist / get_playlist_tracks; not owner_id:kind)
 MY_MIX_PLAYLIST_ID: Final[str] = "my_mix"
+
+# Virtual playlist ID for Liked Tracks
+LIKED_TRACKS_PLAYLIST_ID: Final[str] = "liked_tracks"
 
 # Composite item_id for My Mix tracks: track_id + separator + station_id (for rotor feedback)
 RADIO_TRACK_ID_SEP: Final[str] = "@"
