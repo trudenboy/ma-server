@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
+from Crypto.Cipher import AES
 from music_assistant_models.enums import ContentType, StreamType
 from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import AudioFormat
 from music_assistant_models.streamdetails import StreamDetails
 
-from .constants import CONF_QUALITY, QUALITY_LOSSLESS, RADIO_TRACK_ID_SEP
+from .constants import (
+    CONF_QUALITY,
+    QUALITY_EFFICIENT,
+    QUALITY_SUPERB,
+    RADIO_TRACK_ID_SEP,
+)
 
 if TYPE_CHECKING:
     from yandex_music import DownloadInfo
@@ -51,9 +59,13 @@ class KionMusicStreamingManager:
         quality = self.provider.config.get_value(CONF_QUALITY)
         quality_str = str(quality) if quality is not None else None
         preferred_normalized = (quality_str or "").strip().lower()
-        want_lossless = (
-            QUALITY_LOSSLESS in preferred_normalized or preferred_normalized == QUALITY_LOSSLESS
-        )
+
+        # Check for superb (lossless) quality
+        want_lossless = preferred_normalized in (QUALITY_SUPERB, "superb")
+
+        # Backward compatibility: also check old "lossless" value
+        if "lossless" in preferred_normalized:
+            want_lossless = True
 
         # When user wants lossless, try get-file-info first (FLAC; download-info often MP3 only)
         if want_lossless:
@@ -62,10 +74,41 @@ class KionMusicStreamingManager:
             if file_info:
                 url = file_info.get("url")
                 codec = file_info.get("codec") or ""
+                needs_decryption = file_info.get("needs_decryption", False)
+
                 if url and codec.lower() in ("flac", "flac-mp4"):
                     content_type = self._get_content_type(codec)
+
+                    # Handle encrypted URLs from encraw transport
+                    if needs_decryption and "key" in file_info:
+                        self.logger.info(
+                            "Streaming encrypted FLAC for track %s (codec=%s) - "
+                            "will decrypt on-the-fly",
+                            track_id,
+                            codec,
+                        )
+                        # Return StreamType.CUSTOM for streaming decryption
+                        # Store encrypted URL and decryption key in data for get_audio_stream
+                        return StreamDetails(
+                            item_id=item_id,
+                            provider=self.provider.instance_id,
+                            audio_format=AudioFormat(
+                                content_type=content_type,
+                                bit_rate=0,  # FLAC is variable bitrate
+                            ),
+                            stream_type=StreamType.CUSTOM,
+                            duration=track.duration,
+                            data={
+                                "encrypted_url": url,
+                                "decryption_key": file_info["key"],
+                                "codec": codec,
+                            },
+                            can_seek=False,  # Seeking not supported in streaming mode
+                            allow_seek=False,
+                        )
+                    # Unencrypted URL, use directly
                     self.logger.debug(
-                        "Stream selected for track %s via get-file-info: codec=%s",
+                        "Unencrypted stream for track %s: codec=%s",
                         item_id,
                         codec,
                     )
@@ -129,20 +172,16 @@ class KionMusicStreamingManager:
     def _select_best_quality(
         self, download_infos: list[Any], preferred_quality: str | None
     ) -> DownloadInfo | None:
-        """Select the best quality download info.
+        """Select the best quality download info based on user preference.
 
         :param download_infos: List of DownloadInfo objects.
-        :param preferred_quality: User's preferred quality (e.g. "lossless" or "Lossless (FLAC)").
+        :param preferred_quality: User's quality preference (efficient/balanced/superb).
         :return: Best matching DownloadInfo or None.
         """
         if not download_infos:
             return None
 
-        # Normalize so we accept "lossless", "Lossless (FLAC)", etc.
         preferred_normalized = (preferred_quality or "").strip().lower()
-        want_lossless = (
-            QUALITY_LOSSLESS in preferred_normalized or preferred_normalized == QUALITY_LOSSLESS
-        )
 
         # Sort by bitrate descending
         sorted_infos = sorted(
@@ -151,18 +190,47 @@ class KionMusicStreamingManager:
             reverse=True,
         )
 
-        # If user wants lossless, prefer flac-mp4 then flac (API formats ~2025)
-        if want_lossless:
+        # Superb: Prefer FLAC (backward compatibility with "lossless")
+        if preferred_normalized == QUALITY_SUPERB or "lossless" in preferred_normalized:
             for codec in ("flac-mp4", "flac"):
                 for info in sorted_infos:
                     if info.codec and info.codec.lower() == codec:
                         return info
             self.logger.warning(
-                "Lossless (FLAC) requested but no FLAC in API response for this "
-                "track; using best available"
+                "Superb quality (FLAC) requested but not available; using best available"
             )
+            return sorted_infos[0]
 
-        # Return highest bitrate
+        # Efficient: Prefer lowest bitrate AAC/MP3
+        if preferred_normalized == QUALITY_EFFICIENT:
+            # Sort ascending for lowest bitrate
+            sorted_infos_asc = sorted(
+                download_infos,
+                key=lambda x: x.bitrate_in_kbps or 999,
+            )
+            # Prefer AAC for efficiency, then MP3
+            for codec in ("aac", "he-aac", "mp3"):
+                for info in sorted_infos_asc:
+                    if info.codec and info.codec.lower() == codec:
+                        return info
+            return sorted_infos_asc[0]
+
+        # Balanced (default): Prefer ~192kbps AAC, or medium quality MP3
+        # Look for bitrate around 192kbps (within range 128-256)
+        balanced_infos = [
+            info
+            for info in sorted_infos
+            if info.bitrate_in_kbps and 128 <= info.bitrate_in_kbps <= 256
+        ]
+        if balanced_infos:
+            # Prefer AAC over MP3 at similar bitrate
+            for codec in ("aac", "mp3"):
+                for info in balanced_infos:
+                    if info.codec and info.codec.lower() == codec:
+                        return info
+            return balanced_infos[0]
+
+        # Fallback to highest available if no balanced option
         return sorted_infos[0] if sorted_infos else None
 
     def _get_content_type(self, codec: str | None) -> ContentType:
@@ -183,3 +251,79 @@ class KionMusicStreamingManager:
             return ContentType.AAC
 
         return ContentType.UNKNOWN
+
+    async def get_audio_stream(
+        self, streamdetails: StreamDetails, seek_position: int = 0
+    ) -> AsyncGenerator[bytes, None]:
+        """Return the audio stream for the provider item with on-the-fly decryption.
+
+        This method streams encrypted FLAC data from KION Music and decrypts it
+        incrementally using AES-256 CTR mode, yielding decrypted chunks without
+        saving to disk.
+
+        :param streamdetails: Stream details containing encrypted URL and key.
+        :param seek_position: Seek position (not supported for encrypted streams).
+        :return: Async generator yielding decrypted audio bytes.
+        """
+        encrypted_url = streamdetails.data["encrypted_url"]
+        key_hex = streamdetails.data["decryption_key"]
+        codec = streamdetails.data.get("codec", "flac")
+
+        self.logger.info(
+            "Starting streaming decryption for track %s (codec=%s)",
+            streamdetails.item_id,
+            codec,
+        )
+
+        # Prepare AES-256 CTR cipher for incremental decryption
+        # Key is HEX-encoded, nonce is 12-byte null vector
+        key_bytes = bytes.fromhex(key_hex)
+        nonce = bytes(12)  # 12-byte null nonce
+
+        # Create AES CTR cipher (PyCrypto supports 12-byte nonce)
+        cipher = AES.new(key=key_bytes, nonce=nonce, mode=AES.MODE_CTR)
+
+        self.logger.debug(
+            "Cipher initialized: key_length=%d bytes, nonce_length=%d bytes",
+            len(key_bytes),
+            len(nonce),
+        )
+
+        # Stream encrypted data in chunks and decrypt on-the-fly
+        chunk_size = 65536  # 64KB chunks for efficient streaming
+        total_bytes = 0
+        timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=600)
+
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(encrypted_url, timeout=timeout) as response,
+            ):
+                if response.status != 200:
+                    msg = f"Failed to stream encrypted track: HTTP {response.status}"
+                    self.logger.error(msg)
+                    raise MediaNotFoundError(msg)
+
+                self.logger.debug("Started streaming from %s", encrypted_url[:100])
+
+                # Stream and decrypt chunks
+                async for encrypted_chunk in response.content.iter_chunked(chunk_size):
+                    # Decrypt chunk using AES CTR
+                    # CTR mode allows incremental decryption as counter auto-increments
+                    decrypted_chunk = cipher.decrypt(encrypted_chunk)
+                    total_bytes += len(decrypted_chunk)
+                    yield decrypted_chunk
+
+                self.logger.info(
+                    "Completed streaming decryption for track %s: %d bytes total",
+                    streamdetails.item_id,
+                    total_bytes,
+                )
+
+        except Exception as err:
+            self.logger.exception(
+                "Error during streaming decryption for track %s: %s",
+                streamdetails.item_id,
+                err,
+            )
+            raise
