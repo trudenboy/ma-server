@@ -309,8 +309,8 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
             headline="Albums",
             template=MsxTemplate(
                 type="separate",
-                layout="0,0,2,4",
-                image_filler="default",
+                layout="0,0,3,4",
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No albums found")],
         )
@@ -329,9 +329,8 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
             headline="Artists",
             template=MsxTemplate(
                 type="separate",
-                layout="0,0,2,4",
-                icon="msx-white-soft:person",
-                image_filler="default",
+                layout="0,0,2,3",
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No artists found")],
         )
@@ -352,9 +351,8 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
             headline="Playlists",
             template=MsxTemplate(
                 type="separate",
-                layout="0,0,2,4",
-                icon="msx-white-soft:playlist-play",
-                image_filler="default",
+                layout="0,0,3,4",
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No playlists found")],
         )
@@ -384,10 +382,10 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         content = MsxContent(
             headline="Tracks",
             template=MsxTemplate(
-                type="separate",
-                layout="0,0,2,4",
-                icon="msx-white-soft:audiotrack",
-                image_filler="default",
+                type="default",
+                layout="0,0,6,1",
+                image_width=0.83,
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No tracks found")],
         )
@@ -416,10 +414,10 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         content = MsxContent(
             headline="Recently played",
             template=MsxTemplate(
-                type="separate",
-                layout="0,0,2,4",
-                icon="msx-white-soft:history",
-                image_filler="default",
+                type="default",
+                layout="0,0,6,1",
+                image_width=0.83,
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No recently played tracks")],
         )
@@ -595,9 +593,10 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         content = MsxContent(
             headline="Album Tracks",
             template=MsxTemplate(
-                type="separate",
-                layout="0,0,2,4",
-                image_filler="default",
+                type="default",
+                layout="0,0,6,1",
+                image_width=0.83,
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No tracks found")],
         )
@@ -620,9 +619,10 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         content = MsxContent(
             headline="Artist Albums",
             template=MsxTemplate(
-                type="separate",
-                layout="0,0,2,4",
-                image_filler="default",
+                type="default",
+                layout="0,0,6,2",
+                image_width=1.5,
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No albums found")],
         )
@@ -656,10 +656,10 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         content = MsxContent(
             headline="Playlist Tracks",
             template=MsxTemplate(
-                type="separate",
-                layout="0,0,2,4",
-                icon="msx-white-soft:audiotrack",
-                image_filler="default",
+                type="default",
+                layout="0,0,6,1",
+                image_width=0.83,
+                color="msx-glass",
             ),
             items=items if items else [MsxItem(title="No tracks found")],
         )
