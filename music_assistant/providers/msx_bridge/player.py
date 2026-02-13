@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -22,8 +23,11 @@ class MSXPlayer(Player):
     _skip_ws_notify: bool = False
     _propagating: bool = False
     _playing_from_queue: bool = False
+    _queue_source_id: str | None = None
     _playlist_offset: int = 0
     _playlist_size: int = 0
+    _media_ready: asyncio.Event
+    _last_ws_position: float | None = None
 
     def __init__(
         self,
@@ -53,6 +57,12 @@ class MSXPlayer(Player):
         self._attr_powered = True
         self._attr_volume_level = 100
         self.output_format = output_format
+        self._media_ready = asyncio.Event()
+
+    @property
+    def requires_flow_mode(self) -> bool:
+        """MSX plays individual tracks — flow mode breaks progress tracking."""
+        return False
 
     @property
     def needs_poll(self) -> bool:
@@ -69,59 +79,81 @@ class MSXPlayer(Player):
         self.logger.info("play_media on %s: uri=%s", self.display_name, media.uri)
         self.current_stream_url = media.uri
         self._attr_current_media = media
+        self._media_ready.set()
         self._attr_playback_state = PlaybackState.PLAYING
-        self._attr_elapsed_time = 0
+        self._attr_elapsed_time = 0.0
         self._attr_elapsed_time_last_updated = time.time()
+        self._last_ws_position = None
         self.update_state()
 
-        title, artist, image_url, duration = self._resolve_media_metadata(media)
-        provider = cast("MSXBridgeProvider", self.provider)
-
         if not self._skip_ws_notify:
-            if self._playing_from_queue and media.source_id:
-                # MA-initiated track change while MSX already has the playlist.
-                # Translate MA queue index → MSX rotated playlist index.
-                queue = self.mass.player_queues.get(media.source_id)
-                ma_index = getattr(queue, "current_index", 0) if queue else 0
-                if self._playlist_size > 0:
-                    msx_index = (ma_index - self._playlist_offset) % self._playlist_size
-                else:
-                    msx_index = ma_index
-                provider.notify_goto_index(self.player_id, msx_index)
-            elif media.source_id and media.queue_item_id:
-                # First queue-backed play → send full MSX native playlist
-                queue = self.mass.player_queues.get(media.source_id)
-                start_index = getattr(queue, "current_index", 0) if queue else 0
-                # Store rotation offset/size for goto_index translation
-                try:
-                    queue_items = self.mass.player_queues.items(media.source_id)
-                    self._playlist_size = len(list(queue_items))
-                except Exception:
-                    self._playlist_size = 0
-                self._playlist_offset = start_index
-                provider.notify_play_playlist(self.player_id, start_index)
-                self._playing_from_queue = True
-            else:
-                # Direct stream / non-queue → existing broadcast_play behavior
-                next_action = f"request:interaction:/api/next/{self.player_id}"
-                prev_action = f"request:interaction:/api/previous/{self.player_id}"
-
-                provider.notify_play_started(
-                    self.player_id,
-                    title=title,
-                    artist=artist,
-                    image_url=image_url,
-                    duration=duration,
-                    next_action=next_action,
-                    prev_action=prev_action,
-                )
+            self._notify_msx_playback(media)
 
         await self._propagate_to_group_members("play_media", media=media)
+
+    def _notify_msx_playback(self, media: PlayerMedia) -> None:
+        """Send WS notification to MSX about the new playback state."""
+        source_id = media.source_id
+        is_queue_backed = bool(source_id and media.queue_item_id)
+        is_same_queue = self._playing_from_queue and self._queue_source_id == source_id
+        provider = cast("MSXBridgeProvider", self.provider)
+
+        if is_queue_backed and is_same_queue and source_id:
+            self._notify_same_queue(provider, source_id)
+        elif is_queue_backed and source_id:
+            self._notify_new_queue(provider, source_id)
+        else:
+            title, artist, image_url, duration = self._resolve_media_metadata(media)
+            next_action = f"request:interaction:/api/next/{self.player_id}"
+            prev_action = f"request:interaction:/api/previous/{self.player_id}"
+            provider.notify_play_started(
+                self.player_id,
+                title=title,
+                artist=artist,
+                image_url=image_url,
+                duration=duration,
+                next_action=next_action,
+                prev_action=prev_action,
+            )
+
+    def _notify_same_queue(self, provider: MSXBridgeProvider, source_id: str) -> None:
+        """Handle same-queue playback: goto index or re-send if queue changed."""
+        queue = self.mass.player_queues.get(source_id)
+        ma_index = getattr(queue, "current_index", 0) if queue else 0
+        try:
+            queue_items = self.mass.player_queues.items(source_id)
+            current_size = len(list(queue_items))
+        except Exception:
+            current_size = self._playlist_size
+        if current_size != self._playlist_size:
+            self._playlist_size = current_size
+            self._playlist_offset = ma_index
+            provider.notify_play_playlist(self.player_id, ma_index)
+        else:
+            if self._playlist_size > 0:
+                msx_index = (ma_index - self._playlist_offset) % self._playlist_size
+            else:
+                msx_index = ma_index
+            provider.notify_goto_index(self.player_id, msx_index)
+
+    def _notify_new_queue(self, provider: MSXBridgeProvider, source_id: str) -> None:
+        """Send full MSX native playlist for a new queue."""
+        queue = self.mass.player_queues.get(source_id)
+        start_index = getattr(queue, "current_index", 0) if queue else 0
+        try:
+            queue_items = self.mass.player_queues.items(source_id)
+            self._playlist_size = len(list(queue_items))
+        except Exception:
+            self._playlist_size = 0
+        self._playlist_offset = start_index
+        self._queue_source_id = source_id
+        provider.notify_play_playlist(self.player_id, start_index)
+        self._playing_from_queue = True
 
     def _resolve_media_metadata(
         self, media: PlayerMedia
     ) -> tuple[str | None, str | None, str | None, int | None]:
-        """Resolve real metadata from queue item (flow_mode sends generic metadata)."""
+        """Resolve detailed metadata from the queue item when available."""
         title = media.title
         artist = media.artist
         image_url = media.image_url
@@ -220,20 +252,24 @@ class MSXPlayer(Player):
         await self._propagate_to_group_members("play")
 
     async def _resume_from_pause(self) -> None:
-        """Resume playback after pause — queue re-sends current track to MSX."""
-        try:
-            await self.mass.player_queues.resume(self.player_id)
-        except Exception:
-            self.logger.warning(
-                "resume from pause failed, falling back to play state only",
-                exc_info=True,
-            )
-            self._attr_playback_state = PlaybackState.PLAYING
-            self._attr_elapsed_time_last_updated = time.time()
-            self.update_state()
+        """Resume playback after pause — tell MSX to unpause its native player.
+
+        Note: the HTTP audio stream stays open during pause. For short pauses
+        the chunk buffer (maxsize=32) absorbs the gap. Long pauses (minutes)
+        may cause stream starvation — ffmpeg backs up, and MSX may get silence
+        or a playback error on resume. A reconnect mechanism would be needed
+        for reliable long-pause support.
+        """
+        self._attr_playback_state = PlaybackState.PLAYING
+        self._attr_elapsed_time_last_updated = time.time()
+        self._last_ws_position = None
+        self.update_state()
+        if not self._skip_ws_notify:
+            cast("MSXBridgeProvider", self.provider).notify_play_resumed(self.player_id)
+        await self._propagate_to_group_members("play")
 
     async def pause(self) -> None:
-        """Handle PAUSE command — stop playback on MSX but keep queue/position for resume."""
+        """Handle PAUSE command — pause playback on MSX, keep stream alive for resume."""
         self.logger.info("pause on %s", self.display_name)
         # Snapshot the elapsed time before pausing
         if self._attr_elapsed_time is not None and self._attr_elapsed_time_last_updated is not None:
@@ -241,7 +277,8 @@ class MSXPlayer(Player):
         self._attr_playback_state = PlaybackState.PAUSED
         self._attr_elapsed_time_last_updated = time.time()
         self.update_state()
-        cast("MSXBridgeProvider", self.provider).notify_play_stopped(self.player_id)
+        if not self._skip_ws_notify:
+            cast("MSXBridgeProvider", self.provider).notify_play_paused(self.player_id)
         await self._propagate_to_group_members("pause")
 
     async def stop(self) -> None:
@@ -249,10 +286,13 @@ class MSXPlayer(Player):
         self.logger.info("stop on %s", self.display_name)
         self._attr_playback_state = PlaybackState.IDLE
         self._attr_current_media = None
+        self._media_ready.clear()
         self._attr_elapsed_time = None
         self._attr_elapsed_time_last_updated = None
+        self._last_ws_position = None
         self.current_stream_url = None
         self._playing_from_queue = False
+        self._queue_source_id = None
         self._playlist_offset = 0
         self._playlist_size = 0
         self.update_state()
@@ -265,14 +305,50 @@ class MSXPlayer(Player):
         self._attr_volume_level = volume_level
         self.update_state()
 
+    def update_position(self, position: float) -> None:
+        """Update elapsed time from a WebSocket position report.
+
+        Only accepts updates while PLAYING — late reports arriving after
+        pause() would overwrite the correctly accumulated elapsed_time.
+        """
+        if self._attr_playback_state != PlaybackState.PLAYING:
+            return
+        self._attr_elapsed_time = position
+        self._attr_elapsed_time_last_updated = time.time()
+        self._last_ws_position = time.time()
+        self.update_state()
+
     async def poll(self) -> None:
-        """Poll player for state updates."""
+        """Poll player for state updates.
+
+        If a recent WebSocket position report was received (within 10s),
+        skip wall-clock increment — the WS data is more accurate.
+        """
         if (
             self._attr_playback_state == PlaybackState.PLAYING
             and self._attr_elapsed_time is not None
             and self._attr_elapsed_time_last_updated is not None
         ):
+            # Skip wall-clock update if WS reported position recently
+            if self._last_ws_position and (time.time() - self._last_ws_position) < 10:
+                return
             now = time.time()
             self._attr_elapsed_time += now - self._attr_elapsed_time_last_updated
             self._attr_elapsed_time_last_updated = now
             self.update_state()
+
+    async def wait_for_media(self, timeout: float = 10.0) -> PlayerMedia | None:
+        """Wait for play_media() to set current_media, with timeout.
+
+        Fast path: if play_media() already ran (e.g. during queue.play_media),
+        current_media is set — return immediately without waiting.
+        Slow path: clear the event and wait for play_media() to signal.
+        """
+        if self._attr_current_media is not None and self._media_ready.is_set():
+            return self._attr_current_media
+        self._media_ready.clear()
+        try:
+            await asyncio.wait_for(self._media_ready.wait(), timeout=timeout)
+        except TimeoutError:
+            return None
+        return self._attr_current_media

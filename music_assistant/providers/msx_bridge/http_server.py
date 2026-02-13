@@ -22,6 +22,7 @@ from .constants import (
     DEFAULT_SHOW_STOP_NOTIFICATION,
     MSX_PLAYER_ID_PREFIX,
     PLAYER_ID_SANITIZE_RE,
+    PRE_BUFFER_BYTES,
 )
 from .mappers import (
     append_device_param,
@@ -798,36 +799,46 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         if not player or not isinstance(player, MSXPlayer):
             return web.Response(status=404, text="Player not found")
 
-        # Resolve track URI to get duration metadata before playback
-        track_duration: int = 0
-        try:
-            media_item = await self.provider.mass.music.get_item_by_uri(uri)
-            track_duration = getattr(media_item, "duration", 0) or 0
-        except Exception:
-            logger.warning("Could not resolve track metadata for URI: %s", uri)
-
-        # Suppress WS broadcast when called from MSX playlist to avoid conflicts
-        if from_playlist:
-            player._skip_ws_notify = True
-
-        await self.provider.mass.player_queues.play_media(player_id, uri)
-
-        # Reset skip flag after play_media
-        if from_playlist:
-            player._skip_ws_notify = False
-
-        # Wait for play_media() to set the PlayerMedia on our player
-        media = None
-        for _ in range(100):  # Poll up to 10 seconds
+        # When MA is driving the queue (next/prev from MA UI), current_media is
+        # already set by player.play_media() before the WS goto_index reaches MSX.
+        # Re-enqueuing would recreate the queue from the track URI, destroying it.
+        # We verify by checking that current_media's queue item URI matches the
+        # requested track URI — if not, MSX auto-advanced and we must re-enqueue.
+        if (
+            from_playlist
+            and player._playing_from_queue
+            and self._current_media_matches_uri(player, uri)
+        ):
+            logger.debug("Queue-driven: using current_media for %s", uri)
             media = player.current_media
-            if media:
-                break
-            await asyncio.sleep(0.1)
+        else:
+            # Suppress WS broadcast when called from MSX playlist to avoid conflicts
+            if from_playlist:
+                player._skip_ws_notify = True
+
+            await self.provider.mass.player_queues.play_media(player_id, uri)
+
+            # Reset skip flag after play_media
+            if from_playlist:
+                player._skip_ws_notify = False
+
+            # Wait for play_media() to signal media is ready (replaces 10s polling loop)
+            media = await player.wait_for_media(timeout=10.0)
 
         if not media:
             return web.Response(status=504, text="Playback setup timeout")
 
-        duration = track_duration or media.duration or 0
+        # Resolve duration from media or queue item for Content-Length header
+        duration = media.duration or 0
+        if not duration and media.source_id and media.queue_item_id:
+            queue_item = self.provider.mass.player_queues.get_item(
+                media.source_id, media.queue_item_id
+            )
+            if queue_item:
+                if queue_item.media_item:
+                    duration = getattr(queue_item.media_item, "duration", None) or duration
+                if not duration and queue_item.duration:
+                    duration = queue_item.duration
 
         return await self._serve_audio_stream(
             request,
@@ -878,7 +889,12 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         media: Any,
         duration: int = 0,
     ) -> web.StreamResponse:
-        """Unified method to stream audio from MA to MSX via ffmpeg."""
+        """Unified method to stream audio from MA to MSX via ffmpeg.
+
+        Pre-buffers audio data before sending HTTP headers so MSX receives
+        the response and initial audio burst simultaneously, preventing
+        stutter/restart from an empty initial buffer.
+        """
         player_id = player.player_id
         pcm_format, out_format, headers = self._build_audio_params(
             player.output_format,
@@ -899,16 +915,29 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         )
 
         response = web.StreamResponse(status=200, headers=headers)
-        await response.prepare(request)
-
+        stream_task: asyncio.Task[None] = asyncio.create_task(
+            self._stream_with_prebuffer(
+                request, response, player, headers, audio_source, pcm_format, out_format
+            )
+        )
         transport = getattr(request, "transport", None)
-        # Re-check: stop may have been called while we were preparing
-        if not player.current_media:
-            if transport and hasattr(transport, "abort"):
-                transport.abort()
-            return response
+        await self._run_stream_task(player_id, stream_task, transport)
 
-        chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=8)
+        return response
+
+    async def _stream_with_prebuffer(
+        self,
+        request: web.Request,
+        response: web.StreamResponse,
+        player: MSXPlayer,
+        headers: dict[str, str],
+        audio_source: Any,
+        pcm_format: AudioFormat,
+        out_format: AudioFormat,
+    ) -> None:
+        """Pre-buffer audio chunks, then send HTTP headers and stream remaining data."""
+        player_id = player.player_id
+        chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=32)
 
         async def producer() -> None:
             try:
@@ -922,30 +951,63 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
                 with contextlib.suppress(asyncio.QueueFull):
                     chunk_queue.put_nowait(None)
 
-        async def stream_loop() -> None:
-            producer_task: asyncio.Task[None] | None = None
-            try:
-                producer_task = asyncio.create_task(producer())
-                while True:
-                    chunk = await chunk_queue.get()
-                    if chunk is None:
-                        break
-                    await response.write(chunk)
-            except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
-                logger.debug("Client disconnected from stream %s", player_id)
-            except asyncio.CancelledError:
-                logger.debug("Stream cancelled for player %s", player_id)
-                raise
-            finally:
-                if producer_task and not producer_task.done():
-                    producer_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await producer_task
+        producer_task: asyncio.Task[None] | None = None
+        total_bytes = 0
+        try:
+            producer_task = asyncio.create_task(producer())
 
-        stream_task: asyncio.Task[None] = asyncio.create_task(stream_loop())
-        await self._run_stream_task(player_id, stream_task, transport)
+            # Phase 1: Pre-buffer — collect chunks until we have enough data
+            pre_buffer: list[bytes] = []
+            pre_buffer_size = 0
+            while pre_buffer_size < PRE_BUFFER_BYTES:
+                chunk = await chunk_queue.get()
+                if chunk is None:
+                    break
+                pre_buffer.append(chunk)
+                pre_buffer_size += len(chunk)
 
-        return response
+            # Re-check: stop may have been called while buffering
+            if not player.current_media and not pre_buffer:
+                return
+
+            # NOW send HTTP headers + pre-buffer burst
+            await response.prepare(request)
+            for buf_chunk in pre_buffer:
+                await response.write(buf_chunk)
+                total_bytes += len(buf_chunk)
+
+            # If pre-buffer ended with sentinel, we're done
+            if chunk is None:
+                return
+
+            # Phase 2: Stream remaining chunks normally
+            while True:
+                chunk = await chunk_queue.get()
+                if chunk is None:
+                    break
+                await response.write(chunk)
+                total_bytes += len(chunk)
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            logger.debug("Client disconnected from stream %s", player_id)
+        except asyncio.CancelledError:
+            logger.debug("Stream cancelled for player %s", player_id)
+            raise
+        finally:
+            if producer_task and not producer_task.done():
+                producer_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await producer_task
+            content_length = headers.get("Content-Length")
+            if content_length:
+                logger.debug(
+                    "Stream %s: wrote %d bytes, Content-Length=%s, diff=%d",
+                    player_id,
+                    total_bytes,
+                    content_length,
+                    total_bytes - int(content_length),
+                )
+            else:
+                logger.debug("Stream %s finished: wrote %d bytes", player_id, total_bytes)
 
     async def _run_stream_task(
         self,
@@ -996,8 +1058,9 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         )
 
         try:
-            async for _msg in ws:
-                pass
+            async for msg in ws:
+                if msg.type == msg.type.TEXT:
+                    self._handle_ws_message(player_id, msg.data)
         finally:
             self._ws_clients.get(player_id, set()).discard(ws)
             if not self._ws_clients.get(player_id):
@@ -1133,6 +1196,36 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
             del self._active_stream_tasks[player_id]
             del self._active_stream_transports[player_id]
 
+    def broadcast_pause(self, player_id: str) -> None:
+        """Notify subscribed WebSocket clients to pause playback."""
+        clients = self._ws_clients.get(player_id, set())
+        if not clients:
+            return
+        logger.info(
+            "broadcast_pause: player_id=%s, sending to %d client(s)",
+            player_id,
+            len(clients),
+        )
+        msg = json.dumps({"type": "pause"})
+        for ws in list(clients):
+            if not ws.closed:
+                self.provider.mass.create_task(self._ws_send(ws, msg))
+
+    def broadcast_resume(self, player_id: str) -> None:
+        """Notify subscribed WebSocket clients to resume playback."""
+        clients = self._ws_clients.get(player_id, set())
+        if not clients:
+            return
+        logger.info(
+            "broadcast_resume: player_id=%s, sending to %d client(s)",
+            player_id,
+            len(clients),
+        )
+        msg = json.dumps({"type": "resume"})
+        for ws in list(clients):
+            if not ws.closed:
+                self.provider.mass.create_task(self._ws_send(ws, msg))
+
     def broadcast_stop(self, player_id: str) -> None:
         """Notify subscribed WebSocket clients to stop playback."""
         clients = self._ws_clients.get(player_id, set())
@@ -1166,6 +1259,59 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
             await ws.send_str(text)
         except Exception as exc:
             logger.debug("WebSocket send failed: %s", exc)
+
+    async def _cmd_pause_no_echo(self, player_id: str) -> None:
+        """Pause player without echoing back to MSX."""
+        try:
+            await self.provider.mass.players.cmd_pause(player_id)
+        finally:
+            player = self.provider.mass.players.get(player_id)
+            if player and isinstance(player, MSXPlayer):
+                player._skip_ws_notify = False
+
+    async def _cmd_play_no_echo(self, player_id: str) -> None:
+        """Resume player without echoing back to MSX."""
+        try:
+            await self.provider.mass.players.cmd_play(player_id)
+        finally:
+            player = self.provider.mass.players.get(player_id)
+            if player and isinstance(player, MSXPlayer):
+                player._skip_ws_notify = False
+
+    def _handle_ws_message(self, player_id: str, data: str) -> None:
+        """Process an inbound WebSocket message from MSX."""
+        try:
+            msg = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Invalid WS message from %s: %s", player_id, data)
+            return
+
+        msg_type = msg.get("type")
+        if msg_type == "position":
+            position = msg.get("position")
+            if position is not None:
+                player = self.provider.mass.players.get(player_id)
+                if player and isinstance(player, MSXPlayer):
+                    player.update_position(float(position))
+                    self.provider.on_player_activity(player_id)
+        elif msg_type == "pause":
+            player = self.provider.mass.players.get(player_id)
+            if player and isinstance(player, MSXPlayer):
+                position = msg.get("position")
+                if position is not None:
+                    player.update_position(float(position))
+                # Skip WS notify to avoid echo back to MSX
+                player._skip_ws_notify = True
+                self.provider.mass.create_task(self._cmd_pause_no_echo(player_id))
+                self.provider.on_player_activity(player_id)
+        elif msg_type == "resume":
+            player = self.provider.mass.players.get(player_id)
+            if player and isinstance(player, MSXPlayer):
+                player._skip_ws_notify = True
+                self.provider.mass.create_task(self._cmd_play_no_echo(player_id))
+                self.provider.on_player_activity(player_id)
+        else:
+            logger.debug("Unknown WS message type from %s: %s", player_id, msg_type)
 
     # --- Stream Proxy ---
 
@@ -1464,6 +1610,16 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
         player_id, device_param = self._get_player_id_and_device_param(request)
         player = await self.provider.get_or_register_player(player_id)
         return player_id, device_param, player
+
+    def _current_media_matches_uri(self, player: MSXPlayer, track_uri: str) -> bool:
+        """Check if player's current_media corresponds to the requested track URI."""
+        media = player.current_media
+        if not media or not media.source_id or not media.queue_item_id:
+            return False
+        queue_item = self.provider.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+        if queue_item and queue_item.media_item:
+            return getattr(queue_item.media_item, "uri", None) == track_uri
+        return False
 
     def _format_track(self, track: Any) -> dict[str, Any]:
         """Format a track object for the API response."""
