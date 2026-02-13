@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -69,6 +70,57 @@ async def test_play_media(player: MSXPlayer) -> None:
     assert player._attr_elapsed_time_last_updated is not None
     assert player._attr_current_media is media
     player.update_state.assert_called()  # type: ignore[attr-defined]
+
+
+async def test_play_media_sets_media_ready_event(player: MSXPlayer) -> None:
+    """play_media should set _media_ready event so wait_for_media returns immediately."""
+    media = Mock(spec=PlayerMedia)
+    media.uri = "http://ma-server/stream/12345"
+
+    assert not player._media_ready.is_set()
+    await player.play_media(media)
+    assert player._media_ready.is_set()
+
+
+async def test_wait_for_media_returns_on_play(player: MSXPlayer) -> None:
+    """wait_for_media should return the media once play_media sets the event."""
+    media = Mock(spec=PlayerMedia)
+    media.uri = "http://ma-server/stream/12345"
+
+    async def delayed_play() -> None:
+        await asyncio.sleep(0.05)
+        await player.play_media(media)
+
+    asyncio.create_task(delayed_play())
+    result = await player.wait_for_media(timeout=2.0)
+    assert result is media
+
+
+async def test_wait_for_media_fast_path(player: MSXPlayer) -> None:
+    """wait_for_media should return immediately if play_media already ran."""
+    media = Mock(spec=PlayerMedia)
+    media.uri = "http://ma-server/stream/12345"
+
+    # Simulate: queue.play_media already called player.play_media
+    await player.play_media(media)
+    assert player._media_ready.is_set()
+
+    # Fast path — should return instantly without clearing the event
+    result = await player.wait_for_media(timeout=0.1)
+    assert result is media
+
+
+async def test_wait_for_media_timeout(player: MSXPlayer) -> None:
+    """wait_for_media should return None on timeout."""
+    result = await player.wait_for_media(timeout=0.1)
+    assert result is None
+
+
+async def test_stop_clears_media_ready_event(player: MSXPlayer) -> None:
+    """stop() should clear _media_ready event."""
+    player._media_ready.set()
+    await player.stop()
+    assert not player._media_ready.is_set()
 
 
 async def test_play_resume(player: MSXPlayer, mass_mock: Mock) -> None:
@@ -397,6 +449,7 @@ async def test_play_media_queue_sends_playlist(player: MSXPlayer, mass_mock: Moc
     queue.current_index = 2
     mass_mock.player_queues.get.return_value = queue
     mass_mock.player_queues.get_item.return_value = None
+    mass_mock.player_queues.items.return_value = [Mock(), Mock(), Mock(), Mock(), Mock()]
 
     with (
         patch.object(player.provider, "notify_play_playlist") as mock_playlist,
@@ -407,13 +460,49 @@ async def test_play_media_queue_sends_playlist(player: MSXPlayer, mass_mock: Moc
     mock_playlist.assert_called_once_with("msx_test", 2)
     mock_play.assert_not_called()
     assert player._playing_from_queue is True
+    assert player._playlist_offset == 2
+    assert player._playlist_size == 5
 
 
-async def test_play_media_skips_ws_when_playing_from_queue(
+async def test_play_media_sends_goto_index_when_playing_from_queue(
     player: MSXPlayer, mass_mock: Mock
 ) -> None:
-    """play_media should skip WS notification when _playing_from_queue is True."""
+    """play_media should send translated goto_index when _playing_from_queue is True."""
     player._playing_from_queue = True
+    player._playlist_offset = 2  # playlist was rotated by 2
+    player._playlist_size = 5  # 5 items in playlist
+
+    media = Mock(spec=PlayerMedia)
+    media.uri = "http://ma-server/stream/12345"
+    media.title = None
+    media.artist = None
+    media.image_url = None
+    media.duration = None
+    media.source_id = "msx_test"
+    media.queue_item_id = "qi2"
+
+    queue = Mock()
+    queue.current_index = 3  # MA index 3 → MSX index (3-2)%5 = 1
+    mass_mock.player_queues.get.return_value = queue
+    mass_mock.player_queues.get_item.return_value = None
+
+    with (
+        patch.object(player.provider, "notify_goto_index") as mock_goto,
+        patch.object(player.provider, "notify_play_playlist") as mock_playlist,
+        patch.object(player.provider, "notify_play_started") as mock_play,
+    ):
+        await player.play_media(media)
+
+    # Index translated: (3 - 2) % 5 = 1
+    mock_goto.assert_called_once_with("msx_test", 1)
+    mock_playlist.assert_not_called()
+    mock_play.assert_not_called()
+
+
+async def test_play_media_skips_ws_when_skip_notify_set(player: MSXPlayer, mass_mock: Mock) -> None:
+    """play_media should skip all WS notifications when _skip_ws_notify is True."""
+    player._playing_from_queue = True
+    player._skip_ws_notify = True
 
     media = Mock(spec=PlayerMedia)
     media.uri = "http://ma-server/stream/12345"
@@ -427,13 +516,18 @@ async def test_play_media_skips_ws_when_playing_from_queue(
     mass_mock.player_queues.get_item.return_value = None
 
     with (
+        patch.object(player.provider, "notify_goto_index") as mock_goto,
         patch.object(player.provider, "notify_play_playlist") as mock_playlist,
         patch.object(player.provider, "notify_play_started") as mock_play,
     ):
         await player.play_media(media)
 
+    mock_goto.assert_not_called()
     mock_playlist.assert_not_called()
     mock_play.assert_not_called()
+
+    # Clean up
+    player._skip_ws_notify = False
 
 
 async def test_play_media_non_queue_sends_broadcast_play(
