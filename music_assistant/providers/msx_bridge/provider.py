@@ -134,7 +134,8 @@ class SharedGroupStream:
         Yields:
             Audio chunks (bytes). First yields catch-up buffer, then live chunks.
         """
-        q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=64)
+        # Large queue to handle slow readers (TV with weak WiFi)
+        q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=512)
 
         async with self._lock:
             self.subscribers[player_id] = q
@@ -179,16 +180,16 @@ class SharedGroupStream:
 
             # Phase 2: Live stream
             while True:
-                next_chunk = await q.get()
-                if next_chunk is None:
+                live_chunk: bytes | None = await q.get()
+                if live_chunk is None:
                     logger.debug(
                         "[SharedStream:%s] EOF received for subscriber %s",
                         self.group_id,
                         player_id,
                     )
                     break
-                yield next_chunk
-                bytes_sent += len(next_chunk)
+                yield live_chunk
+                bytes_sent += len(live_chunk)
                 chunks_sent += 1
 
         finally:
@@ -645,8 +646,8 @@ class MSXBridgeProvider(PlayerProvider):
             # Format: /api/streams/single/{queue_id}/queue/{queue_item_id}.{format}
             base_url = getattr(self.mass.streams, "base_url", None)
             if not base_url:
-                logger.debug("[MARedirect] No base_url available from streams controller")
-                return None
+                # Fallback: use webserver base_url
+                base_url = getattr(self.mass.webserver, "base_url", None)
 
             stream_url = (
                 f"{base_url}/api/streams/single/{source_id}/queue/{queue_item_id}.{output_format}"
