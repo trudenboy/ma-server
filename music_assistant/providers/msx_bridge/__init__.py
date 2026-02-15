@@ -18,18 +18,27 @@ from .constants import (
     CONF_ENABLE_GROUPING,
     CONF_GROUP_STREAM_MODE,
     CONF_HTTP_PORT,
+    CONF_MSX_KIOSK_CONTROLS,
+    CONF_MSX_KIOSK_MODE,
     CONF_OUTPUT_FORMAT,
     CONF_PLAYER_IDLE_TIMEOUT,
+    CONF_SENDSPIN_ENABLED,
     CONF_SHOW_STOP_NOTIFICATION,
     DEFAULT_ABORT_STREAM_FIRST,
     DEFAULT_ENABLE_GROUPING,
     DEFAULT_GROUP_STREAM_MODE,
     DEFAULT_HTTP_PORT,
+    DEFAULT_MSX_KIOSK_CONTROLS,
+    DEFAULT_MSX_KIOSK_MODE,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_PLAYER_IDLE_TIMEOUT,
+    DEFAULT_SENDSPIN_ENABLED,
     DEFAULT_SHOW_STOP_NOTIFICATION,
     GROUP_STREAM_MODE_INDEPENDENT,
     GROUP_STREAM_MODE_SHARED,
+    MSX_KIOSK_MODE_DISABLED,
+    MSX_KIOSK_MODE_SENDSPIN,
+    MSX_KIOSK_MODE_STANDARD,
 )
 from .provider import MSXBridgeProvider
 
@@ -45,7 +54,9 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    grouping_enabled = bool(config.get_value(CONF_ENABLE_GROUPING, DEFAULT_ENABLE_GROUPING))
+    grouping_enabled = bool(
+        config.get_value(CONF_ENABLE_GROUPING, DEFAULT_ENABLE_GROUPING)
+    )
     features: set[ProviderFeature] = {ProviderFeature.REMOVE_PLAYER}
     if grouping_enabled:
         features.add(ProviderFeature.SYNC_PLAYERS)
@@ -133,8 +144,44 @@ async def get_config_entries(
             description=(
                 "How to stream audio to grouped players. "
                 "'Independent' creates separate streams per TV (more CPU, no sync). "
-                "'Shared Buffer' uses one ffmpeg process for all group members "
-                "(less CPU, better sync)."
+                "'Shared Buffer' uses one ffmpeg process for all group members (less CPU, better sync)."
+            ),
+        ),
+        ConfigEntry(
+            key=CONF_MSX_KIOSK_MODE,
+            type=ConfigEntryType.STRING,
+            label="MSX Kiosk Mode",
+            required=False,
+            default_value=DEFAULT_MSX_KIOSK_MODE,
+            options=[
+                ConfigValueOption(
+                    "Disabled - normal MSX with library navigation",
+                    MSX_KIOSK_MODE_DISABLED,
+                ),
+                ConfigValueOption(
+                    "Standard - fullscreen player with HTTP streaming",
+                    MSX_KIOSK_MODE_STANDARD,
+                ),
+                ConfigValueOption(
+                    "Sendspin - fullscreen player with synchronized audio",
+                    MSX_KIOSK_MODE_SENDSPIN,
+                ),
+            ],
+            description=(
+                "Kiosk mode shows only the player without library navigation. "
+                "'Standard' uses HTTP streaming with WebSocket sync. "
+                "'Sendspin' receives clock-synchronized audio from MA (no seek support)."
+            ),
+        ),
+        ConfigEntry(
+            key=CONF_MSX_KIOSK_CONTROLS,
+            type=ConfigEntryType.BOOLEAN,
+            label="Show playback controls in Kiosk Mode",
+            required=False,
+            default_value=DEFAULT_MSX_KIOSK_CONTROLS,
+            description=(
+                "Show play/pause/next/prev buttons on screen in kiosk mode. "
+                "If disabled, control playback only from Music Assistant."
             ),
         ),
     )
