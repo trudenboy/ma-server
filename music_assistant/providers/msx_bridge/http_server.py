@@ -18,17 +18,8 @@ from music_assistant_models.media_items import AudioFormat
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 
 from .constants import (
-    CONF_MSX_KIOSK_CONTROLS,
-    CONF_MSX_KIOSK_MODE,
-    CONF_SENDSPIN_ENABLED,
     CONF_SHOW_STOP_NOTIFICATION,
-    DEFAULT_MSX_KIOSK_CONTROLS,
-    DEFAULT_MSX_KIOSK_MODE,
-    DEFAULT_SENDSPIN_ENABLED,
     DEFAULT_SHOW_STOP_NOTIFICATION,
-    MSX_KIOSK_MODE_DISABLED,
-    MSX_KIOSK_MODE_SENDSPIN,
-    MSX_KIOSK_MODE_STANDARD,
     MSX_PLAYER_ID_PREFIX,
     PLAYER_ID_SANITIZE_RE,
     PRE_BUFFER_BYTES,
@@ -57,9 +48,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 _KNOWN_EXTENSIONS = (".mp3", ".json", ".flac", ".aac")
 
 
-def _int_param(
-    query: MultiMapping[str], name: str, default: int, max_val: int = 10000
-) -> int:
+def _int_param(query: MultiMapping[str], name: str, default: int, max_val: int = 10000) -> int:
     """Parse an integer query parameter safely, clamping to [0, max_val]."""
     try:
         return max(0, min(int(query.get(name, str(default))), max_val))
@@ -106,17 +95,6 @@ class MSXHTTPServer:
         self._active_stream_transports: dict[str, set[Any]] = {}
         self._setup_routes()
 
-    def _get_sendspin_settings(self, request: web.Request) -> tuple[bool, str]:
-        """Get Sendspin enabled flag and server URL for the request."""
-        sendspin_enabled = bool(
-            self.provider.config.get_value(CONF_SENDSPIN_ENABLED, DEFAULT_SENDSPIN_ENABLED)
-        )
-        if not sendspin_enabled:
-            return False, ""
-        host = request.host.split(":")[0]
-        sendspin_server = f"http://{host}:8927"
-        return sendspin_enabled, sendspin_server
-
     def _setup_routes(self) -> None:
         """Register all HTTP routes."""
         # MSX bootstrap
@@ -127,27 +105,9 @@ class MSXHTTPServer:
             "/msx/tvx-plugin-module.min.js",
             self._serve_static("tvx-plugin-module.min.js"),
         )
-        self.app.router.add_get(
-            "/msx/tvx-plugin.min.js", self._serve_static("tvx-plugin.min.js")
-        )
+        self.app.router.add_get("/msx/tvx-plugin.min.js", self._serve_static("tvx-plugin.min.js"))
         self.app.router.add_get("/msx/input.html", self._handle_msx_input_html)
         self.app.router.add_get("/msx/input.js", self._serve_static("input.js"))
-        self.app.router.add_get(
-            "/msx/sendspin-plugin.html", self._serve_static("sendspin-plugin.html")
-        )
-        self.app.router.add_get(
-            "/msx/sendspin-standalone.html", self._serve_static("sendspin-standalone.html")
-        )
-        self.app.router.add_get(
-            "/msx/sendspin-bundle.js", self._serve_static("sendspin-bundle.js")
-        )
-        self.app.router.add_get(
-            "/msx/kiosk-plugin.html", self._handle_kiosk_plugin_html
-        )
-        self.app.router.add_get("/msx/kiosk.html", self._handle_kiosk_html)
-        self.app.router.add_get("/msx/kiosk-content.json", self._handle_kiosk_content)
-        self.app.router.add_get("/msx/kiosk-page.json", self._handle_kiosk_page)
-        self.app.router.add_get("/msx/kiosk-album.json", self._handle_kiosk_album)
 
         # MSX content pages (native MSX JSON navigation)
         self.app.router.add_get("/msx/menu.json", self._handle_msx_menu)
@@ -155,17 +115,13 @@ class MSXHTTPServer:
         self.app.router.add_get("/msx/artists.json", self._handle_msx_artists)
         self.app.router.add_get("/msx/playlists.json", self._handle_msx_playlists)
         self.app.router.add_get("/msx/tracks.json", self._handle_msx_tracks)
-        self.app.router.add_get(
-            "/msx/recently-played.json", self._handle_msx_recently_played
-        )
+        self.app.router.add_get("/msx/recently-played.json", self._handle_msx_recently_played)
         self.app.router.add_get("/msx/search-page.json", self._handle_msx_search_page)
         self.app.router.add_get("/msx/search-input.json", self._handle_msx_search_input)
         self.app.router.add_get("/msx/search.json", self._handle_msx_search)
 
         # MSX detail pages
-        self.app.router.add_get(
-            "/msx/albums/{item_id}/tracks.json", self._handle_msx_album_tracks
-        )
+        self.app.router.add_get("/msx/albums/{item_id}/tracks.json", self._handle_msx_album_tracks)
         self.app.router.add_get(
             "/msx/artists/{item_id}/albums.json", self._handle_msx_artist_albums
         )
@@ -174,9 +130,7 @@ class MSXHTTPServer:
         )
 
         # MSX queue playlist (MA queue → MSX native playlist)
-        self.app.router.add_get(
-            "/msx/queue-playlist/{player_id}.json", self._handle_queue_playlist
-        )
+        self.app.router.add_get("/msx/queue-playlist/{player_id}.json", self._handle_queue_playlist)
 
         # MSX playlist endpoints (native MSX playlist JSON)
         self.app.router.add_get(
@@ -185,16 +139,12 @@ class MSXHTTPServer:
         self.app.router.add_get(
             "/msx/playlist/playlist/{item_id}.json", self._handle_msx_playlist_playlist
         )
-        self.app.router.add_get(
-            "/msx/playlist/tracks.json", self._handle_msx_tracks_playlist
-        )
+        self.app.router.add_get("/msx/playlist/tracks.json", self._handle_msx_tracks_playlist)
         self.app.router.add_get(
             "/msx/playlist/recently-played.json",
             self._handle_msx_recently_played_playlist,
         )
-        self.app.router.add_get(
-            "/msx/playlist/search.json", self._handle_msx_search_playlist
-        )
+        self.app.router.add_get("/msx/playlist/search.json", self._handle_msx_search_playlist)
 
         # MSX audio playback
         self.app.router.add_get("/msx/audio/{player_id}", self._handle_msx_audio)
@@ -216,17 +166,11 @@ class MSXHTTPServer:
 
         # Library API
         self.app.router.add_get("/api/albums", self._handle_albums)
-        self.app.router.add_get(
-            "/api/albums/{item_id}/tracks", self._handle_album_tracks
-        )
+        self.app.router.add_get("/api/albums/{item_id}/tracks", self._handle_album_tracks)
         self.app.router.add_get("/api/artists", self._handle_artists)
-        self.app.router.add_get(
-            "/api/artists/{item_id}/albums", self._handle_artist_albums
-        )
+        self.app.router.add_get("/api/artists/{item_id}/albums", self._handle_artist_albums)
         self.app.router.add_get("/api/playlists", self._handle_playlists)
-        self.app.router.add_get(
-            "/api/playlists/{item_id}/tracks", self._handle_playlist_tracks
-        )
+        self.app.router.add_get("/api/playlists/{item_id}/tracks", self._handle_playlist_tracks)
         self.app.router.add_get("/api/tracks", self._handle_tracks)
         self.app.router.add_get("/api/search", self._handle_search)
         self.app.router.add_get("/api/recently-played", self._handle_recently_played)
@@ -235,20 +179,14 @@ class MSXHTTPServer:
         self.app.router.add_post("/api/play", self._handle_play)
         self.app.router.add_route("*", "/api/pause/{player_id}", self._handle_pause)
         self.app.router.add_route("*", "/api/stop/{player_id}", self._handle_stop)
-        self.app.router.add_route(
-            "*", "/api/quick-stop/{player_id}", self._handle_quick_stop
-        )
+        self.app.router.add_route("*", "/api/quick-stop/{player_id}", self._handle_quick_stop)
         self.app.router.add_route("*", "/api/next/{player_id}", self._handle_next)
-        self.app.router.add_route(
-            "*", "/api/previous/{player_id}", self._handle_previous
-        )
+        self.app.router.add_route("*", "/api/previous/{player_id}", self._handle_previous)
 
     # --- Server Lifecycle ---
 
     @web.middleware
-    async def _cors_middleware(
-        self, request: web.Request, handler: Any
-    ) -> web.StreamResponse:
+    async def _cors_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
         """Add CORS headers to all responses."""
         if request.method == "OPTIONS":
             return web.Response(
@@ -373,42 +311,14 @@ small {{ color: #666; display: block; margin-top: 4px; }}
 
     async def _handle_start_json(self, request: web.Request) -> web.Response:
         """Return MSX start configuration."""
-        host = request.host
-        prefix = f"http://{host}"
-
-        # Check kiosk mode setting
-        kiosk_mode = str(
-            self.provider.config.get_value(CONF_MSX_KIOSK_MODE, DEFAULT_MSX_KIOSK_MODE)
-        )
-        show_controls = bool(
-            self.provider.config.get_value(
-                CONF_MSX_KIOSK_CONTROLS, DEFAULT_MSX_KIOSK_CONTROLS
-            )
-        )
-
-        if kiosk_mode == MSX_KIOSK_MODE_DISABLED:
-            # Normal mode with library navigation
-            start_config = {
+        prefix = f"http://{request.host}"
+        return web.json_response(
+            {
                 "name": "Music Assistant",
                 "version": "1.0.6",
                 "parameter": f"menu:request:interaction:init@{prefix}/msx/plugin.html?v=8",
             }
-        elif kiosk_mode == MSX_KIOSK_MODE_SENDSPIN:
-            # Kiosk mode with Sendspin - synchronized audio via WebRTC
-            start_config = {
-                "name": "Music Assistant Kiosk",
-                "version": "1.0.6",
-                "parameter": f"menu:request:interaction:init@{prefix}/msx/plugin.html?v=8&kiosk=1&sendspin=1",
-            }
-        else:
-            # Kiosk mode standard - regular HTTP streaming
-            start_config = {
-                "name": "Music Assistant Kiosk",
-                "version": "1.0.6",
-                "parameter": f"menu:request:interaction:init@{prefix}/msx/plugin.html?v=8&kiosk=1",
-            }
-
-        return web.json_response(start_config)
+        )
 
     def _serve_static(self, filename: str) -> Any:
         """Create a handler that serves a static file from the static directory."""
@@ -419,32 +329,10 @@ small {{ color: #666; display: block; margin-top: 4px; }}
 
         return handler
 
-    async def _handle_msx_plugin_html(self, request: web.Request) -> web.Response:
-        """Serve plugin.html with Sendspin settings injected."""
+    async def _handle_msx_plugin_html(self, _request: web.Request) -> web.Response:
+        """Serve plugin.html with cache-busting headers."""
         path = STATIC_DIR / "plugin.html"
         content = path.read_text(encoding="utf-8")
-
-        # Check if sendspin is forced via URL param (for kiosk sendspin mode)
-        sendspin_forced = request.query.get("sendspin") == "1"
-        
-        # Inject Sendspin configuration
-        sendspin_enabled = sendspin_forced or bool(
-            self.provider.config.get_value(CONF_SENDSPIN_ENABLED, DEFAULT_SENDSPIN_ENABLED)
-        )
-        host = request.host.split(":")[0]
-        # Default Sendspin server URL (same host, port 8927)
-        sendspin_server = f"http://{host}:8927"
-
-        # Replace placeholders in plugin.html
-        content = content.replace(
-            "var SENDSPIN_ENABLED = false;",
-            f"var SENDSPIN_ENABLED = {str(sendspin_enabled).lower()};",
-        )
-        content = content.replace(
-            'var SENDSPIN_SERVER = "";',
-            f'var SENDSPIN_SERVER = "{sendspin_server}";',
-        )
-
         return web.Response(
             text=content,
             content_type="text/html",
@@ -460,187 +348,11 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         await self._ensure_player_for_request(request)
         return web.FileResponse(STATIC_DIR / "input.html")
 
-    async def _handle_kiosk_plugin_html(self, request: web.Request) -> web.Response:
-        """Serve kiosk-plugin.html with configuration injected."""
-        path = STATIC_DIR / "kiosk-plugin.html"
-        content = path.read_text(encoding="utf-8")
-
-        # Get kiosk mode settings
-        kiosk_mode = str(
-            self.provider.config.get_value(CONF_MSX_KIOSK_MODE, DEFAULT_MSX_KIOSK_MODE)
-        )
-        show_controls = bool(
-            self.provider.config.get_value(
-                CONF_MSX_KIOSK_CONTROLS, DEFAULT_MSX_KIOSK_CONTROLS
-            )
-        )
-        host = request.host.split(":")[0]
-        sendspin_server = f"http://{host}:8927"
-        bridge_url = f"http://{request.host}"
-
-        # Inject configuration into JavaScript
-        content = content.replace(
-            'var KIOSK_MODE = "standard";',
-            f'var KIOSK_MODE = "{kiosk_mode}";',
-        )
-        content = content.replace(
-            "var SHOW_CONTROLS = true;",
-            f"var SHOW_CONTROLS = {str(show_controls).lower()};",
-        )
-        content = content.replace(
-            'var SENDSPIN_SERVER = "";',
-            f'var SENDSPIN_SERVER = "{sendspin_server}";',
-        )
-        content = content.replace(
-            'var BRIDGE_URL = "";',
-            f'var BRIDGE_URL = "{bridge_url}";',
-        )
-
-        return web.Response(
-            text=content,
-            content_type="text/html",
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
-
     async def _handle_web_app(self, request: web.Request) -> web.Response:
-        """Serve the kiosk web player SPA (browser-based, no MSX app needed)."""
-        response = cast(
-            "web.Response", web.FileResponse(STATIC_DIR / "web" / "index.html")
-        )
+        """Serve the web player SPA (browser-based, no MSX app needed)."""
+        response = cast("web.Response", web.FileResponse(STATIC_DIR / "web" / "index.html"))
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return response
-
-    async def _handle_kiosk_html(self, request: web.Request) -> web.Response:
-        """Serve standalone kiosk page for MSX panel mode."""
-        path = STATIC_DIR / "kiosk.html"
-        content = path.read_text(encoding="utf-8")
-
-        # Get settings from query params or config
-        kiosk_mode = request.query.get("mode", MSX_KIOSK_MODE_STANDARD)
-        show_controls = request.query.get("controls", "true") == "true"
-        host = request.host.split(":")[0]
-        sendspin_server = request.query.get("sendspin_server", f"http://{host}:8927")
-        bridge_url = request.query.get("bridge", f"http://{request.host}")
-
-        # Inject configuration
-        content = content.replace(
-            'var KIOSK_MODE = "standard";',
-            f'var KIOSK_MODE = "{kiosk_mode}";',
-        )
-        content = content.replace(
-            "var SHOW_CONTROLS = true;",
-            f"var SHOW_CONTROLS = {str(show_controls).lower()};",
-        )
-        content = content.replace(
-            'var SENDSPIN_SERVER = "";',
-            f'var SENDSPIN_SERVER = "{sendspin_server}";',
-        )
-        content = content.replace(
-            'var BRIDGE_URL = "";',
-            f'var BRIDGE_URL = "{bridge_url}";',
-        )
-
-        return web.Response(
-            text=content,
-            content_type="text/html",
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
-
-    async def _handle_kiosk_page(self, request: web.Request) -> web.Response:
-        """Return simple kiosk content page - transparent, no visible items."""
-        content = {
-            "transparent": 1,
-            "headline": "",
-            "items": [{
-                "type": "space",
-                "layout": "0,0,12,6"
-            }]
-        }
-        return web.json_response(content)
-
-    async def _handle_kiosk_content(self, request: web.Request) -> web.Response:
-        """Return MSX content page with fullscreen iframe for kiosk mode."""
-        prefix = f"http://{request.host}"
-        hostname = request.host.split(":")[0]
-
-        # Get settings from query params
-        kiosk_mode = request.query.get("mode", MSX_KIOSK_MODE_STANDARD)
-        show_controls = request.query.get("controls", "true")
-        sendspin_server = request.query.get(
-            "sendspin_server", f"http://{hostname}:8927"
-        )
-
-        kiosk_url = (
-            f"{prefix}/msx/kiosk.html"
-            f"?mode={kiosk_mode}"
-            f"&controls={show_controls}"
-            f"&sendspin_server={quote(sendspin_server, safe='')}"
-            f"&bridge={quote(prefix, safe='')}"
-        )
-
-        # Return transparent content page with minimal selectable item
-        content = {
-            "cache": False,
-            "reuse": False,
-            "transparent": 1,
-            "headline": "",
-            "type": "list",
-            "items": [{
-                "type": "default",
-                "layout": "0,0,1,1",
-                "label": " ",
-                "color": "msx-black",
-                "action": "null"
-            }]
-        }
-        return web.json_response(content)
-
-    async def _handle_kiosk_album(self, request: web.Request) -> web.Response:
-        """Return fake album for kiosk mode - waiting for playback."""
-        device_id = request.query.get("device_id", "msx_kiosk")
-        host = request.host.split(":")[0]
-        prefix = f"http://{request.host}"
-        
-        # Check if sendspin mode
-        kiosk_mode = str(
-            self.provider.config.get_value(CONF_MSX_KIOSK_MODE, DEFAULT_MSX_KIOSK_MODE)
-        )
-        
-        content = {
-            "headline": "",
-            "transparent": 1,
-            "template": {
-                "type": "separate",
-                "layout": "0,0,3,4",
-                "color": "msx-glass"
-            },
-            "items": [{
-                "title": "Waiting for playback...",
-                "titleFooter": "Start from Music Assistant",
-                "image": "https://msx.benzac.de/img/default.png",
-                "action": "info:Start playback from Music Assistant app"
-            }]
-        }
-        
-        # In sendspin mode, add extension to load sendspin plugin in background
-        if kiosk_mode == MSX_KIOSK_MODE_SENDSPIN:
-            sendspin_server = f"http://{host}:8927"
-            sendspin_url = (
-                f"{prefix}/msx/sendspin-plugin.html"
-                f"?server={quote(sendspin_server, safe='')}"
-                f"&player_id={quote(device_id, safe='')}"
-            )
-            content["extension"] = sendspin_url
-        
-        return web.json_response(content)
 
     # --- MSX Content Pages (native MSX JSON) ---
 
@@ -689,9 +401,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         prefix = f"http://{request.host}"
         limit = _int_param(request.query, "limit", 50)
         offset = _int_param(request.query, "offset", 0)
-        albums = await self.provider.mass.music.albums.library_items(
-            limit=limit, offset=offset
-        )
+        albums = await self.provider.mass.music.albums.library_items(limit=limit, offset=offset)
 
         items = await asyncio.gather(
             *(map_album_to_msx(a, prefix, self.provider, device_param) for a in albums)
@@ -713,13 +423,9 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         prefix = f"http://{request.host}"
         limit = _int_param(request.query, "limit", 50)
         offset = _int_param(request.query, "offset", 0)
-        artists = await self.provider.mass.music.artists.library_items(
-            limit=limit, offset=offset
-        )
+        artists = await self.provider.mass.music.artists.library_items(limit=limit, offset=offset)
 
-        items = [
-            map_artist_to_msx(a, prefix, self.provider, device_param) for a in artists
-        ]
+        items = [map_artist_to_msx(a, prefix, self.provider, device_param) for a in artists]
         content = MsxContent(
             headline="Artists",
             template=MsxTemplate(
@@ -741,10 +447,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             limit=limit, offset=offset
         )
 
-        items = [
-            map_playlist_to_msx(p, prefix, self.provider, device_param)
-            for p in playlists
-        ]
+        items = [map_playlist_to_msx(p, prefix, self.provider, device_param) for p in playlists]
         content = MsxContent(
             headline="Playlists",
             template=MsxTemplate(
@@ -762,14 +465,9 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         prefix = f"http://{request.host}"
         limit = _int_param(request.query, "limit", 50)
         offset = _int_param(request.query, "offset", 0)
-        tracks = await self.provider.mass.music.tracks.library_items(
-            limit=limit, offset=offset
-        )
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
+        tracks = await self.provider.mass.music.tracks.library_items(limit=limit, offset=offset)
 
-        playlist_base = (
-            f"{prefix}/msx/playlist/tracks.json?limit={limit}&offset={offset}"
-        )
+        playlist_base = f"{prefix}/msx/playlist/tracks.json?limit={limit}&offset={offset}"
         playlist_base = append_device_param(playlist_base, device_param)
         items = [
             map_track_to_msx(
@@ -779,8 +477,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 self.provider,
                 device_param,
                 playlist_url=f"{playlist_base}&start={idx}",
-                sendspin_enabled=sendspin_enabled,
-                sendspin_server=sendspin_server,
             )
             for idx, t in enumerate(tracks)
         ]
@@ -803,7 +499,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         tracks = await self.provider.mass.music.tracks.library_items(
             limit=50, order_by="last_played"
         )
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         playlist_base = f"{prefix}/msx/playlist/recently-played.json"
         playlist_base = append_device_param(playlist_base, device_param)
         items = [
@@ -814,8 +509,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 self.provider,
                 device_param,
                 playlist_url=f"{playlist_base}{'&' if '?' in playlist_base else '?'}start={idx}",
-                sendspin_enabled=sendspin_enabled,
-                sendspin_server=sendspin_server,
             )
             for idx, t in enumerate(tracks)
         ]
@@ -878,14 +571,15 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 ),
                 items=[MsxItem(title="Start typing to search")],
             )
-            return web.json_response(
-                content.model_dump(by_alias=True, exclude_none=True)
-            )
+            return web.json_response(content.model_dump(by_alias=True, exclude_none=True))
 
         limit = _int_param(request.query, "limit", 20)
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         items = await self._build_search_items(
-            query, limit, player_id, device_param, prefix, sendspin_enabled, sendspin_server
+            query,
+            limit,
+            player_id,
+            device_param,
+            prefix,
         )
 
         content = MsxContent(
@@ -914,9 +608,12 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             )
 
         limit = _int_param(request.query, "limit", 20)
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         items = await self._build_search_items(
-            query, limit, player_id, device_param, prefix, sendspin_enabled, sendspin_server
+            query,
+            limit,
+            player_id,
+            device_param,
+            prefix,
         )
 
         content = MsxContent(
@@ -937,8 +634,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         player_id: str,
         device_param: str,
         prefix: str,
-        sendspin_enabled: bool = False,
-        sendspin_server: str = "",
     ) -> list[MsxItem]:
         """Build MSX items from search results (shared by search handlers)."""
         results = await self.provider.mass.music.search(query, limit=limit)
@@ -963,8 +658,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 self.provider,
                 device_param,
                 playlist_url=f"{playlist_base}&start={idx}",
-                sendspin_enabled=sendspin_enabled,
-                sendspin_server=sendspin_server,
             )
             item.label = f"Track — {getattr(track, 'artist_str', '')}"
             item.icon = "msx-white-soft:audiotrack"
@@ -979,7 +672,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         prefix = f"http://{request.host}"
         item_id = request.match_info["item_id"]
         provider = request.query.get("provider", "library")
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         try:
             tracks = _sort_album_tracks(
                 await self.provider.mass.music.albums.tracks(item_id, provider)
@@ -987,9 +679,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         except Exception:
             logger.exception("Failed to fetch tracks for album %s", item_id)
             tracks = []
-        playlist_base = (
-            f"{prefix}/msx/playlist/album/{item_id}.json?provider={provider}"
-        )
+        playlist_base = f"{prefix}/msx/playlist/album/{item_id}.json?provider={provider}"
         playlist_base = append_device_param(playlist_base, device_param)
         items = [
             map_track_to_msx(
@@ -999,8 +689,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 self.provider,
                 device_param,
                 playlist_url=f"{playlist_base}&start={idx}",
-                sendspin_enabled=sendspin_enabled,
-                sendspin_server=sendspin_server,
             )
             for idx, t in enumerate(tracks)
         ]
@@ -1047,13 +735,9 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         player_id, device_param, _ = await self._ensure_player_for_request(request)
         prefix = f"http://{request.host}"
         item_id = request.match_info["item_id"]
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         try:
             tracks = [
-                t
-                async for t in self.provider.mass.music.playlists.tracks(
-                    item_id, "library"
-                )
+                t async for t in self.provider.mass.music.playlists.tracks(item_id, "library")
             ]
         except Exception:
             logger.exception("Failed to fetch tracks for playlist %s", item_id)
@@ -1068,8 +752,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 self.provider,
                 device_param,
                 playlist_url=f"{playlist_base}{'&' if '?' in playlist_base else '?'}start={idx}",
-                sendspin_enabled=sendspin_enabled,
-                sendspin_server=sendspin_server,
             )
             for idx, t in enumerate(tracks)
         ]
@@ -1094,7 +776,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         item_id = request.match_info["item_id"]
         provider_name = request.query.get("provider", "library")
         start = _int_param(request.query, "start", 0)
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         try:
             tracks = _sort_album_tracks(
                 await self.provider.mass.music.albums.tracks(item_id, provider_name)
@@ -1103,8 +784,12 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             logger.exception("Failed to fetch tracks for album playlist %s", item_id)
             tracks = []
         playlist = map_tracks_to_msx_playlist(
-            tracks, start, prefix, player_id, self.provider, device_param,
-            sendspin_enabled, sendspin_server
+            tracks,
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
         )
         return web.json_response(playlist.model_dump(by_alias=True, exclude_none=True))
 
@@ -1114,20 +799,20 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         prefix = f"http://{request.host}"
         item_id = request.match_info["item_id"]
         start = _int_param(request.query, "start", 0)
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         try:
             tracks = [
-                t
-                async for t in self.provider.mass.music.playlists.tracks(
-                    item_id, "library"
-                )
+                t async for t in self.provider.mass.music.playlists.tracks(item_id, "library")
             ]
         except Exception:
             logger.exception("Failed to fetch tracks for playlist playlist %s", item_id)
             tracks = []
         playlist = map_tracks_to_msx_playlist(
-            tracks, start, prefix, player_id, self.provider, device_param,
-            sendspin_enabled, sendspin_server
+            tracks,
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
         )
         return web.json_response(playlist.model_dump(by_alias=True, exclude_none=True))
 
@@ -1138,30 +823,32 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         limit = _int_param(request.query, "limit", 50)
         offset = _int_param(request.query, "offset", 0)
         start = _int_param(request.query, "start", 0)
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
-        tracks = await self.provider.mass.music.tracks.library_items(
-            limit=limit, offset=offset
-        )
+        tracks = await self.provider.mass.music.tracks.library_items(limit=limit, offset=offset)
         playlist = map_tracks_to_msx_playlist(
-            list(tracks), start, prefix, player_id, self.provider, device_param,
-            sendspin_enabled, sendspin_server
+            list(tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
         )
         return web.json_response(playlist.model_dump(by_alias=True, exclude_none=True))
 
-    async def _handle_msx_recently_played_playlist(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _handle_msx_recently_played_playlist(self, request: web.Request) -> web.Response:
         """Return recently played tracks as an MSX playlist JSON."""
         player_id, device_param, _ = await self._ensure_player_for_request(request)
         prefix = f"http://{request.host}"
         start = _int_param(request.query, "start", 0)
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         tracks = await self.provider.mass.music.tracks.library_items(
             limit=50, order_by="last_played"
         )
         playlist = map_tracks_to_msx_playlist(
-            list(tracks), start, prefix, player_id, self.provider, device_param,
-            sendspin_enabled, sendspin_server
+            list(tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
         )
         return web.json_response(playlist.model_dump(by_alias=True, exclude_none=True))
 
@@ -1176,11 +863,14 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 MsxContent(items=[]).model_dump(by_alias=True, exclude_none=True)
             )
         limit = _int_param(request.query, "limit", 20)
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         results = await self.provider.mass.music.search(query, limit=limit)
         playlist = map_tracks_to_msx_playlist(
-            list(results.tracks), start, prefix, player_id, self.provider, device_param,
-            sendspin_enabled, sendspin_server
+            list(results.tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
         )
         return web.json_response(playlist.model_dump(by_alias=True, exclude_none=True))
 
@@ -1208,18 +898,19 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 SimpleNamespace(
                     name=getattr(mi, "name", None) or getattr(qi, "name", "") or "",
                     uri=getattr(mi, "uri", None) or "",
-                    duration=getattr(mi, "duration", None)
-                    or getattr(qi, "duration", 0)
-                    or 0,
+                    duration=getattr(mi, "duration", None) or getattr(qi, "duration", 0) or 0,
                     artist_str=getattr(mi, "artist_str", "") if mi else "",
                     image=getattr(qi, "image", None),
                 )
             )
 
-        sendspin_enabled, sendspin_server = self._get_sendspin_settings(request)
         playlist = map_tracks_to_msx_playlist(
-            tracks, start, prefix, player_id, self.provider, device_param,
-            sendspin_enabled, sendspin_server
+            tracks,
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
         )
         return web.json_response(playlist.model_dump(by_alias=True, exclude_none=True))
 
@@ -1279,9 +970,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             )
             if queue_item:
                 if queue_item.media_item:
-                    duration = (
-                        getattr(queue_item.media_item, "duration", None) or duration
-                    )
+                    duration = getattr(queue_item.media_item, "duration", None) or duration
                 if not duration and queue_item.duration:
                     duration = queue_item.duration
 
@@ -1310,9 +999,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             "aac": (ContentType.AAC, "audio/aac"),
             "flac": (ContentType.FLAC, "audio/flac"),
         }
-        codec, mime_type = content_type_map.get(
-            output_format_str, (ContentType.MP3, "audio/mpeg")
-        )
+        codec, mime_type = content_type_map.get(output_format_str, (ContentType.MP3, "audio/mpeg"))
         out_format = AudioFormat(
             content_type=codec,
             sample_rate=44100,
@@ -1353,9 +1040,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
 
         # --- Mode 1: MA Redirect ---
         if self.provider.is_redirect_stream_mode():
-            redirect_url = await self.provider.get_ma_stream_url(
-                media, player.output_format
-            )
+            redirect_url = await self.provider.get_ma_stream_url(media, player.output_format)
             if redirect_url:
                 logger.info(
                     "[StreamMode:redirect] Player %s -> MA Streamserver: %s",
@@ -1466,8 +1151,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         else:
             # Member but no existing stream - wait briefly for leader
             logger.info(
-                "[SharedStream] Member %s waiting for leader to create stream "
-                "for group %s",
+                "[SharedStream] Member %s waiting for leader to create stream for group %s",
                 player_id,
                 group_id,
             )
@@ -1629,9 +1313,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                     total_bytes - int(content_length),
                 )
             else:
-                logger.debug(
-                    "Stream %s finished: wrote %d bytes", player_id, total_bytes
-                )
+                logger.debug("Stream %s finished: wrote %d bytes", player_id, total_bytes)
 
     async def _run_stream_task(
         self,
@@ -1800,9 +1482,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 player_id,
             )
 
-    def _register_stream(
-        self, player_id: str, task: asyncio.Task[None], transport: Any
-    ) -> None:
+    def _register_stream(self, player_id: str, task: asyncio.Task[None], transport: Any) -> None:
         """Register active stream task and transport for cancel on stop."""
         if player_id not in self._active_stream_tasks:
             self._active_stream_tasks[player_id] = set()
@@ -1812,9 +1492,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         if transport:
             self._active_stream_transports[player_id].add(transport)
 
-    def _unregister_stream(
-        self, player_id: str, task: asyncio.Task[None], transport: Any
-    ) -> None:
+    def _unregister_stream(self, player_id: str, task: asyncio.Task[None], transport: Any) -> None:
         """Unregister stream when done (from finally block)."""
         if player_id not in self._active_stream_tasks:
             return
@@ -1965,9 +1643,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             )
             if queue_item:
                 if queue_item.media_item:
-                    duration = (
-                        getattr(queue_item.media_item, "duration", None) or duration
-                    )
+                    duration = getattr(queue_item.media_item, "duration", None) or duration
                 if not duration and queue_item.duration:
                     duration = queue_item.duration
 
@@ -1984,9 +1660,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         """List albums."""
         limit = _int_param(request.query, "limit", 50)
         offset = _int_param(request.query, "offset", 0)
-        albums = await self.provider.mass.music.albums.library_items(
-            limit=limit, offset=offset
-        )
+        albums = await self.provider.mass.music.albums.library_items(limit=limit, offset=offset)
         return web.json_response(
             {
                 "items": [
@@ -2017,9 +1691,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         """List artists."""
         limit = _int_param(request.query, "limit", 50)
         offset = _int_param(request.query, "offset", 0)
-        artists = await self.provider.mass.music.artists.library_items(
-            limit=limit, offset=offset
-        )
+        artists = await self.provider.mass.music.artists.library_items(limit=limit, offset=offset)
         return web.json_response(
             {
                 "items": [
@@ -2072,19 +1744,14 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                     }
                     for playlist in playlists
                 ],
-                "total": playlists.total
-                if hasattr(playlists, "total")
-                else len(playlists),
+                "total": playlists.total if hasattr(playlists, "total") else len(playlists),
             }
         )
 
     async def _handle_playlist_tracks(self, request: web.Request) -> web.Response:
         """List tracks for a playlist."""
         item_id = request.match_info["item_id"]
-        tracks = [
-            t
-            async for t in self.provider.mass.music.playlists.tracks(item_id, "library")
-        ]
+        tracks = [t async for t in self.provider.mass.music.playlists.tracks(item_id, "library")]
         return web.json_response(
             {
                 "items": [self._format_track(track) for track in tracks],
@@ -2095,9 +1762,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         """List tracks."""
         limit = _int_param(request.query, "limit", 50)
         offset = _int_param(request.query, "offset", 0)
-        tracks = await self.provider.mass.music.tracks.library_items(
-            limit=limit, offset=offset
-        )
+        tracks = await self.provider.mass.music.tracks.library_items(limit=limit, offset=offset)
         return web.json_response(
             {
                 "items": [self._format_track(track) for track in tracks],
@@ -2109,9 +1774,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         """Search the music library."""
         query = request.query.get("q", "")
         if not query:
-            return web.json_response(
-                {"error": "Missing query parameter 'q'"}, status=400
-            )
+            return web.json_response({"error": "Missing query parameter 'q'"}, status=400)
         limit = _int_param(request.query, "limit", 20)
         results = await self.provider.mass.music.search(query, limit=limit)
         return web.json_response(
@@ -2172,9 +1835,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         track_uri = body.get("track_uri")
         player_id = body.get("player_id")
         if not track_uri or not player_id:
-            return web.json_response(
-                {"error": "Missing track_uri or player_id"}, status=400
-            )
+            return web.json_response({"error": "Missing track_uri or player_id"}, status=400)
 
         await self.provider.mass.player_queues.play_media(
             player_id, track_uri, username=await self.provider.get_owner_username()
@@ -2237,7 +1898,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             or request.remote
             or "unknown"
         )
-        
+
         if device_id:
             sanitized = PLAYER_ID_SANITIZE_RE.sub("_", device_id).strip("_") or "device"
             player_id = f"{MSX_PLAYER_ID_PREFIX}{sanitized}"
@@ -2250,9 +1911,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             )
         else:
             ip = remote_ip if remote_ip != "unknown" else "0_0_0_0"
-            sanitized = (
-                PLAYER_ID_SANITIZE_RE.sub("_", ip.replace(".", "_")).strip("_") or "ip"
-            )
+            sanitized = PLAYER_ID_SANITIZE_RE.sub("_", ip.replace(".", "_")).strip("_") or "ip"
             player_id = f"{MSX_PLAYER_ID_PREFIX}{sanitized}"
             param = ""
             logger.info(
@@ -2283,15 +1942,13 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             or request.remote
             or None
         )
-        # Web kiosk clients pass source=web to distinguish from MSX TV players
+        # Web player clients pass source=web to distinguish from MSX TV players
         display_name: str | None = None
         prefix_label = "WEB TV" if request.query.get("source") == "web" else "MSX TV"
         display_name = self.provider._player_display_name_from_id(
             player_id, prefix_label=prefix_label, remote_ip=remote_ip
         )
-        player = await self.provider.get_or_register_player(
-            player_id, display_name=display_name
-        )
+        player = await self.provider.get_or_register_player(player_id, display_name=display_name)
         return player_id, device_param, player
 
     def _current_media_matches_uri(self, player: MSXPlayer, track_uri: str) -> bool:
@@ -2299,9 +1956,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         media = player.current_media
         if not media or not media.source_id or not media.queue_item_id:
             return False
-        queue_item = self.provider.mass.player_queues.get_item(
-            media.source_id, media.queue_item_id
-        )
+        queue_item = self.provider.mass.player_queues.get_item(media.source_id, media.queue_item_id)
         if queue_item and queue_item.media_item:
             return getattr(queue_item.media_item, "uri", None) == track_uri
         return False

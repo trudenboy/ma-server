@@ -29,9 +29,7 @@ def get_image_url(item: Any, provider: MSXBridgeProvider) -> str | None:
     return None
 
 
-async def get_album_image_fallback(
-    album: Any, provider: MSXBridgeProvider
-) -> str | None:
+async def get_album_image_fallback(album: Any, provider: MSXBridgeProvider) -> str | None:
     """Get album image from its first track (albums often lack metadata images)."""
     try:
         tracks = await provider.mass.music.albums.tracks(album.item_id, album.provider)
@@ -55,9 +53,7 @@ async def map_album_to_msx(
     year = getattr(album, "year", None)
     # Build footer: "Artist · 2024" or just one
     footer: str | None = (
-        f"{artist} · {year}"
-        if artist and year
-        else (artist or (str(year) if year else None))
+        f"{artist} · {year}" if artist and year else (artist or (str(year) if year else None))
     )
     url = f"{prefix}/msx/albums/{album.item_id}/tracks.json?provider={album.provider}"
     return MsxItem(
@@ -86,9 +82,7 @@ def map_playlist_to_msx(
     """Map a MA Playlist to an MSX Item."""
     owner = getattr(playlist, "owner", None)
     prov = getattr(playlist, "provider", None)
-    footer: str | None = (
-        f"{owner} · {prov}" if owner and prov else (owner or prov or None)
-    )
+    footer: str | None = f"{owner} · {prov}" if owner and prov else (owner or prov or None)
     url = f"{prefix}/msx/playlists/{playlist.item_id}/tracks.json"
     return MsxItem(
         title=playlist.name,
@@ -103,17 +97,9 @@ def _build_audio_action(
     player_id: str,
     track_uri: str,
     device_param: str = "",
-    sendspin_enabled: bool = False,  # noqa: ARG001 - reserved for future use
-    sendspin_server: str = "",  # noqa: ARG001 - reserved for future use
     from_playlist: bool = False,
 ) -> str:
-    """Build audio action URL for MSX playback.
-
-    Note: Sendspin integration is disabled for now. MSX uses standard HTTP streaming
-    with WebSocket push for play/pause/stop synchronization. The sendspin_enabled
-    and sendspin_server parameters are reserved for future use when MA supports
-    streaming audio to specific Sendspin player IDs.
-    """
+    """Build audio action URL for MSX playback."""
     # Standard HTTP streaming mode
     audio_url = f"{prefix}/msx/audio/{player_id}.mp3?uri={quote(track_uri, safe='')}"
     if from_playlist:
@@ -129,8 +115,6 @@ def map_track_to_msx(
     provider: MSXBridgeProvider,
     device_param: str = "",
     playlist_url: str | None = None,
-    sendspin_enabled: bool = False,
-    sendspin_server: str = "",
 ) -> MsxItem:
     """Map a MA Track to an MSX Item."""
     duration = getattr(track, "duration", 0) or 0
@@ -157,8 +141,6 @@ def map_track_to_msx(
             player_id=player_id,
             track_uri=track.uri,
             device_param=device_param,
-            sendspin_enabled=sendspin_enabled,
-            sendspin_server=sendspin_server,
         )
 
     return MsxItem(
@@ -179,8 +161,6 @@ def map_tracks_to_msx_playlist(
     player_id: str,
     provider: MSXBridgeProvider,
     device_param: str = "",
-    sendspin_enabled: bool = False,
-    sendspin_server: str = "",
 ) -> MsxContent:
     """Map a list of MA Track objects to an MSX Content page for playlist playback.
 
@@ -193,11 +173,7 @@ def map_tracks_to_msx_playlist(
         duration = getattr(track, "duration", 0) or 0
         duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else ""
         artist = getattr(track, "artist_str", "")
-        label = (
-            f"{artist} · {duration_str}"
-            if artist and duration_str
-            else artist or duration_str
-        )
+        label = f"{artist} · {duration_str}" if artist and duration_str else artist or duration_str
         image_url = get_image_url(track, provider)
 
         action = _build_audio_action(
@@ -205,8 +181,6 @@ def map_tracks_to_msx_playlist(
             player_id=player_id,
             track_uri=track.uri,
             device_param=device_param,
-            sendspin_enabled=sendspin_enabled,
-            sendspin_server=sendspin_server,
             from_playlist=True,
         )
 
