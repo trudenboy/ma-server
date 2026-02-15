@@ -12,18 +12,38 @@ from .constants import (
     CONF_BASE_URL,
     CONF_BROWSE_INITIAL_TRACKS,
     CONF_DISCOVERY_INITIAL_TRACKS,
+    CONF_ENABLE_ACTIVITY_MIXES,
+    CONF_ENABLE_CHART,
+    CONF_ENABLE_FEED_RECOMMENDATIONS,
+    CONF_ENABLE_LIKED_TRACKS_BROWSE,
+    CONF_ENABLE_LIKED_TRACKS_PLAYLIST,
+    CONF_ENABLE_MIXES_BROWSE,
+    CONF_ENABLE_MOOD_MIXES,
     CONF_ENABLE_MY_MIX_BROWSE,
     CONF_ENABLE_MY_MIX_PLAYLIST,
     CONF_ENABLE_MY_MIX_RADIO,
+    CONF_ENABLE_NEW_PLAYLISTS,
+    CONF_ENABLE_NEW_RELEASES,
+    CONF_ENABLE_PICKS_BROWSE,
     CONF_ENABLE_RECOMMENDATIONS,
+    CONF_ENABLE_SEASONAL_MIXES,
+    CONF_ENABLE_TOP_PICKS,
+    CONF_LIKED_TRACKS_MAX_TRACKS,
     CONF_MY_MIX_BATCH_SIZE,
     CONF_MY_MIX_MAX_TRACKS,
+    CONF_PRELOAD_BUFFER_MB,
     CONF_QUALITY,
+    CONF_STREAMING_MODE,
     CONF_TOKEN,
     CONF_TRACK_BATCH_SIZE,
     DEFAULT_BASE_URL,
+    QUALITY_BALANCED,
+    QUALITY_EFFICIENT,
     QUALITY_HIGH,
-    QUALITY_LOSSLESS,
+    QUALITY_SUPERB,
+    STREAMING_MODE_BUFFERED,
+    STREAMING_MODE_DIRECT,
+    STREAMING_MODE_PRELOAD,
 )
 from .provider import KionMusicProvider
 
@@ -81,6 +101,7 @@ async def get_config_entries(
     is_authenticated = bool(values.get(CONF_TOKEN))
 
     return (
+        # Authentication & Quality (no category, always visible)
         ConfigEntry(
             key=CONF_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
@@ -105,11 +126,90 @@ async def get_config_entries(
             label="Audio quality",
             description="Select preferred audio quality.",
             options=[
-                ConfigValueOption("High (320 kbps)", QUALITY_HIGH),
-                ConfigValueOption("Lossless (FLAC)", QUALITY_LOSSLESS),
+                ConfigValueOption("Efficient (AAC ~64kbps)", QUALITY_EFFICIENT),
+                ConfigValueOption("Balanced (AAC ~192kbps)", QUALITY_BALANCED),
+                ConfigValueOption("High (MP3 ~320kbps)", QUALITY_HIGH),
+                ConfigValueOption("Superb (FLAC Lossless)", QUALITY_SUPERB),
             ],
-            default_value=QUALITY_HIGH,
+            default_value=QUALITY_BALANCED,
         ),
+        # Streaming category (FLAC streaming mode)
+        ConfigEntry(
+            key=CONF_STREAMING_MODE,
+            type=ConfigEntryType.STRING,
+            label="FLAC streaming mode",
+            description="How encrypted FLAC streams are handled. "
+            "'Direct' streams and decrypts on-the-fly (fast devices). "
+            "'Buffered' decouples download from decryption via async queue (recommended). "
+            "'Preload' downloads the full file before decryption (slow devices).",
+            options=[
+                ConfigValueOption("Direct (on-the-fly)", STREAMING_MODE_DIRECT),
+                ConfigValueOption("Buffered (async queue, recommended)", STREAMING_MODE_BUFFERED),
+                ConfigValueOption("Preload (full download first)", STREAMING_MODE_PRELOAD),
+            ],
+            default_value=STREAMING_MODE_BUFFERED,
+            category="streaming",
+            advanced=True,
+        ),
+        ConfigEntry(
+            key=CONF_PRELOAD_BUFFER_MB,
+            type=ConfigEntryType.INTEGER,
+            label="Preload max file size (MB)",
+            description="Maximum file size (MB) for Preload mode. "
+            "Files within this limit are fully downloaded and decrypted before playback, "
+            "enabling seek and accurate progress. "
+            "Files exceeding this limit automatically use Buffered mode (streaming without seek). "
+            "Default: 100 MB (typical FLAC track is 30-50 MB).",
+            range=(10, 500),
+            default_value=100,
+            category="streaming",
+            advanced=True,
+            depends_on=CONF_STREAMING_MODE,
+            depends_on_value=STREAMING_MODE_PRELOAD,
+        ),
+        # My Mix category (user-facing toggles)
+        ConfigEntry(
+            key=CONF_ENABLE_RECOMMENDATIONS,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Discover (Recommendations)",
+            description="Show My Mix recommendations on the home page. "
+            "When enabled, recommendations refresh each time you reload the page "
+            "for fresh discoveries.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="my_mix",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_MY_MIX_BROWSE,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable My Mix in Browse",
+            description="Show My Mix folder in the Browse section. "
+            "When disabled, My Mix will not appear in Browse.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="my_mix",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_MY_MIX_PLAYLIST,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable My Mix Playlist",
+            description="Show My Mix as a virtual playlist in your library. "
+            "When disabled, My Mix will not appear in your playlists.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="my_mix",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_MY_MIX_RADIO,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable My Mix Radio Mode",
+            description="Enable radio feedback for My Mix (like/dislike tracks). "
+            "When disabled, radio feedback will not be sent to Yandex.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="my_mix",
+        ),
+        # My Mix category (advanced performance tuning)
         ConfigEntry(
             key=CONF_MY_MIX_MAX_TRACKS,
             type=ConfigEntryType.INTEGER,
@@ -118,6 +218,8 @@ async def get_config_entries(
             "Lower values load faster but provide fewer tracks. Default: 150.",
             default_value=150,
             required=False,
+            category="my_mix",
+            advanced=True,
         ),
         ConfigEntry(
             key=CONF_MY_MIX_BATCH_SIZE,
@@ -128,7 +230,141 @@ async def get_config_entries(
             "The 'Load more' button always makes 1 call. Default: 3.",
             default_value=3,
             required=False,
+            category="my_mix",
+            advanced=True,
         ),
+        # Liked Tracks category (user-facing toggles)
+        ConfigEntry(
+            key=CONF_ENABLE_LIKED_TRACKS_BROWSE,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Liked Tracks in Browse",
+            description="Show Liked Tracks folder in the Browse section. "
+            "When disabled, Liked Tracks will not appear in Browse.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="liked_tracks",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_LIKED_TRACKS_PLAYLIST,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Liked Tracks Playlist",
+            description="Show Liked Tracks as a virtual playlist in your library. "
+            "When disabled, Liked Tracks will not appear in your playlists.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="liked_tracks",
+        ),
+        # Liked Tracks category (advanced performance tuning)
+        ConfigEntry(
+            key=CONF_LIKED_TRACKS_MAX_TRACKS,
+            type=ConfigEntryType.INTEGER,
+            label="Liked Tracks maximum tracks",
+            description="Maximum number of tracks to show in Liked Tracks virtual playlist. "
+            "Lower values load faster. Default: 500.",
+            default_value=500,
+            required=False,
+            category="liked_tracks",
+            advanced=True,
+        ),
+        # Discovery category (extended recommendations toggles)
+        ConfigEntry(
+            key=CONF_ENABLE_FEED_RECOMMENDATIONS,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Made for You",
+            description="Show personalized playlists (Playlist of the Day, DejaVu, Premiere, etc.) "
+            "in the recommendations section on the home page.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="discovery",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_CHART,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Chart",
+            description="Show top chart tracks in the recommendations section on the home page.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="discovery",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_NEW_RELEASES,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable New Releases",
+            description="Show new album releases in the recommendations section on the home page.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="discovery",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_NEW_PLAYLISTS,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable New Playlists",
+            description="Show new editorial playlists in recommendations.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="discovery",
+        ),
+        # Picks & Mixes category (curated collections)
+        ConfigEntry(
+            key=CONF_ENABLE_PICKS_BROWSE,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Picks in Browse",
+            description="Show Picks folder in Browse with curated playlists by mood, "
+            "activity, era, and genre.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="picks_mixes",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_MIXES_BROWSE,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Mixes in Browse",
+            description="Show Mixes folder in Browse with seasonal collections "
+            "(Winter, Summer, Autumn, New Year).",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="picks_mixes",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_TOP_PICKS,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Top Picks on Home",
+            description="Show Top Picks curated playlists on the home page.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="picks_mixes",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_MOOD_MIXES,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Mood Mix on Home",
+            description="Show rotating mood-based playlists (Chill, Sad, Romantic, Party) "
+            "on the home page.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="picks_mixes",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_ACTIVITY_MIXES,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Activity Mix on Home",
+            description="Show rotating activity-based playlists (Workout, Focus, Morning) "
+            "on the home page.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="picks_mixes",
+        ),
+        ConfigEntry(
+            key=CONF_ENABLE_SEASONAL_MIXES,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable Seasonal Mix on Home",
+            description="Show seasonal playlists based on current time of year "
+            "(Winter, Summer, Autumn) on the home page.",
+            default_value=False,  # Experimental feature - disabled by default
+            required=False,
+            category="picks_mixes",
+        ),
+        # Global advanced settings (no category)
         ConfigEntry(
             key=CONF_TRACK_BATCH_SIZE,
             type=ConfigEntryType.INTEGER,
@@ -138,6 +374,7 @@ async def get_config_entries(
             "Lower values are more reliable. Default: 50.",
             default_value=50,
             required=False,
+            advanced=True,
         ),
         ConfigEntry(
             key=CONF_DISCOVERY_INITIAL_TRACKS,
@@ -147,6 +384,7 @@ async def get_config_entries(
             "Affects only the first display, all fetched tracks remain available. Default: 5.",
             default_value=5,
             required=False,
+            advanced=True,
         ),
         ConfigEntry(
             key=CONF_BROWSE_INITIAL_TRACKS,
@@ -156,43 +394,7 @@ async def get_config_entries(
             "Additional tracks can be loaded with 'Load more' button. Default: 15.",
             default_value=15,
             required=False,
-        ),
-        ConfigEntry(
-            key=CONF_ENABLE_RECOMMENDATIONS,
-            type=ConfigEntryType.BOOLEAN,
-            label="Enable Discover (Recommendations)",
-            description="Show My Mix recommendations on the home page. "
-            "When enabled, recommendations refresh each time you reload the page "
-            "for fresh discoveries.",
-            default_value=False,  # Experimental feature - disabled by default
-            required=False,
-        ),
-        ConfigEntry(
-            key=CONF_ENABLE_MY_MIX_BROWSE,
-            type=ConfigEntryType.BOOLEAN,
-            label="Enable My Mix in Browse",
-            description="Show My Mix folder in the Browse section. "
-            "When disabled, My Mix will not appear in Browse.",
-            default_value=False,  # Experimental feature - disabled by default
-            required=False,
-        ),
-        ConfigEntry(
-            key=CONF_ENABLE_MY_MIX_PLAYLIST,
-            type=ConfigEntryType.BOOLEAN,
-            label="Enable My Mix Playlist",
-            description="Show My Mix as a virtual playlist in your library. "
-            "When disabled, My Mix will not appear in your playlists.",
-            default_value=False,  # Experimental feature - disabled by default
-            required=False,
-        ),
-        ConfigEntry(
-            key=CONF_ENABLE_MY_MIX_RADIO,
-            type=ConfigEntryType.BOOLEAN,
-            label="Enable My Mix Radio Mode",
-            description="Enable radio feedback for My Mix (like/dislike tracks). "
-            "When disabled, radio feedback will not be sent to Yandex.",
-            default_value=False,  # Experimental feature - disabled by default
-            required=False,
+            advanced=True,
         ),
         ConfigEntry(
             key=CONF_BASE_URL,
@@ -200,7 +402,7 @@ async def get_config_entries(
             label="API Base URL",
             description="API endpoint base URL. "
             "Only change if KION Music changes their API endpoint. "
-            "Default: https://music.mts.ru/ya_proxy_api",
+            "Default: https://api.music.yandex.net",
             default_value=DEFAULT_BASE_URL,
             required=False,
             advanced=True,
