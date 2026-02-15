@@ -180,7 +180,7 @@ class SharedGroupStream:
 
             # Phase 2: Live stream
             while True:
-                next_chunk = await q.get()
+                next_chunk: bytes | None = await q.get()
                 if next_chunk is None:
                     logger.debug(
                         "[SharedStream:%s] EOF received for subscriber %s",
@@ -646,7 +646,7 @@ class MSXBridgeProvider(PlayerProvider):
             # Format: /api/streams/single/{queue_id}/queue/{queue_item_id}.{format}
             base_url = getattr(self.mass.streams, "base_url", None)
             if not base_url:
-                # Fallback: use webserver base_url
+                # Fallback: construct from webserver
                 base_url = self.mass.webserver.base_url
 
             stream_url = (
