@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import random
+from collections.abc import AsyncGenerator, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import MediaType, ProviderFeature
@@ -38,19 +40,39 @@ from .constants import (
     CONF_BASE_URL,
     CONF_BROWSE_INITIAL_TRACKS,
     CONF_DISCOVERY_INITIAL_TRACKS,
+    CONF_ENABLE_ACTIVITY_MIXES,
+    CONF_ENABLE_CHART,
+    CONF_ENABLE_FEED_RECOMMENDATIONS,
+    CONF_ENABLE_LIKED_TRACKS_BROWSE,
+    CONF_ENABLE_LIKED_TRACKS_PLAYLIST,
+    CONF_ENABLE_MIXES_BROWSE,
+    CONF_ENABLE_MOOD_MIXES,
     CONF_ENABLE_MY_MIX_BROWSE,
     CONF_ENABLE_MY_MIX_PLAYLIST,
     CONF_ENABLE_MY_MIX_RADIO,
+    CONF_ENABLE_NEW_PLAYLISTS,
+    CONF_ENABLE_NEW_RELEASES,
+    CONF_ENABLE_PICKS_BROWSE,
     CONF_ENABLE_RECOMMENDATIONS,
+    CONF_ENABLE_SEASONAL_MIXES,
+    CONF_ENABLE_TOP_PICKS,
+    CONF_LIKED_TRACKS_MAX_TRACKS,
     CONF_MY_MIX_BATCH_SIZE,
     CONF_MY_MIX_MAX_TRACKS,
     CONF_TOKEN,
     CONF_TRACK_BATCH_SIZE,
     DEFAULT_BASE_URL,
+    LIKED_TRACKS_PLAYLIST_ID,
     MY_MIX_PLAYLIST_ID,
     PLAYLIST_ID_SPLITTER,
     RADIO_TRACK_ID_SEP,
     ROTOR_STATION_MY_MIX,
+    TAG_CATEGORY_ACTIVITY,
+    TAG_CATEGORY_ERA,
+    TAG_CATEGORY_GENRES,
+    TAG_CATEGORY_MOOD,
+    TAG_MIXES,
+    TAG_SEASONAL_MAP,
 )
 from .parsers import parse_album, parse_artist, parse_playlist, parse_track
 from .streaming import KionMusicStreamingManager
@@ -131,6 +153,9 @@ class KionMusicProvider(MusicProvider):
 
         :param is_removed: Whether the provider is being removed.
         """
+        # Clean up any temp files from preload streaming
+        if self._streaming:
+            self._streaming.cleanup_all_temp_files()
         if self._client:
             await self._client.disconnect()
         self._client = None
@@ -278,6 +303,14 @@ class KionMusicProvider(MusicProvider):
                 )
             return all_tracks
 
+        # Handle picks/ path (mood, activity, era, genres)
+        if subpath == "picks":
+            return await self._browse_picks(path, path_parts)
+
+        # Handle mixes/ path (seasonal collections)
+        if subpath == "mixes":
+            return await self._browse_mixes(path, path_parts)
+
         if subpath:
             return await super().browse(path)
 
@@ -316,7 +349,10 @@ class KionMusicProvider(MusicProvider):
                     is_playable=True,
                 )
             )
-        if ProviderFeature.LIBRARY_TRACKS in self.supported_features:
+        # Only add Liked Tracks folder if enabled
+        if ProviderFeature.LIBRARY_TRACKS in self.supported_features and self.config.get_value(
+            CONF_ENABLE_LIKED_TRACKS_BROWSE, True
+        ):
             folders.append(
                 BrowseFolder(
                     item_id="tracks",
@@ -336,9 +372,163 @@ class KionMusicProvider(MusicProvider):
                     is_playable=True,
                 )
             )
+        # Add Picks folder if enabled
+        if self.config.get_value(CONF_ENABLE_PICKS_BROWSE, True):
+            folders.append(
+                BrowseFolder(
+                    item_id="picks",
+                    provider=self.instance_id,
+                    path=f"{base}picks",
+                    name=names.get("picks", "Picks"),
+                    is_playable=False,
+                )
+            )
+        # Add Mixes folder if enabled
+        if self.config.get_value(CONF_ENABLE_MIXES_BROWSE, True):
+            folders.append(
+                BrowseFolder(
+                    item_id="mixes",
+                    provider=self.instance_id,
+                    path=f"{base}mixes",
+                    name=names.get("mixes", "Mixes"),
+                    is_playable=False,
+                )
+            )
         if len(folders) == 1:
             return await self.browse(folders[0].path)
         return folders
+
+    async def _browse_picks(
+        self, path: str, path_parts: list[str]
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+        """Browse picks folder (mood, activity, era, genres).
+
+        :param path: Full browse path.
+        :param path_parts: Split path parts after ://.
+        :return: List of folders or playlists.
+        """
+        names = self._get_browse_names()
+        base = path.rsplit("/", 1)[0] + "/" if "/" in path.split("://")[1] else path + "/"
+
+        # picks/ - show category folders
+        if len(path_parts) == 1:
+            return [
+                BrowseFolder(
+                    item_id="mood",
+                    provider=self.instance_id,
+                    path=f"{base}mood",
+                    name=names.get("mood", "Mood"),
+                    is_playable=False,
+                ),
+                BrowseFolder(
+                    item_id="activity",
+                    provider=self.instance_id,
+                    path=f"{base}activity",
+                    name=names.get("activity", "Activity"),
+                    is_playable=False,
+                ),
+                BrowseFolder(
+                    item_id="era",
+                    provider=self.instance_id,
+                    path=f"{base}era",
+                    name=names.get("era", "Era"),
+                    is_playable=False,
+                ),
+                BrowseFolder(
+                    item_id="genres",
+                    provider=self.instance_id,
+                    path=f"{base}genres",
+                    name=names.get("genres", "Genres"),
+                    is_playable=False,
+                ),
+            ]
+
+        category = path_parts[1] if len(path_parts) > 1 else None
+        tag = path_parts[2] if len(path_parts) > 2 else None
+
+        # Determine tags for the category
+        category_tags: list[str] = []
+        if category == "mood":
+            category_tags = TAG_CATEGORY_MOOD
+        elif category == "activity":
+            category_tags = TAG_CATEGORY_ACTIVITY
+        elif category == "era":
+            category_tags = TAG_CATEGORY_ERA
+        elif category == "genres":
+            category_tags = TAG_CATEGORY_GENRES
+
+        # picks/category/ - show tag folders
+        if category and not tag:
+            folders = []
+            for t in category_tags:
+                folders.append(
+                    BrowseFolder(
+                        item_id=t,
+                        provider=self.instance_id,
+                        path=f"{base}{t}",
+                        name=names.get(t, t.title()),
+                        is_playable=True,
+                    )
+                )
+            return folders
+
+        # picks/category/tag - show playlists for the tag
+        if tag and tag in category_tags:
+            return await self._get_tag_playlists_as_browse(tag)
+
+        return []
+
+    async def _browse_mixes(
+        self, path: str, path_parts: list[str]
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+        """Browse mixes folder (seasonal collections).
+
+        :param path: Full browse path.
+        :param path_parts: Split path parts after ://.
+        :return: List of folders or playlists.
+        """
+        names = self._get_browse_names()
+        base = path.rsplit("/", 1)[0] + "/" if "/" in path.split("://")[1] else path + "/"
+
+        # mixes/ - show seasonal folders
+        if len(path_parts) == 1:
+            folders = []
+            for t in TAG_MIXES:
+                folders.append(
+                    BrowseFolder(
+                        item_id=t,
+                        provider=self.instance_id,
+                        path=f"{base}{t}",
+                        name=names.get(t, t.title()),
+                        is_playable=True,
+                    )
+                )
+            return folders
+
+        # mixes/tag - show playlists for the tag
+        tag = path_parts[1] if len(path_parts) > 1 else None
+        if tag and tag in TAG_MIXES:
+            return await self._get_tag_playlists_as_browse(tag)
+
+        return []
+
+    @use_cache(3600)
+    async def _get_tag_playlists_as_browse(
+        self, tag_id: str
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+        """Get playlists for a tag and return as browse items.
+
+        :param tag_id: Tag identifier (e.g. 'chill', '80s').
+        :return: List of Playlist objects.
+        """
+        playlists = await self.client.get_tag_playlists(tag_id)
+        result: list[Playlist] = []
+        for playlist in playlists:
+            try:
+                result.append(parse_playlist(self, playlist))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing tag playlist: %s", err)
+        return result
 
     # Search
 
@@ -449,16 +639,21 @@ class KionMusicProvider(MusicProvider):
         yandex_track = await self.client.get_track(track_id)
         if not yandex_track:
             raise MediaNotFoundError(f"Track {prov_track_id} not found")
-        return parse_track(self, yandex_track)
+
+        # Fetch lyrics if available
+        lyrics, lyrics_synced = await self.client.get_track_lyrics(track_id)
+
+        return parse_track(self, yandex_track, lyrics=lyrics, lyrics_synced=lyrics_synced)
 
     @use_cache(3600 * 24 * 30)
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get playlist details by ID.
 
-        Supports virtual playlist MY_MIX_PLAYLIST_ID (My Mix). Real playlists
-        use format "owner_id:kind".
+        Supports virtual playlists MY_MIX_PLAYLIST_ID (My Mix) and
+        LIKED_TRACKS_PLAYLIST_ID (Liked Tracks). Real playlists use format "owner_id:kind".
 
-        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind" or my_mix).
+        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind",
+            my_mix, or liked_tracks).
         :return: Playlist object.
         :raises MediaNotFoundError: If playlist not found.
         """
@@ -472,6 +667,24 @@ class KionMusicProvider(MusicProvider):
                 provider_mappings={
                     ProviderMapping(
                         item_id=MY_MIX_PLAYLIST_ID,
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                        is_unique=True,
+                    )
+                },
+                is_editable=False,
+            )
+
+        if prov_playlist_id == LIKED_TRACKS_PLAYLIST_ID:
+            names = self._get_browse_names()
+            return Playlist(
+                item_id=LIKED_TRACKS_PLAYLIST_ID,
+                provider=self.instance_id,
+                name=names["tracks"],
+                owner="KION Music",
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=LIKED_TRACKS_PLAYLIST_ID,
                         provider_domain=self.domain,
                         provider_instance=self.instance_id,
                         is_unique=True,
@@ -561,6 +774,79 @@ class KionMusicProvider(MusicProvider):
             self._my_mix_playlist_next_cursor = first_track_id_this_batch
         return tracks
 
+    async def _get_liked_tracks_playlist_tracks(self, page: int) -> list[Track]:
+        """Get liked tracks for virtual playlist (sorted in reverse chronological order).
+
+        :param page: Page number (0 = all tracks limited by config, >0 = empty for pagination).
+        :return: List of Track objects.
+        """
+        self.logger.debug(f"_get_liked_tracks_playlist_tracks called with page={page}")
+        # Liked tracks API returns all tracks at once, so only return tracks on page 0
+        if page > 0:
+            self.logger.debug("Returning empty list for page > 0")
+            return []
+
+        max_tracks_config = int(
+            self.config.get_value(CONF_LIKED_TRACKS_MAX_TRACKS) or 500  # type: ignore[arg-type]
+        )
+        self.logger.debug(f"Max tracks config: {max_tracks_config}")
+
+        # Fetch liked tracks (already sorted in reverse chronological order by api_client)
+        track_shorts = await self.client.get_liked_tracks()
+        self.logger.debug(f"Got {len(track_shorts)} liked tracks from API")
+        if not track_shorts:
+            self.logger.warning("No liked tracks found!")
+            return []
+
+        # Apply max tracks limit
+        track_shorts = track_shorts[:max_tracks_config]
+        self.logger.debug(f"After limit, processing {len(track_shorts)} tracks")
+
+        # Fetch full track details in batches
+        track_ids = [str(ts.track_id) for ts in track_shorts if ts.track_id]
+        self.logger.debug(f"Extracted {len(track_ids)} track IDs. First 3: {track_ids[:3]}")
+
+        batch_size = int(
+            self.config.get_value(CONF_TRACK_BATCH_SIZE) or 50  # type: ignore[arg-type]
+        )
+        full_tracks = []
+        batch_to_ids = {}  # Map batch results back to original compound IDs
+        for i in range(0, len(track_ids), batch_size):
+            batch_ids = track_ids[i : i + batch_size]
+            self.logger.debug(f"Fetching batch {i // batch_size + 1}: {len(batch_ids)} tracks")
+            batch_result = await self.client.get_tracks(batch_ids)
+            self.logger.debug(f"Batch returned {len(batch_result)} tracks")
+            # Map each returned track back to its original compound ID
+            for j, track in enumerate(batch_result):
+                if j < len(batch_ids):
+                    batch_to_ids[str(track.id) if hasattr(track, "id") else None] = batch_ids[j]
+            full_tracks.extend(batch_result)
+
+        self.logger.debug(f"Total full_tracks fetched: {len(full_tracks)}")
+
+        # Create track ID to full track mapping using compound IDs
+        track_map = {}
+        for t in full_tracks:
+            if hasattr(t, "id") and t.id:
+                # Use the compound ID from our mapping
+                compound_id = batch_to_ids.get(str(t.id), str(t.id))
+                track_map[compound_id] = t
+        self.logger.debug(f"Created track_map with {len(track_map)} entries")
+
+        # Parse tracks in the original order (reverse chronological)
+        tracks = []
+        for track_id in track_ids:
+            if track_id in track_map:
+                try:
+                    tracks.append(parse_track(self, track_map[track_id]))
+                except InvalidDataError as err:
+                    self.logger.debug(f"Error parsing liked track {track_id}: {err}")
+            else:
+                self.logger.debug(f"Track ID {track_id} not found in track_map")
+
+        self.logger.debug(f"Successfully parsed {len(tracks)} tracks")
+        return tracks
+
     # Get related items
 
     @use_cache(3600 * 24 * 30)
@@ -607,19 +893,70 @@ class KionMusicProvider(MusicProvider):
                 self.logger.debug("Error parsing similar track: %s", err)
         return tracks
 
-    @use_cache(60)  # Cache for only 1 minute to allow auto-refresh
     async def recommendations(self) -> list[RecommendationFolder]:
-        """Get recommendations; includes My Mix (Мой Микс) as first folder.
+        """Get recommendations with multiple discovery folders.
 
-        Fetches fresh tracks on each call for discovery experience.
+        Returns My Mix, Feed (Made for You), Chart, New Releases, and
+        New Playlists sections — each controlled by its own config toggle.
 
-        :return: List of recommendation folders (My Mix with tracks).
+        :return: List of recommendation folders.
         """
-        # Check if recommendations are enabled (this check is redundant if we remove
-        # from supported_features, but provides defense in depth)
-        if not self.config.get_value(CONF_ENABLE_RECOMMENDATIONS, True):
-            return []
+        folders: list[RecommendationFolder] = []
 
+        if self.config.get_value(CONF_ENABLE_RECOMMENDATIONS, True):
+            folder = await self._get_my_mix_recommendations()
+            if folder:
+                folders.append(folder)
+
+        if self.config.get_value(CONF_ENABLE_FEED_RECOMMENDATIONS, True):
+            folder = await self._get_feed_recommendations()
+            if folder:
+                folders.append(folder)
+
+        if self.config.get_value(CONF_ENABLE_CHART, True):
+            folder = await self._get_chart_recommendations()
+            if folder:
+                folders.append(folder)
+
+        if self.config.get_value(CONF_ENABLE_NEW_RELEASES, True):
+            folder = await self._get_new_releases_recommendations()
+            if folder:
+                folders.append(folder)
+
+        if self.config.get_value(CONF_ENABLE_NEW_PLAYLISTS, True):
+            folder = await self._get_new_playlists_recommendations()
+            if folder:
+                folders.append(folder)
+
+        # New Picks & Mixes recommendations
+        if self.config.get_value(CONF_ENABLE_TOP_PICKS, True):
+            folder = await self._get_top_picks_recommendations()
+            if folder:
+                folders.append(folder)
+
+        if self.config.get_value(CONF_ENABLE_MOOD_MIXES, True):
+            folder = await self._get_mood_mix_recommendations()
+            if folder:
+                folders.append(folder)
+
+        if self.config.get_value(CONF_ENABLE_ACTIVITY_MIXES, True):
+            folder = await self._get_activity_mix_recommendations()
+            if folder:
+                folders.append(folder)
+
+        if self.config.get_value(CONF_ENABLE_SEASONAL_MIXES, True):
+            folder = await self._get_seasonal_mix_recommendations()
+            if folder:
+                folders.append(folder)
+
+        return folders
+
+    @use_cache(60)
+    async def _get_my_mix_recommendations(self) -> RecommendationFolder | None:
+        """Get My Mix recommendation folder with personalized tracks.
+
+        :return: RecommendationFolder with My Mix tracks, or None if empty.
+        """
         max_tracks_config = int(
             self.config.get_value(CONF_MY_MIX_MAX_TRACKS) or 150  # type: ignore[arg-type]
         )
@@ -627,12 +964,10 @@ class KionMusicProvider(MusicProvider):
             self.config.get_value(CONF_MY_MIX_BATCH_SIZE) or 3  # type: ignore[arg-type]
         )
 
-        # Reset for fresh recommendations
         seen_track_ids: set[str] = set()
         items: list[Track] = []
         queue: str | int | None = None
 
-        # Fetch multiple batches based on config
         for _ in range(batch_size_config):
             if len(seen_track_ids) >= max_tracks_config:
                 break
@@ -652,7 +987,6 @@ class KionMusicProvider(MusicProvider):
                         str(yt.id) if hasattr(yt, "id") and yt.id else getattr(yt, "track_id", None)
                     )
                     if track_id:
-                        # Check for duplicates
                         if track_id in seen_track_ids:
                             continue
 
@@ -669,12 +1003,13 @@ class KionMusicProvider(MusicProvider):
                 except InvalidDataError as err:
                     self.logger.debug("Error parsing My Mix track for recommendations: %s", err)
 
-            # Set queue for next batch
             queue = first_track_id_this_batch
             if not queue:
                 break
 
-        # Apply initial tracks limit for Discovery
+        if not items:
+            return None
+
         initial_tracks_limit = int(
             self.config.get_value(CONF_DISCOVERY_INITIAL_TRACKS) or 5  # type: ignore[arg-type]
         )
@@ -682,26 +1017,285 @@ class KionMusicProvider(MusicProvider):
             items = items[:initial_tracks_limit]
 
         names = self._get_browse_names()
-        return [
-            RecommendationFolder(
-                item_id=MY_MIX_PLAYLIST_ID,
-                provider=self.instance_id,
-                name=names[MY_MIX_PLAYLIST_ID],
-                items=UniqueList(items),
-                icon="mdi-waveform",
-            )
+        return RecommendationFolder(
+            item_id=MY_MIX_PLAYLIST_ID,
+            provider=self.instance_id,
+            name=names[MY_MIX_PLAYLIST_ID],
+            items=UniqueList(items),
+            icon="mdi-waveform",
+        )
+
+    @use_cache(1800)
+    async def _get_feed_recommendations(self) -> RecommendationFolder | None:
+        """Get personalized feed playlists (Playlist of the Day, DejaVu, etc.).
+
+        :return: RecommendationFolder with generated playlists, or None if unavailable.
+        """
+        feed = await self.client.get_feed()
+        if not feed or not feed.generated_playlists:
+            return None
+        items: list[Playlist] = []
+        for gen_playlist in feed.generated_playlists:
+            if gen_playlist.data and gen_playlist.ready:
+                try:
+                    items.append(parse_playlist(self, gen_playlist.data))
+                except InvalidDataError as err:
+                    self.logger.debug("Error parsing feed playlist: %s", err)
+        if not items:
+            return None
+        names = self._get_browse_names()
+        return RecommendationFolder(
+            item_id="feed",
+            provider=self.instance_id,
+            name=names["feed"],
+            items=UniqueList(items),
+            icon="mdi-account-music",
+        )
+
+    @use_cache(3600)
+    async def _get_chart_recommendations(self) -> RecommendationFolder | None:
+        """Get chart tracks (hot tracks of the month).
+
+        :return: RecommendationFolder with chart tracks, or None if unavailable.
+        """
+        chart_info = await self.client.get_chart()
+        if not chart_info or not chart_info.chart:
+            return None
+        playlist = chart_info.chart
+        if not playlist.tracks:
+            return None
+        # TrackShort objects in chart context have .track (full Track) and .chart (position)
+        tracks: list[Track] = []
+        for track_short in playlist.tracks[:20]:
+            track_obj = getattr(track_short, "track", None)
+            if not track_obj:
+                continue
+            try:
+                tracks.append(parse_track(self, track_obj))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing chart track: %s", err)
+        if not tracks:
+            return None
+        names = self._get_browse_names()
+        return RecommendationFolder(
+            item_id="chart",
+            provider=self.instance_id,
+            name=names["chart"],
+            items=UniqueList(tracks),
+            icon="mdi-chart-line",
+        )
+
+    @use_cache(3600)
+    async def _get_new_releases_recommendations(self) -> RecommendationFolder | None:
+        """Get new album releases.
+
+        :return: RecommendationFolder with new albums, or None if unavailable.
+        """
+        releases = await self.client.get_new_releases()
+        if not releases or not releases.new_releases:
+            return None
+        # new_releases is a list of album IDs (int) — need to batch-fetch full details
+        album_ids = [str(aid) for aid in releases.new_releases[:20]]
+        if not album_ids:
+            return None
+        full_albums = await self.client.get_albums(album_ids)
+        if not full_albums:
+            return None
+        albums: list[Album] = []
+        for album in full_albums:
+            try:
+                albums.append(parse_album(self, album))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing new release album: %s", err)
+        if not albums:
+            return None
+        names = self._get_browse_names()
+        return RecommendationFolder(
+            item_id="new_releases",
+            provider=self.instance_id,
+            name=names["new_releases"],
+            items=UniqueList(albums),
+            icon="mdi-new-box",
+        )
+
+    @use_cache(3600)
+    async def _get_new_playlists_recommendations(self) -> RecommendationFolder | None:
+        """Get new editorial playlists.
+
+        :return: RecommendationFolder with new playlists, or None if unavailable.
+        """
+        result = await self.client.get_new_playlists()
+        if not result or not result.new_playlists:
+            return None
+        # new_playlists is a list of PlaylistId objects (uid, kind) — fetch full details
+        playlist_ids = [
+            f"{pid.uid}:{pid.kind}"
+            for pid in result.new_playlists[:20]
+            if hasattr(pid, "uid") and hasattr(pid, "kind")
         ]
+        if not playlist_ids:
+            return None
+        full_playlists = await self.client.get_playlists(playlist_ids)
+        if not full_playlists:
+            return None
+        playlists: list[Playlist] = []
+        for playlist in full_playlists:
+            try:
+                playlists.append(parse_playlist(self, playlist))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing new playlist: %s", err)
+        if not playlists:
+            return None
+        names = self._get_browse_names()
+        return RecommendationFolder(
+            item_id="new_playlists",
+            provider=self.instance_id,
+            name=names["new_playlists"],
+            items=UniqueList(playlists),
+            icon="mdi-playlist-star",
+        )
+
+    @use_cache(3600)
+    async def _get_top_picks_recommendations(self) -> RecommendationFolder | None:
+        """Get Top Picks recommendation folder (tag: top).
+
+        :return: RecommendationFolder with top playlists, or None if unavailable.
+        """
+        playlists = await self.client.get_tag_playlists("top")
+        if not playlists:
+            return None
+        items: list[Playlist] = []
+        for playlist in playlists[:10]:
+            try:
+                items.append(parse_playlist(self, playlist))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing top picks playlist: %s", err)
+        if not items:
+            return None
+        names = self._get_browse_names()
+        return RecommendationFolder(
+            item_id="top_picks",
+            provider=self.instance_id,
+            name=names.get("top_picks", "Top Picks"),
+            items=UniqueList(items),
+            icon="mdi-star",
+        )
+
+    @use_cache(1800)
+    async def _get_mood_mix_recommendations(self) -> RecommendationFolder | None:
+        """Get Mood Mix recommendation folder (rotating mood tags).
+
+        :return: RecommendationFolder with mood playlists, or None if unavailable.
+        """
+        # Rotate through mood tags
+        mood_tag = random.choice(TAG_CATEGORY_MOOD)
+        playlists = await self.client.get_tag_playlists(mood_tag)
+        if not playlists:
+            return None
+        items: list[Playlist] = []
+        for playlist in playlists[:8]:
+            try:
+                items.append(parse_playlist(self, playlist))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing mood playlist: %s", err)
+        if not items:
+            return None
+        names = self._get_browse_names()
+        tag_name = names.get(mood_tag, mood_tag.title())
+        return RecommendationFolder(
+            item_id="mood_mix",
+            provider=self.instance_id,
+            name=f"{names.get('mood_mix', 'Mood')}: {tag_name}",
+            items=UniqueList(items),
+            icon="mdi-emoticon-outline",
+        )
+
+    @use_cache(1800)
+    async def _get_activity_mix_recommendations(self) -> RecommendationFolder | None:
+        """Get Activity Mix recommendation folder (rotating activity tags).
+
+        :return: RecommendationFolder with activity playlists, or None if unavailable.
+        """
+        # Rotate through activity tags
+        activity_tag = random.choice(TAG_CATEGORY_ACTIVITY)
+        playlists = await self.client.get_tag_playlists(activity_tag)
+        if not playlists:
+            return None
+        items: list[Playlist] = []
+        for playlist in playlists[:8]:
+            try:
+                items.append(parse_playlist(self, playlist))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing activity playlist: %s", err)
+        if not items:
+            return None
+        names = self._get_browse_names()
+        tag_name = names.get(activity_tag, activity_tag.title())
+        return RecommendationFolder(
+            item_id="activity_mix",
+            provider=self.instance_id,
+            name=f"{names.get('activity_mix', 'Activity')}: {tag_name}",
+            items=UniqueList(items),
+            icon="mdi-run",
+        )
+
+    @use_cache(3600 * 6)
+    async def _get_seasonal_mix_recommendations(self) -> RecommendationFolder | None:
+        """Get Seasonal Mix recommendation folder (based on current month).
+
+        :return: RecommendationFolder with seasonal playlists, or None if unavailable.
+        """
+        # Determine current season tag
+        current_month = datetime.now().month
+        seasonal_tag = TAG_SEASONAL_MAP.get(current_month, "autumn")
+
+        # Handle spring fallback (spring tag may not exist)
+        if seasonal_tag == "spring":
+            seasonal_tag = "autumn"  # Fallback
+
+        playlists = await self.client.get_tag_playlists(seasonal_tag)
+        if not playlists:
+            return None
+        items: list[Playlist] = []
+        for playlist in playlists[:8]:
+            try:
+                items.append(parse_playlist(self, playlist))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing seasonal playlist: %s", err)
+        if not items:
+            return None
+        names = self._get_browse_names()
+        tag_name = names.get(seasonal_tag, seasonal_tag.title())
+        return RecommendationFolder(
+            item_id="seasonal_mix",
+            provider=self.instance_id,
+            name=f"{names.get('seasonal_mix', 'Seasonal')}: {tag_name}",
+            items=UniqueList(items),
+            icon="mdi-weather-sunny",
+        )
 
     @use_cache(3600 * 3)
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
         """Get playlist tracks.
 
-        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind" or my_mix).
+        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind",
+            my_mix, or liked_tracks).
         :param page: Page number for pagination.
         :return: List of Track objects.
         """
+        self.logger.info(
+            f"get_playlist_tracks called: prov_playlist_id={prov_playlist_id}, page={page}"
+        )
+
         if prov_playlist_id == MY_MIX_PLAYLIST_ID:
+            self.logger.info("Fetching My Mix tracks")
             return await self._get_my_mix_playlist_tracks(page)
+
+        if prov_playlist_id == LIKED_TRACKS_PLAYLIST_ID:
+            self.logger.info("Fetching Liked Tracks for virtual playlist")
+            result = await self._get_liked_tracks_playlist_tracks(page)
+            self.logger.info(f"Liked Tracks playlist returned {len(result)} tracks")
+            return result
 
         # KION Music API returns all playlist tracks in one call (no server-side pagination).
         # Return empty list for page > 0 so the controller pagination loop terminates.
@@ -860,11 +1454,19 @@ class KionMusicProvider(MusicProvider):
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Retrieve library playlists from KION Music.
 
-        Includes the virtual My Mix playlist first (if enabled), then user playlists.
+        Includes virtual playlists (My Mix and Liked Tracks if enabled), then user playlists.
         """
-        # Only include My Mix playlist if enabled
-        if self.config.get_value(CONF_ENABLE_MY_MIX_PLAYLIST, True):
+        # Include My Mix playlist if enabled
+        my_mix_enabled = self.config.get_value(CONF_ENABLE_MY_MIX_PLAYLIST, True)
+        self.logger.debug(f"My Mix playlist enabled: {my_mix_enabled}")
+        if my_mix_enabled:
             yield await self.get_playlist(MY_MIX_PLAYLIST_ID)
+        # Include Liked Tracks playlist if enabled
+        liked_tracks_enabled = self.config.get_value(CONF_ENABLE_LIKED_TRACKS_PLAYLIST, True)
+        self.logger.debug(f"Liked Tracks playlist enabled: {liked_tracks_enabled}")
+        if liked_tracks_enabled:
+            self.logger.debug(f"Yielding Liked Tracks playlist with ID: {LIKED_TRACKS_PLAYLIST_ID}")
+            yield await self.get_playlist(LIKED_TRACKS_PLAYLIST_ID)
         playlists = await self.client.get_user_playlists()
         for playlist in playlists:
             try:
@@ -929,6 +1531,21 @@ class KionMusicProvider(MusicProvider):
         """
         return await self.streaming.get_stream_details(item_id)
 
+    async def get_audio_stream(
+        self, streamdetails: StreamDetails, seek_position: int = 0
+    ) -> AsyncGenerator[bytes, None]:
+        """Return the audio stream for the provider item.
+
+        This method is called when StreamType.CUSTOM is used, enabling on-the-fly
+        decryption of encrypted FLAC streams without disk I/O.
+
+        :param streamdetails: Stream details containing encrypted URL and decryption key.
+        :param seek_position: Seek position in seconds (not supported for encrypted streams).
+        :return: Async generator yielding decrypted audio chunks.
+        """
+        async for chunk in self.streaming.get_audio_stream(streamdetails, seek_position):
+            yield chunk
+
     async def on_played(
         self,
         media_type: MediaType,
@@ -960,11 +1577,15 @@ class KionMusicProvider(MusicProvider):
             )
 
     async def on_streamed(self, streamdetails: StreamDetails) -> None:
-        """Report stream completion for My Mix rotor feedback.
+        """Report stream completion for My Mix rotor feedback and cleanup temp files.
 
         Sends trackFinished or skip with actual seconds_streamed so Yandex
-        can improve recommendations.
+        can improve recommendations. Also cleans up any temp files from preload mode.
         """
+        # Clean up temp file if this was a preloaded stream
+        if self._streaming:
+            self._streaming.cleanup_temp_file(streamdetails.item_id)
+
         # Skip radio feedback if disabled
         if not self.config.get_value(CONF_ENABLE_MY_MIX_RADIO, True):
             return
