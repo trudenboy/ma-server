@@ -497,9 +497,7 @@ class MSXBridgeProvider(PlayerProvider):
 
     async def _run_idle_timeout_loop(self) -> None:
         """Background task: unregister players idle longer than configured timeout."""
-        raw_timeout = self.config.get_value(
-            CONF_PLAYER_IDLE_TIMEOUT, DEFAULT_PLAYER_IDLE_TIMEOUT
-        )
+        raw_timeout = self.config.get_value(CONF_PLAYER_IDLE_TIMEOUT, DEFAULT_PLAYER_IDLE_TIMEOUT)
         try:
             timeout_minutes = int(raw_timeout)
         except (TypeError, ValueError):
