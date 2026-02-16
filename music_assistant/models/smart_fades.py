@@ -37,5 +37,5 @@ class SmartFadesAnalysis(DataClassDictMixin):
 
     class Config(BaseConfig):  # noqa: D106
         serialization_strategy = {
-            np.ndarray: {"serialize": lambda x: x.tolist(), "deserialize": lambda x: np.array(x)}
+            np.ndarray: {"serialize": lambda x: x.tolist(), "deserialize": np.array}
         }
