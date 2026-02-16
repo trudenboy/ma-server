@@ -131,8 +131,7 @@ class YandexMusicStreamingManager:
 
         except Exception:
             # Clean up temp file on error
-            with contextlib.suppress(OSError):
-                os.close(temp_fd)
+            # Note: temp_fd is already closed by os.fdopen context manager
             with contextlib.suppress(OSError):
                 Path(temp_path).unlink()
             raise
@@ -218,6 +217,11 @@ class YandexMusicStreamingManager:
                                 temp_path = await self._download_and_decrypt_to_file(
                                     url, file_info["key"], item_id
                                 )
+                                # Clean up any previous temp file for this item_id
+                                old_temp_path = self._temp_files.get(item_id)
+                                if old_temp_path:
+                                    with contextlib.suppress(OSError):
+                                        os.remove(old_temp_path)
                                 # Track for cleanup
                                 self._temp_files[item_id] = temp_path
 
