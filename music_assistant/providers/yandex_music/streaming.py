@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import tempfile
+import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -160,14 +161,12 @@ class YandexMusicStreamingManager:
 
         :param max_age_seconds: Maximum age in seconds (default: 1800 = 30 minutes).
         """
-        import time
-
         now = time.time()
         for item_id in list(self._temp_files.keys()):
             temp_path = self._temp_files.get(item_id)
             if temp_path:
                 try:
-                    file_age = now - os.path.getmtime(temp_path)
+                    file_age = now - Path(temp_path).stat().st_mtime
                     if file_age > max_age_seconds:
                         self.cleanup_temp_file(item_id)
                         self.logger.debug(
@@ -705,12 +704,14 @@ class YandexMusicStreamingManager:
                         buf.write(chunk)
                         if buf.tell() > max_bytes:
                             self.logger.warning(
-                                "Download exceeded size limit (%dMB) for track %s, aborting preload",
+                                "Download exceeded size limit (%dMB) for track %s, "
+                                "aborting preload",
                                 buffer_limit,
                                 streamdetails.item_id,
                             )
                             raise MediaNotFoundError(
-                                f"Track too large for preload ({buf.tell()} bytes > {max_bytes} limit)"
+                                f"Track too large for preload "
+                                f"({buf.tell()} bytes > {max_bytes} limit)"
                             )
 
                 download_size = buf.tell()
