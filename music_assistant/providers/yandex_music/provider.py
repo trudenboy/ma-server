@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import random
 from collections.abc import AsyncGenerator, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import MediaType, ProviderFeature
@@ -1169,7 +1169,6 @@ class YandexMusicProvider(MusicProvider):
             icon="mdi-star",
         )
 
-    @use_cache(1800)
     async def _get_mood_mix_recommendations(self) -> RecommendationFolder | None:
         """Get Mood Mix recommendation folder (rotating mood tags).
 
@@ -1198,7 +1197,6 @@ class YandexMusicProvider(MusicProvider):
             icon="mdi-emoticon-outline",
         )
 
-    @use_cache(1800)
     async def _get_activity_mix_recommendations(self) -> RecommendationFolder | None:
         """Get Activity Mix recommendation folder (rotating activity tags).
 
@@ -1234,7 +1232,7 @@ class YandexMusicProvider(MusicProvider):
         :return: RecommendationFolder with seasonal playlists, or None if unavailable.
         """
         # Determine current season tag
-        current_month = datetime.now().month
+        current_month = datetime.now(tz=UTC).month
         seasonal_tag = TAG_SEASONAL_MAP.get(current_month, "autumn")
 
         # Handle spring fallback (spring tag may not exist)
