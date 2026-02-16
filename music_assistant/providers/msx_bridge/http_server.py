@@ -1618,6 +1618,8 @@ small {{ color: #666; display: block; margin-top: 4px; }}
                 player._skip_ws_notify = True
                 self.provider.mass.create_task(self._cmd_play_no_echo(player_id))
                 self.provider.on_player_activity(player_id)
+        elif msg_type == "debug_info":
+            logger.debug("Device debug info from %s: %s", player_id, msg.get("data", {}))
         else:
             logger.debug("Unknown WS message type from %s: %s", player_id, msg_type)
 

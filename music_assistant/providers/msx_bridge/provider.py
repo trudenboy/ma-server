@@ -25,6 +25,7 @@ from .constants import (
     DEFAULT_HTTP_PORT,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_PLAYER_IDLE_TIMEOUT,
+    GROUP_STREAM_MODE_REDIRECT,
     GROUP_STREAM_MODE_SHARED,
     MSX_PLAYER_ID_PREFIX,
 )
@@ -180,7 +181,7 @@ class SharedGroupStream:
 
             # Phase 2: Live stream
             while True:
-                next_chunk: bytes | None = await q.get()
+                next_chunk = await q.get()
                 if next_chunk is None:
                     logger.debug(
                         "[SharedStream:%s] EOF received for subscriber %s",
@@ -248,7 +249,7 @@ class MSXBridgeProvider(PlayerProvider):
         """Handle async initialization — start embedded HTTP server."""
         raw_port = self.config.get_value(CONF_HTTP_PORT, DEFAULT_HTTP_PORT)
         try:
-            port = int(raw_port)
+            port = int(raw_port)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             port = DEFAULT_HTTP_PORT
         if port < 1 or port > 65535:
@@ -499,7 +500,7 @@ class MSXBridgeProvider(PlayerProvider):
         """Background task: unregister players idle longer than configured timeout."""
         raw_timeout = self.config.get_value(CONF_PLAYER_IDLE_TIMEOUT, DEFAULT_PLAYER_IDLE_TIMEOUT)
         try:
-            timeout_minutes = int(raw_timeout)
+            timeout_minutes = int(raw_timeout)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             timeout_minutes = DEFAULT_PLAYER_IDLE_TIMEOUT
         interval_seconds = 60
@@ -528,8 +529,16 @@ class MSXBridgeProvider(PlayerProvider):
         """Check if shared buffer stream mode is enabled."""
         return self.group_stream_mode == GROUP_STREAM_MODE_SHARED
 
-    # Note: is_redirect_stream_mode() and get_ma_stream_url() removed as dead code.
-    # They can be restored when GROUP_STREAM_MODE_REDIRECT is implemented.
+    def is_redirect_stream_mode(self) -> bool:
+        """Check if MA redirect stream mode is enabled.
+
+        NOTE: Redirect mode is a scaffold for future MA Streamserver integration
+        (MA 2.6+). It is NOT exposed in the provider config UI — users cannot
+        select it. The constant GROUP_STREAM_MODE_REDIRECT exists so the code
+        path compiles and can be activated once MA exposes a public stream URL
+        endpoint. See also ``get_ma_stream_url()``.
+        """
+        return self.group_stream_mode == GROUP_STREAM_MODE_REDIRECT
 
     def get_group_id_for_player(self, player: MSXPlayer) -> str | None:
         """Get group ID if player is in a group (as leader or member).
@@ -613,8 +622,68 @@ class MSXBridgeProvider(PlayerProvider):
             logger.info("[GroupStream] Removed shared stream for group %s", group_id)
             self.mass.create_task(stream.stop())
 
-    # Note: get_ma_stream_url() removed as dead code (GROUP_STREAM_MODE_REDIRECT).
-    # Can be restored when redirect mode is implemented.
+    async def get_ma_stream_url(
+        self,
+        media: Any,
+        output_format: str = "mp3",
+    ) -> str | None:
+        """Get direct stream URL from MA Streamserver for redirect mode.
+
+        NOTE: This is a scaffold for future MA Streamserver integration. The
+        ``/api/streams/single/...`` route does not exist in current MA versions.
+        This method is only reachable if ``group_stream_mode`` is set to
+        ``redirect``, which is NOT exposed in the provider config UI.
+        It will be activated once MA exposes a public streaming endpoint.
+
+        Args:
+            media: PlayerMedia with queue_item_id and source_id
+            output_format: Audio format (mp3, aac, flac)
+
+        Returns:
+            Direct URL to MA Streamserver, or None if unavailable
+        """
+        if not media:
+            logger.debug("[MARedirect] No media provided")
+            return None
+
+        queue_item_id = getattr(media, "queue_item_id", None)
+        source_id = getattr(media, "source_id", None)
+
+        if not queue_item_id or not source_id:
+            logger.debug(
+                "[MARedirect] Media missing queue_item_id=%s or source_id=%s",
+                queue_item_id,
+                source_id,
+            )
+            return None
+
+        try:
+            # Get queue to find session_id
+            queue = self.mass.player_queues.get(source_id)
+            if not queue:
+                logger.warning("[MARedirect] Queue not found for source_id=%s", source_id)
+                return None
+
+            # Build MA Streamserver URL
+            # Format: /api/streams/single/{queue_id}/queue/{queue_item_id}.{format}
+            base_url = getattr(self.mass.streams, "base_url", None)
+            if not base_url:
+                # Fallback: use webserver base_url
+                base_url = self.mass.webserver.base_url
+
+            stream_url = (
+                f"{base_url}/api/streams/single/{source_id}/queue/{queue_item_id}.{output_format}"
+            )
+
+            logger.info(
+                "[MARedirect] Generated MA stream URL: %s",
+                stream_url,
+            )
+            return stream_url
+
+        except Exception as err:
+            logger.warning("[MARedirect] Failed to get MA stream URL: %s", err, exc_info=True)
+            return None
 
     async def cleanup_shared_streams(self) -> None:
         """Cleanup all shared streams (called on unload)."""

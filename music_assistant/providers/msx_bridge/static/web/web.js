@@ -114,7 +114,7 @@ const SENDSPIN_URL_PARAM = urlParams.get('sendspin_url') || '';
     function msxIcon(name) {
         if (!name) return '';
         var mapped = name.replace('msx-white-soft:', '').replace('msx-white:', '').replace(/-/g, '_');
-        return '<span class="material-symbols-rounded">' + mapped + '</span>';
+        return '<span class="material-symbols-rounded">' + esc(mapped) + '</span>';
     }
 
     function esc(str) {
