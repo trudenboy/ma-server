@@ -1229,7 +1229,7 @@ class StreamsController(CoreController):
         )
 
         async def fetch_announcement() -> None:
-            fmt = announcement_url.rsplit(".")[-1]
+            fmt = announcement_url.rsplit(".", maxsplit=1)[-1]
             async for chunk in get_ffmpeg_stream(
                 audio_input=announcement_url,
                 input_format=AudioFormat(content_type=ContentType.try_parse(fmt)),

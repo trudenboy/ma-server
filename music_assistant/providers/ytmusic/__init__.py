@@ -406,7 +406,7 @@ class YoutubeMusicProvider(MusicProvider):
         limit = None
         # Grab the playlist id from the full url in case of personal playlists
         if YT_PLAYLIST_ID_DELIMITER in prov_playlist_id:
-            prov_playlist_id = prov_playlist_id.split(YT_PLAYLIST_ID_DELIMITER)[0]
+            prov_playlist_id = prov_playlist_id.split(YT_PLAYLIST_ID_DELIMITER, maxsplit=1)[0]
         if (
             prov_playlist_id in YT_PERSONAL_PLAYLISTS
             and prov_playlist_id != YT_LIKED_SONGS_PLAYLIST_ID
@@ -547,7 +547,7 @@ class YoutubeMusicProvider(MusicProvider):
         """Add track(s) to playlist."""
         # Grab the playlist id from the full url in case of personal playlists
         if YT_PLAYLIST_ID_DELIMITER in prov_playlist_id:
-            prov_playlist_id = prov_playlist_id.split(YT_PLAYLIST_ID_DELIMITER)[0]
+            prov_playlist_id = prov_playlist_id.split(YT_PLAYLIST_ID_DELIMITER, maxsplit=1)[0]
         return await add_remove_playlist_tracks(
             headers=self._headers,
             prov_playlist_id=prov_playlist_id,
@@ -564,7 +564,7 @@ class YoutubeMusicProvider(MusicProvider):
         limit = None
         # Grab the playlist id from the full url in case of personal playlists
         if YT_PLAYLIST_ID_DELIMITER in prov_playlist_id:
-            prov_playlist_id = prov_playlist_id.split(YT_PLAYLIST_ID_DELIMITER)[0]
+            prov_playlist_id = prov_playlist_id.split(YT_PLAYLIST_ID_DELIMITER, maxsplit=1)[0]
         if (
             prov_playlist_id in YT_PERSONAL_PLAYLISTS
             and prov_playlist_id != YT_LIKED_SONGS_PLAYLIST_ID
@@ -1074,7 +1074,7 @@ class YoutubeMusicProvider(MusicProvider):
         processed_images = set()
         for img in sorted(thumbnails_obj, key=lambda w: w.get("width", 0), reverse=True):
             url: str = img["url"]
-            url_base = url.split("=w")[0]
+            url_base = url.split("=w", maxsplit=1)[0]
             width: int = img["width"]
             height: int = img["height"]
             image_ratio: float = width / height

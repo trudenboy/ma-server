@@ -303,7 +303,7 @@ class AudioTags:
             # - 1 ID: don't split at all
             # - 2+ IDs: split to match the expected count
             mb_id_count = len(self.musicbrainz_artistids)
-            return split_artists(tag, expected_count=mb_id_count if mb_id_count else None)
+            return split_artists(tag, expected_count=mb_id_count or None)
         # fallback to parsing from filename
         title = self.filename.rsplit(os.sep, 1)[-1].split(".")[0]
         if " - " in title:
@@ -350,7 +350,7 @@ class AudioTags:
                 return split_items(tag)
             # Use MB album artist ID count to guide splitting
             mb_id_count = len(self.musicbrainz_albumartistids)
-            return split_artists(tag, expected_count=mb_id_count if mb_id_count else None)
+            return split_artists(tag, expected_count=mb_id_count or None)
         return ()
 
     @property

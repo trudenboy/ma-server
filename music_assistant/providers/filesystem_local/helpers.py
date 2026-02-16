@@ -186,10 +186,10 @@ def get_album_dir(track_dir: str, album_name: str) -> str | None:
             if _dir_contains_album_name(album_name, dirname):
                 return parentdir
 
-        if compare_strings(album_name.split("(")[0], dirname, False):
+        if compare_strings(album_name.split("(", maxsplit=1)[0], dirname, False):
             # account for AlbumName (Version) format in the album name
             return parentdir
-        if compare_strings(album_name.split("(")[0], dirname.split(" - ")[-1], False):
+        if compare_strings(album_name.split("(", maxsplit=1)[0], dirname.split(" - ")[-1], False):
             # account for ArtistName - AlbumName (Version) format
             return parentdir
         if len(album_name) > 8 and album_name in dirname:

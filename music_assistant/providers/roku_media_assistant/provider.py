@@ -95,7 +95,7 @@ class MediaAssistantprovider(PlayerProvider):
                 ssdp_usn: str = discovery_info["usn"]
                 ssdp_udn: str | None = discovery_info.get("_udn")
                 if not ssdp_udn and ssdp_usn.startswith("uuid:"):
-                    ssdp_udn = "ROKU_" + ssdp_usn.split(":")[-1]
+                    ssdp_udn = "ROKU_" + ssdp_usn.rsplit(":", maxsplit=1)[-1]
                 elif ssdp_udn:
                     ssdp_udn = "ROKU_" + ssdp_udn.split(":")[-1]
                 else:

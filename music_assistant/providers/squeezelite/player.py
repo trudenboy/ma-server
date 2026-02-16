@@ -454,7 +454,7 @@ class SqueezelitePlayer(Player):
         )
         await slimplayer.play_url(
             url=url,
-            mime_type=f"audio/{url.split('.')[-1].split('?')[0]}",
+            mime_type=f"audio/{url.rsplit('.', maxsplit=1)[-1].split('?')[0]}",
             metadata=metadata,
             enqueue=enqueue,
             send_flush=send_flush,
@@ -478,7 +478,7 @@ class SqueezelitePlayer(Player):
                 0.2,
                 slimplayer.play_url(
                     url=url,
-                    mime_type=f"audio/{url.split('.')[-1].split('?')[0]}",
+                    mime_type=f"audio/{url.rsplit('.', maxsplit=1)[-1].split('?')[0]}",
                     metadata=metadata,
                     enqueue=True,
                     send_flush=False,

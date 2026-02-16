@@ -78,7 +78,7 @@ class DLNAPlayerProvider(PlayerProvider):
                 ssdp_usn: str = discovery_info["usn"]
                 ssdp_udn: str | None = discovery_info.get("_udn")
                 if not ssdp_udn and ssdp_usn.startswith("uuid:"):
-                    ssdp_udn = ssdp_usn.split("::")[0]
+                    ssdp_udn = ssdp_usn.split("::", maxsplit=1)[0]
 
                 if ssdp_udn in discovered_devices:
                     # already processed this device

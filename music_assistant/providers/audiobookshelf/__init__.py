@@ -486,7 +486,7 @@ for more details.
             if x.episode_id is not None and x.library_item_id == prov_podcast_id
         }
         for abs_episode in abs_podcast.media.episodes:
-            progress = abs_progresses.get(abs_episode.id_, None)
+            progress = abs_progresses.get(abs_episode.id_)
             mass_episode = parse_podcast_episode(
                 episode=abs_episode,
                 prov_podcast_id=prov_podcast_id,
