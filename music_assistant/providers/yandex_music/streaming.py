@@ -133,7 +133,7 @@ class YandexMusicStreamingManager:
             # Clean up temp file on error
             # Note: temp_fd is already closed by os.fdopen context manager
             with contextlib.suppress(OSError):
-                Path(temp_path).unlink()
+                os.unlink(temp_path)  # noqa: PTH108
             raise
 
     def cleanup_temp_file(self, item_id: str) -> None:
@@ -218,10 +218,8 @@ class YandexMusicStreamingManager:
                                     url, file_info["key"], item_id
                                 )
                                 # Clean up any previous temp file for this item_id
-                                old_temp_path = self._temp_files.get(item_id)
-                                if old_temp_path:
-                                    with contextlib.suppress(OSError):
-                                        os.remove(old_temp_path)
+                                if item_id in self._temp_files:
+                                    self.cleanup_temp_file(item_id)
                                 # Track for cleanup
                                 self._temp_files[item_id] = temp_path
 
