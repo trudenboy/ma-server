@@ -1169,6 +1169,7 @@ class YandexMusicProvider(MusicProvider):
             icon="mdi-star",
         )
 
+    @use_cache(1800)
     async def _get_mood_mix_recommendations(self) -> RecommendationFolder | None:
         """Get Mood Mix recommendation folder (rotating mood tags).
 
@@ -1197,6 +1198,7 @@ class YandexMusicProvider(MusicProvider):
             icon="mdi-emoticon-outline",
         )
 
+    @use_cache(1800)
     async def _get_activity_mix_recommendations(self) -> RecommendationFolder | None:
         """Get Activity Mix recommendation folder (rotating activity tags).
 
