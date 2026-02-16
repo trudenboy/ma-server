@@ -2,24 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from music_assistant_models.enums import MediaType
 from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.media_items import Album, Playlist, RecommendationFolder, Track
 
 from music_assistant.providers.yandex_music.constants import (
     BROWSE_NAMES_EN,
-    DISCOVERY_INITIAL_TRACKS,
-    MY_WAVE_BATCH_SIZE,
     MY_WAVE_PLAYLIST_ID,
-    RADIO_TRACK_ID_SEP,
-    ROTOR_STATION_MY_WAVE,
-    TAG_CATEGORY_ACTIVITY,
-    TAG_CATEGORY_MOOD,
-    TAG_SEASONAL_MAP,
 )
 from music_assistant.providers.yandex_music.provider import YandexMusicProvider
 
