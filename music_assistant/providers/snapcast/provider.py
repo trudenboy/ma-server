@@ -101,7 +101,7 @@ class SnapCastProvider(PlayerProvider):
         self._stop_called = False
         self._controlscript_available = False
         if self._use_builtin_server:
-            if Path(DEFAULT_SNAPSERVER_CONFIG_FILE).exists():
+            if await asyncio.to_thread(Path(DEFAULT_SNAPSERVER_CONFIG_FILE).exists):
                 self._snapcast_server_config_file = DEFAULT_SNAPSERVER_CONFIG_FILE
             else:
                 # Fallback for dev environments without a Snapserver config file.

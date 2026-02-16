@@ -67,7 +67,7 @@ class SnapcastSocketServer:
         """Start the Unix socket server."""
         # Ensure the socket file doesn't exist
         socket_path = Path(self.socket_path)
-        socket_path.unlink(missing_ok=True)
+        await asyncio.to_thread(socket_path.unlink, missing_ok=True)
 
         # Create the socket server
         self._server = await asyncio.start_unix_server(
@@ -75,7 +75,7 @@ class SnapcastSocketServer:
             path=self.socket_path,
         )
         # Set permissions so only the current user can access
-        Path(self.socket_path).chmod(0o600)
+        await asyncio.to_thread(Path(self.socket_path).chmod, 0o600)
         self._logger.debug("Started Unix socket server at %s", self.socket_path)
 
         # Subscribe to queue events
@@ -105,7 +105,7 @@ class SnapcastSocketServer:
             self._server = None
 
         # Clean up socket file
-        Path(self.socket_path).unlink(missing_ok=True)
+        await asyncio.to_thread(Path(self.socket_path).unlink, missing_ok=True)
         self._logger.debug("Stopped Unix socket server")
 
     async def notify_shutdown(self) -> None:

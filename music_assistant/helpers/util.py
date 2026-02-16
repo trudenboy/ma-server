@@ -146,9 +146,7 @@ def try_parse_bool(possible_bool: Any) -> bool:
 def try_parse_duration(duration_str: str) -> float:
     """Try to parse a duration in seconds from a duration (HH:MM:SS) string."""
     milliseconds = (
-        float("0." + duration_str.rsplit(".", maxsplit=1)[-1])
-        if "." in duration_str
-        else 0.0
+        float("0." + duration_str.rsplit(".", maxsplit=1)[-1]) if "." in duration_str else 0.0
     )
     duration_parts = duration_str.split(".", maxsplit=1)[0].split(",")[0].split(":")
     if len(duration_parts) == 3:

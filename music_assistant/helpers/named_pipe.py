@@ -84,9 +84,9 @@ class AsyncNamedPipeWriter:
                 os.close(self._write_fd)
             self._write_fd = None
         pipe_path = Path(self._pipe_path)
-        if pipe_path.exists():
+        if await asyncio.to_thread(pipe_path.exists):
             with suppress(Exception):
-                pipe_path.unlink()
+                await asyncio.to_thread(pipe_path.unlink)
 
     def __str__(self) -> str:
         """Return string representation."""

@@ -43,9 +43,9 @@ async def get_ssl_content(value: str) -> str:
     if value.startswith("/") and not value.startswith("-----BEGIN"):
         # This looks like a file path
         path = Path(value)
-        if not path.exists():
+        if not await asyncio.to_thread(path.exists):
             raise FileNotFoundError(f"SSL file not found: {value}")
-        if not path.is_file():
+        if not await asyncio.to_thread(path.is_file):
             raise ValueError(f"SSL path is not a file: {value}")
         async with aiofiles.open(path) as f:
             content: str = await f.read()
@@ -121,10 +121,10 @@ async def create_server_ssl_context(
         # Clean up temporary files
         if cert_path:
             with contextlib.suppress(Exception):
-                Path(cert_path).unlink()
+                await asyncio.to_thread(Path(cert_path).unlink)
         if key_path:
             with contextlib.suppress(Exception):
-                Path(key_path).unlink()
+                await asyncio.to_thread(Path(key_path).unlink)
 
 
 async def verify_ssl_certificate(certificate: str, private_key: str) -> SSLCertificateInfo:
@@ -245,10 +245,10 @@ async def _verify_ssl_with_temp_files(cert_content: str, key_content: str) -> SS
         # Clean up temp files
         if cert_path:
             with contextlib.suppress(Exception):
-                Path(cert_path).unlink()
+                await asyncio.to_thread(Path(cert_path).unlink)
         if key_path:
             with contextlib.suppress(Exception):
-                Path(key_path).unlink()
+                await asyncio.to_thread(Path(key_path).unlink)
 
 
 async def _get_certificate_details(cert_path: str) -> SSLCertificateInfo:
