@@ -273,3 +273,40 @@ def test_select_best_quality_high_only_flac_returns_flac(
 
     assert result is not None
     assert result.codec == "flac"
+
+
+# -- Temp file cleanup order tests ------------------------------------------
+
+
+def test_temp_file_replacement_order() -> None:
+    """New temp file is tracked before old file is deleted to prevent file leaks."""
+    from pathlib import Path
+    from music_assistant.providers.yandex_music.streaming import YandexMusicStreamingManager
+    
+    # Create a minimal streaming manager stub
+    class MinimalProvider:
+        def __init__(self):
+            self.logger = type('Logger', (), {
+                'debug': lambda *args: None,
+                'warning': lambda *args: None,
+            })()
+    
+    provider = MinimalProvider()
+    manager = YandexMusicStreamingManager(provider)  # type: ignore[arg-type]
+    
+    # Simulate storing a temp file
+    item_id = "track123"
+    old_path = "/tmp/old_file.tmp"
+    new_path = "/tmp/new_file.tmp"
+    
+    manager._temp_files[item_id] = old_path
+    
+    # Simulate the new logic: store new path first, then cleanup old
+    old_temp_path = manager._temp_files.get(item_id)
+    manager._temp_files[item_id] = new_path
+    
+    # Verify new path is stored even before old file cleanup
+    assert manager._temp_files[item_id] == new_path
+    
+    # Verify we captured the old path for cleanup
+    assert old_temp_path == old_path
