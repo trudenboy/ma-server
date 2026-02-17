@@ -218,8 +218,8 @@ async def test_lrc_regex_rejects_invalid_formats() -> None:
         "[0:12]",  # Single digit minute
         "[00:1]",  # Single digit second
         "Some [00:12] text",  # Text before timestamp
-        "[00:12.1]",  # Single digit centisecond (should be 2-3 digits)
-        "[00:12.1234]",  # Four digit millisecond
+        "[00:12.1]",  # Single digit centiseconds (should be 2-3 digits)
+        "[00:12.1234]",  # Four digit milliseconds
     ]
 
     for case in invalid_cases:
