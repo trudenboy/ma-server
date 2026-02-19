@@ -4,14 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       provider:
-        description: Provider name
+        description: "Provider domain (see trudenboy/ma-provider-tools providers.yml)"
         required: true
-        type: choice
-        options:
-          - yandex_music
-          - kion_music
-          - zvuk_music
-          - msx_bridge
+        type: string
       description:
         description: Branch slug (e.g. add-provider)
         required: true
@@ -47,6 +42,26 @@ jobs:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
           token: ${{ secrets.FORK_SYNC_PAT }}
+
+      - name: Validate provider against registry
+        run: |
+          PROVIDERS=$(gh api repos/trudenboy/ma-provider-tools/contents/providers.yml \
+            --jq '.content' | base64 -d | python3 -c "
+          import sys, yaml
+          data = yaml.safe_load(sys.stdin)
+          domains = [p['domain'] for p in data.get('providers', [])]
+          print('\n'.join(domains))
+          " 2>/dev/null || echo "")
+          if [ -z "$PROVIDERS" ]; then
+            echo "WARNING: Could not fetch provider registry; skipping validation"
+          elif ! echo "$PROVIDERS" | grep -qx "${{ inputs.provider }}"; then
+            echo "ERROR: '${{ inputs.provider }}' is not a known provider."
+            echo "Known providers:"
+            echo "$PROVIDERS" | sed 's/^/  - /'
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Configure git
         run: |

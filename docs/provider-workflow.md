@@ -117,6 +117,20 @@ docker compose down -v && docker compose up
 ./scripts/run-dev.sh
 ```
 
+## Shared Workflow Infrastructure
+
+All shared workflow logic is centralized in [`trudenboy/ma-provider-tools`](https://github.com/trudenboy/ma-provider-tools):
+
+- **`providers.yml`** — authoritative registry of all providers (domains, paths, types)
+- **`reusable-sync-to-fork.yml`** — sync logic called by all provider repos
+- **`reusable-release.yml`** — release logic called by all provider repos
+- **`reusable-test.yml`** — CI logic (adapts to `music_provider` or `player_provider`)
+- **`distribute.yml`** — auto-distributes wrapper updates to provider repos on change
+
+Provider repos contain thin wrapper files that delegate to these reusable workflows.
+To update shared logic, edit the reusable workflow in `ma-provider-tools` — no per-repo changes needed.
+To add a new provider, add an entry to `providers.yml` in `ma-provider-tools`.
+
 ## Provider Repo Structure
 
 Each provider repo follows the same layout:
@@ -132,9 +146,9 @@ scripts/setup.sh
 scripts/dev-server.sh
 .vscode/
 .github/workflows/
-  test.yml
-  release.yml
-  sync-to-fork.yml
+  test.yml             # wrapper → reusable-test.yml
+  release.yml          # wrapper → reusable-release.yml
+  sync-to-fork.yml     # wrapper → reusable-sync-to-fork.yml
 ```
 
 ## Versioning
@@ -271,12 +285,13 @@ as the worktree-based rebuild script may not have the remote tracking ref set up
 **sync-to-fork.yml: FORK_SYNC_PAT expired**
 
 Renew the PAT (needs `contents:write` on `trudenboy/ma-server`) then update the secret
-in all 4 provider repos:
+in all provider repos and in `ma-provider-tools`:
 ```bash
 gh secret set FORK_SYNC_PAT --body "$NEW_PAT" --repo trudenboy/ma-provider-yandex-music
 gh secret set FORK_SYNC_PAT --body "$NEW_PAT" --repo trudenboy/ma-provider-kion-music
 gh secret set FORK_SYNC_PAT --body "$NEW_PAT" --repo trudenboy/ma-provider-zvuk-music
 gh secret set FORK_SYNC_PAT --body "$NEW_PAT" --repo trudenboy/ma-provider-msx-bridge
+gh secret set FORK_SYNC_PAT --body "$NEW_PAT" --repo trudenboy/ma-provider-tools
 ```
 
 **sync-to-fork.yml ran but no PR created**
