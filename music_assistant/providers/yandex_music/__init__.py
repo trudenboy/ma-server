@@ -127,7 +127,7 @@ async def get_config_entries(
                 ConfigValueOption("Preload (full download first)", STREAMING_MODE_PRELOAD),
             ],
             default_value=STREAMING_MODE_BUFFERED,
-            advanced=True,
+            category="advanced",
         ),
         ConfigEntry(
             key=CONF_PRELOAD_BUFFER_MB,
@@ -140,7 +140,7 @@ async def get_config_entries(
             "Default: 100 MB (typical FLAC track is 30-50 MB).",
             range=(10, 500),
             default_value=100,
-            advanced=True,
+            category="advanced",
             depends_on=CONF_STREAMING_MODE,
             depends_on_value=STREAMING_MODE_PRELOAD,
         ),
@@ -155,7 +155,7 @@ async def get_config_entries(
             "Default: 8 MB (~45 seconds of FLAC audio).",
             range=(1, 64),
             default_value=8,
-            advanced=True,
+            category="advanced",
             depends_on=CONF_STREAMING_MODE,
             depends_on_value_not=STREAMING_MODE_DIRECT,
         ),
@@ -169,7 +169,7 @@ async def get_config_entries(
             range=(10, 1000),
             default_value=150,
             required=False,
-            advanced=True,
+            category="advanced",
         ),
         # Liked Tracks maximum tracks (advanced)
         ConfigEntry(
@@ -181,7 +181,7 @@ async def get_config_entries(
             range=(50, 5000),
             default_value=500,
             required=False,
-            advanced=True,
+            category="advanced",
         ),
         # API Base URL (advanced)
         ConfigEntry(
@@ -193,6 +193,6 @@ async def get_config_entries(
             "Default: https://api.music.yandex.net",
             default_value=DEFAULT_BASE_URL,
             required=False,
-            advanced=True,
+            category="advanced",
         ),
     )
