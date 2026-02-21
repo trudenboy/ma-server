@@ -148,10 +148,6 @@ class YandexMusicProvider(MusicProvider):
 
         :param is_removed: Whether the provider is being removed.
         """
-        # Clean up any temp files and close streaming session
-        if self._streaming:
-            self._streaming.cleanup_all_temp_files()
-            await self._streaming.close()
         if self._client:
             await self._client.disconnect()
         self._client = None
@@ -1610,16 +1606,30 @@ class YandexMusicProvider(MusicProvider):
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Retrieve library playlists from Yandex Music.
 
-        Includes virtual playlists (My Wave and Liked Tracks if enabled), then user playlists.
+        Includes virtual playlists (My Wave and Liked Tracks if enabled), user-created playlists,
+        and user-liked editorial playlists (returned by a separate API endpoint).
         """
         yield await self.get_playlist(MY_WAVE_PLAYLIST_ID)
         yield await self.get_playlist(LIKED_TRACKS_PLAYLIST_ID)
+        seen_ids: set[str] = set()
+        # User-created playlists
         playlists = await self.client.get_user_playlists()
         for playlist in playlists:
             try:
-                yield parse_playlist(self, playlist)
+                parsed = parse_playlist(self, playlist)
+                seen_ids.add(parsed.item_id)
+                yield parsed
             except InvalidDataError as err:
                 self.logger.debug("Error parsing library playlist: %s", err)
+        # User-liked editorial playlists (not in users_playlists_list)
+        liked_playlists = await self.client.get_liked_playlists()
+        for playlist in liked_playlists:
+            try:
+                parsed = parse_playlist(self, playlist)
+                if parsed.item_id not in seen_ids:
+                    yield parsed
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing liked playlist: %s", err)
 
     # Library edit methods
 
@@ -1722,15 +1732,11 @@ class YandexMusicProvider(MusicProvider):
             )
 
     async def on_streamed(self, streamdetails: StreamDetails) -> None:
-        """Report stream completion for My Wave rotor feedback and cleanup temp files.
+        """Report stream completion for My Wave rotor feedback.
 
         Sends trackFinished or skip with actual seconds_streamed so Yandex
-        can improve recommendations. Also cleans up any temp files from preload mode.
+        can improve recommendations.
         """
-        # Clean up temp file if this was a preloaded stream
-        if self._streaming:
-            self._streaming.cleanup_temp_file(streamdetails.item_id)
-
         # Radio feedback always enabled
         track_id, station_id = _parse_radio_item_id(streamdetails.item_id)
         if not station_id:
