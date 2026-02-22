@@ -76,10 +76,6 @@ PLAYLIST_ID_SPLITTER: Final[str] = ":"
 
 # Rotor (radio) station identifiers
 ROTOR_STATION_MY_WAVE: Final[str] = "user:onyourwave"
-ROTOR_STATION_ARTIST_PREFIX: Final[str] = "artist:"
-
-# Browse folder ID for Artist Waves
-BROWSE_ARTIST_WAVES_ID: Final[str] = "artist_waves"
 
 # Virtual playlist ID for My Wave (used in get_playlist / get_playlist_tracks; not owner_id:kind)
 MY_WAVE_PLAYLIST_ID: Final[str] = "my_wave"
@@ -93,7 +89,6 @@ RADIO_TRACK_ID_SEP: Final[str] = "@"
 # Browse folder names by locale (item_id -> display name)
 BROWSE_NAMES_RU: Final[dict[str, str]] = {
     "my_wave": "Моя волна",
-    "artist_waves": "Волны по исполнителям",
     "artists": "Мои исполнители",
     "albums": "Мои альбомы",
     "tracks": "Мне нравится",
@@ -154,7 +149,6 @@ BROWSE_NAMES_RU: Final[dict[str, str]] = {
 }
 BROWSE_NAMES_EN: Final[dict[str, str]] = {
     "my_wave": "My Wave",
-    "artist_waves": "Artist Waves",
     "artists": "My Artists",
     "albums": "My Albums",
     "tracks": "My Favorites",
