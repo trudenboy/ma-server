@@ -36,6 +36,7 @@ from music_assistant.models.music_provider import MusicProvider
 
 from .api_client import YandexMusicClient
 from .constants import (
+    BROWSE_ARTIST_WAVES_ID,
     BROWSE_INITIAL_TRACKS,
     BROWSE_NAMES_EN,
     BROWSE_NAMES_RU,
@@ -50,6 +51,7 @@ from .constants import (
     MY_WAVE_PLAYLIST_ID,
     PLAYLIST_ID_SPLITTER,
     RADIO_TRACK_ID_SEP,
+    ROTOR_STATION_ARTIST_PREFIX,
     ROTOR_STATION_MY_WAVE,
     TAG_CATEGORY_ACTIVITY,
     TAG_CATEGORY_ERA,
@@ -195,6 +197,10 @@ class YandexMusicProvider(MusicProvider):
             async with self._my_wave_lock:
                 return await self._browse_my_wave(path, sub_subpath)
 
+        # Handle artist_waves/ path (artist-specific rotor radio stations)
+        if subpath == BROWSE_ARTIST_WAVES_ID:
+            return await self._browse_artist_waves(path, path_parts)
+
         # Handle picks/ path (mood, activity, era, genres)
         if subpath == "picks":
             return await self._browse_picks(path, path_parts)
@@ -206,7 +212,14 @@ class YandexMusicProvider(MusicProvider):
         # Handle direct tag subpath (when folder is played by URI, the full path
         # "picks/category/tag" is lost and only the tag slug arrives as subpath).
         # Skip the API call for standard top-level folders that are never tag slugs.
-        _known_folders = {"artists", "albums", "tracks", "playlists", LIKED_TRACKS_PLAYLIST_ID}
+        _known_folders = {
+            "artists",
+            "albums",
+            "tracks",
+            "playlists",
+            LIKED_TRACKS_PLAYLIST_ID,
+            BROWSE_ARTIST_WAVES_ID,
+        }
         if subpath and subpath not in _known_folders:
             discovered_tags = await self._get_discovered_tag_slugs()
             if subpath in discovered_tags:
@@ -229,6 +242,17 @@ class YandexMusicProvider(MusicProvider):
                 is_playable=True,
             )
         )
+        # Artist Waves folder (shown when library artists are supported)
+        if ProviderFeature.LIBRARY_ARTISTS in self.supported_features:
+            folders.append(
+                BrowseFolder(
+                    item_id=BROWSE_ARTIST_WAVES_ID,
+                    provider=self.instance_id,
+                    path=f"{base}{BROWSE_ARTIST_WAVES_ID}",
+                    name=names.get(BROWSE_ARTIST_WAVES_ID, "Artist Waves"),
+                    is_playable=False,
+                )
+            )
         if ProviderFeature.LIBRARY_ARTISTS in self.supported_features:
             folders.append(
                 BrowseFolder(
@@ -670,6 +694,104 @@ class YandexMusicProvider(MusicProvider):
             return await self._get_tag_playlists_as_browse(tag)
 
         return []
+
+    async def _browse_artist_waves(
+        self, path: str, path_parts: list[str]
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+        """Browse artist waves - liked artists listed as individual rotor radio stations.
+
+        When no artist is selected, shows the user's liked artists as folders.
+        When an artist is selected, streams tracks from that artist's rotor station
+        (artist:<id>) using the same composite item_id mechanism as My Wave so that
+        rotor feedback (trackStarted / trackFinished / skip) is sent automatically.
+
+        :param path: Full browse path.
+        :param path_parts: Split path parts after ://.
+        :return: List of BrowseFolder items (artist list) or Track items (artist radio).
+        """
+        names = self._get_browse_names()
+
+        artist_id: str | None = path_parts[1] if len(path_parts) > 1 else None
+        # path_parts[2] is the queue cursor (last track_id from previous batch)
+        cursor: str | None = path_parts[2] if len(path_parts) > 2 else None
+
+        # artist_waves/ — list liked artists as wave folders
+        if not artist_id:
+            artists = await self.client.get_liked_artists()
+            folders: list[BrowseFolder] = []
+            base = path.rstrip("/") + "/"
+            for artist in artists:
+                folder_id = str(artist.id) if hasattr(artist, "id") and artist.id else None
+                artist_name = getattr(artist, "name", None)
+                if not folder_id or not artist_name:
+                    continue
+                folders.append(
+                    BrowseFolder(
+                        item_id=folder_id,
+                        provider=self.instance_id,
+                        path=f"{base}{folder_id}",
+                        name=artist_name,
+                        is_playable=True,
+                    )
+                )
+            return folders
+
+        # artist_waves/<artist_id>[/<cursor>] — stream tracks from artist rotor station
+        station_id = f"{ROTOR_STATION_ARTIST_PREFIX}{artist_id}"
+        yandex_tracks, batch_id = await self.client.get_rotor_station_tracks(
+            station_id, queue=cursor
+        )
+
+        # Send radioStarted feedback on the first (non-cursor) call
+        if yandex_tracks and batch_id and not cursor:
+            await self.client.send_rotor_station_feedback(
+                station_id,
+                "radioStarted",
+                batch_id=batch_id,
+            )
+
+        tracks: list[Track | BrowseFolder] = []
+        seen_ids: set[str] = set()
+        last_track_id: str | None = None
+
+        for yt in yandex_tracks:
+            try:
+                t = parse_track(self, yt)
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing artist wave track: %s", err)
+                continue
+
+            track_id = str(yt.id) if hasattr(yt, "id") and yt.id else getattr(yt, "track_id", None)
+            if not track_id or track_id in seen_ids:
+                continue
+            seen_ids.add(track_id)
+
+            # Composite item_id triggers rotor feedback via on_played / on_streamed
+            t.item_id = f"{track_id}{RADIO_TRACK_ID_SEP}{station_id}"
+            for pm in t.provider_mappings:
+                if pm.provider_instance == self.instance_id:
+                    pm.item_id = t.item_id
+                    break
+
+            tracks.append(t)
+            last_track_id = track_id
+
+        # "Load more" — uses the last track_id as cursor in the path
+        if batch_id and last_track_id:
+            next_name = "Ещё" if names == BROWSE_NAMES_RU else "Load more"
+            provider_prefix = path.split("://", maxsplit=1)[0] + "://"
+            artist_base = f"{provider_prefix}{BROWSE_ARTIST_WAVES_ID}/{artist_id}"
+            tracks.append(
+                BrowseFolder(
+                    item_id=last_track_id,
+                    provider=self.instance_id,
+                    path=f"{artist_base}/{last_track_id}",
+                    name=next_name,
+                    is_playable=False,
+                )
+            )
+
+        return tracks
 
     @use_cache(600)
     async def _get_tag_playlists_as_browse(
@@ -1714,11 +1836,12 @@ class YandexMusicProvider(MusicProvider):
         if not station_id:
             return
         if is_playing:
+            batch_id = self._my_wave_batch_id if station_id == ROTOR_STATION_MY_WAVE else None
             await self.client.send_rotor_station_feedback(
                 station_id,
                 "trackStarted",
                 track_id=track_id,
-                batch_id=self._my_wave_batch_id,
+                batch_id=batch_id,
             )
 
     async def on_streamed(self, streamdetails: StreamDetails) -> None:
@@ -1738,10 +1861,11 @@ class YandexMusicProvider(MusicProvider):
         seconds = int(streamdetails.seconds_streamed or 0)
         duration = streamdetails.duration or 0
         feedback_type = "trackFinished" if duration and seconds >= max(0, duration - 10) else "skip"
+        batch_id = self._my_wave_batch_id if station_id == ROTOR_STATION_MY_WAVE else None
         await self.client.send_rotor_station_feedback(
             station_id,
             feedback_type,
             track_id=track_id,
             total_played_seconds=seconds,
-            batch_id=self._my_wave_batch_id,
+            batch_id=batch_id,
         )
