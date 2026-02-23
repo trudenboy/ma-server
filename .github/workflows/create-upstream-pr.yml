@@ -1,0 +1,111 @@
+name: Create upstream PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Provider domain (see trudenboy/ma-provider-tools providers.yml)"
+        required: true
+        type: string
+      description:
+        description: Branch slug (e.g. add-provider)
+        required: true
+        type: string
+      pr_title:
+        description: PR title in upstream
+        required: true
+        type: string
+      pr_body:
+        description: PR body (markdown)
+        required: false
+        type: string
+        default: ''
+      source_ref:
+        description: Source branch in fork
+        required: false
+        type: string
+        default: dev
+      draft:
+        description: Open as draft PR
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  create-upstream-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_PAT }}
+
+      - name: Validate provider against registry
+        run: |
+          PROVIDERS=$(gh api repos/trudenboy/ma-provider-tools/contents/providers.yml \
+            --jq '.content' | base64 -d | python3 -c "
+          import sys, yaml
+          data = yaml.safe_load(sys.stdin)
+          domains = [p['domain'] for p in data.get('providers', [])]
+          print('\n'.join(domains))
+          " 2>/dev/null || echo "")
+          if [ -z "$PROVIDERS" ]; then
+            echo "WARNING: Could not fetch provider registry; skipping validation"
+          elif ! echo "$PROVIDERS" | grep -qx "${{ inputs.provider }}"; then
+            echo "ERROR: '${{ inputs.provider }}' is not a known provider."
+            echo "Known providers:"
+            echo "$PROVIDERS" | sed 's/^/  - /'
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sanitize description
+        id: slug
+        run: |
+          slug="${{ inputs.description }}"
+          slug="${slug// /-}"
+          echo "value=$slug" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push upstream branch
+        id: branch
+        run: |
+          branch="upstream/${{ inputs.provider }}/${{ steps.slug.outputs.value }}"
+          git checkout -b "$branch"
+          git push origin "$branch"
+          echo "name=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR in upstream
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+        run: |
+          args=(
+            --repo music-assistant/server
+            --base dev
+            --head "trudenboy:${{ steps.branch.outputs.name }}"
+            --title "${{ inputs.pr_title }}"
+            --body "${{ inputs.pr_body }}"
+          )
+          if [ "${{ inputs.draft }}" = "true" ]; then
+            args+=(--draft)
+          fi
+          pr_url=$(gh pr create "${args[@]}")
+          echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        run: |
+          echo "## Upstream PR created" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Branch** | \`${{ steps.branch.outputs.name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **PR** | ${{ steps.pr.outputs.url }} |" >> "$GITHUB_STEP_SUMMARY"

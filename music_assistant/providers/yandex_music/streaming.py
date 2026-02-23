@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 
     from .provider import YandexMusicProvider
 
+# Temp file prefix for easy identification and cleanup
+TEMP_FILE_PREFIX = "yandex_audio_"
+
 
 class YandexMusicStreamingManager:
     """Manages Yandex Music streaming operations."""
@@ -37,12 +40,171 @@ class YandexMusicStreamingManager:
         self.client = provider.client
         self.mass = provider.mass
         self.logger = provider.logger
+        # Track temp files for cleanup: item_id -> temp_file_path
+        self._temp_files: dict[str, str] = {}
+        self._temp_files_lock = threading.Lock()
+        # Shared aiohttp session for streaming downloads (reuses TCP connections to CDN)
+        self._streaming_session: aiohttp.ClientSession | None = None
+        self._streaming_session_lock = asyncio.Lock()
+
+    async def _get_streaming_session(self) -> aiohttp.ClientSession:
+        """Get or create the shared streaming aiohttp session."""
+        if self._streaming_session is not None and not self._streaming_session.closed:
+            return self._streaming_session
+        async with self._streaming_session_lock:
+            if self._streaming_session is None or self._streaming_session.closed:
+                self._streaming_session = aiohttp.ClientSession()
+            return self._streaming_session
+
+    async def close(self) -> None:
+        """Close the streaming session and clean up resources."""
+        if self._streaming_session and not self._streaming_session.closed:
+            await self._streaming_session.close()
+            self._streaming_session = None
 
     def _track_id_from_item_id(self, item_id: str) -> str:
         """Extract API track ID from item_id (may be track_id@station_id for My Wave)."""
         if RADIO_TRACK_ID_SEP in item_id:
             return item_id.split(RADIO_TRACK_ID_SEP, 1)[0]
         return item_id
+
+    async def _get_content_length(self, url: str) -> int | None:
+        """Get Content-Length from URL via HEAD request.
+
+        :param url: URL to check.
+        :return: Content length in bytes, or None if unavailable.
+        """
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        try:
+            async with self.mass.http_session.head(
+                url, timeout=timeout, allow_redirects=True
+            ) as response:
+                if response.status == 200:
+                    content_length = response.headers.get("Content-Length")
+                    if content_length:
+                        return int(content_length)
+        except Exception as err:
+            self.logger.debug("Failed to get Content-Length for %s: %s", url[:80], err)
+        return None
+
+    async def _download_and_decrypt_to_file(
+        self,
+        encrypted_url: str,
+        decryption_key: str,
+        item_id: str,
+        content_type: ContentType = ContentType.FLAC,
+    ) -> str:
+        """Download encrypted data, decrypt, and save to a temp file.
+
+        Uses a shared streaming aiohttp session (not self.mass.http_session)
+        to reuse TCP connections to Yandex CDN while keeping streaming traffic
+        isolated from the shared session's connection pool.
+
+        :param encrypted_url: URL of the encrypted file.
+        :param decryption_key: Hex-encoded AES-256 decryption key.
+        :param item_id: Track item ID for logging.
+        :param content_type: Container content type for file extension.
+        :return: Path to the decrypted temp file.
+        :raises MediaNotFoundError: If download fails.
+        """
+        key_bytes = bytes.fromhex(decryption_key)
+        nonce = bytes(12)
+        cipher = AES.new(key=key_bytes, nonce=nonce, mode=AES.MODE_CTR)
+
+        chunk_size = 65536
+        timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=600)
+
+        # Create temp file with extension matching the container format
+        suffix = f".{content_type.value}" if content_type != ContentType.UNKNOWN else ".flac"
+        temp_fd, temp_path = tempfile.mkstemp(prefix=TEMP_FILE_PREFIX, suffix=suffix)
+
+        try:
+            session = await self._get_streaming_session()
+            async with session.get(encrypted_url, timeout=timeout) as response:
+                if response.status != 200:
+                    msg = f"Failed to download encrypted track: HTTP {response.status}"
+                    self.logger.error(msg)
+                    raise MediaNotFoundError(msg)
+
+                total_bytes = 0
+                fd = temp_fd
+                temp_fd = -1  # fdopen takes ownership; prevent double-close on error
+                with os.fdopen(fd, "wb") as f:
+                    async for encrypted_chunk in response.content.iter_chunked(chunk_size):
+                        decrypted_chunk = cipher.decrypt(encrypted_chunk)
+                        f.write(decrypted_chunk)
+                        total_bytes += len(decrypted_chunk)
+
+                self.logger.info(
+                    "Preloaded and decrypted track %s to %s (%d bytes)",
+                    item_id,
+                    temp_path,
+                    total_bytes,
+                )
+                return temp_path
+
+        except Exception:
+            # Close fd if not yet closed by os.fdopen
+            if temp_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(temp_fd)
+            # Clean up temp file on error
+            with contextlib.suppress(OSError):
+                os.unlink(temp_path)  # noqa: PTH108
+            raise
+
+    def _replace_temp_file(self, item_id: str, new_path: str) -> None:
+        """Atomically replace the tracked temp file for an item, deleting the old one.
+
+        :param item_id: Track item ID.
+        :param new_path: Path to the new temp file.
+        """
+        with self._temp_files_lock:
+            old_path = self._temp_files.pop(item_id, None)
+            self._temp_files[item_id] = new_path
+        if old_path:
+            with contextlib.suppress(OSError):
+                Path(old_path).unlink(missing_ok=True)
+
+    def cleanup_temp_file(self, item_id: str) -> None:
+        """Clean up temp file for a track after playback.
+
+        :param item_id: Track item ID.
+        """
+        with self._temp_files_lock:
+            temp_path = self._temp_files.pop(item_id, None)
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+                self.logger.debug("Cleaned up temp file for %s: %s", item_id, temp_path)
+            except Exception as err:
+                self.logger.warning("Failed to clean up temp file %s: %s", temp_path, err)
+
+    def cleanup_stale_temp_files(self, max_age_seconds: int = 600) -> None:
+        """Clean up temp files older than max_age_seconds.
+
+        :param max_age_seconds: Maximum age in seconds (default: 600 = 10 minutes).
+        """
+        now = time.time()
+        with self._temp_files_lock:
+            snapshot = dict(self._temp_files)
+        stale_ids: list[str] = []
+        for item_id, temp_path in snapshot.items():
+            try:
+                file_age = now - Path(temp_path).stat().st_mtime
+                if file_age > max_age_seconds:
+                    stale_ids.append(item_id)
+            except OSError:
+                stale_ids.append(item_id)
+        for item_id in stale_ids:
+            self.cleanup_temp_file(item_id)
+
+    def cleanup_all_temp_files(self) -> None:
+        """Clean up all tracked temp files (called on provider unload)."""
+        with self._temp_files_lock:
+            item_ids = list(self._temp_files.keys())
+        for item_id in item_ids:
+            self.cleanup_temp_file(item_id)
 
     async def get_stream_details(self, item_id: str) -> StreamDetails:
         """Get stream details for a track.
@@ -51,6 +213,9 @@ class YandexMusicStreamingManager:
         :return: StreamDetails for the track (item_id preserved for on_streamed).
         :raises MediaNotFoundError: If stream URL cannot be obtained.
         """
+        # Clean up stale temp files periodically
+        self.cleanup_stale_temp_files()
+
         track_id = self._track_id_from_item_id(item_id)
         track = await self.provider.get_track(item_id)
         if not track:

@@ -312,6 +312,32 @@ class YandexMusicClient:
                         full_albums.append(like.album)
         return full_albums
 
+        if result is None:
+            return []
+        album_ids = [
+            str(like.album.id) for like in result if like.album is not None and like.album.id
+        ]
+        if not album_ids:
+            return []
+        # Fetch full album details in batches to get cover_uri and other metadata
+        full_albums: list[YandexAlbum] = []
+        for i in range(0, len(album_ids), batch_size):
+            batch = album_ids[i : i + batch_size]
+            try:
+                batch_result = await self._call_with_retry(
+                    lambda c, _batch=batch: c.albums(_batch)  # type: ignore[misc]
+                )
+                if batch_result:
+                    full_albums.extend(batch_result)
+            except (BadRequestError, NetworkError, ProviderUnavailableError) as batch_err:
+                LOGGER.warning("Error fetching album details batch: %s", batch_err)
+                # Fall back to minimal data for this batch
+                batch_set = set(batch)
+                for like in result:
+                    if like.album is not None and like.album.id and str(like.album.id) in batch_set:
+                        full_albums.append(like.album)
+        return full_albums
+
     async def get_liked_artists(self) -> list[YandexArtist]:
         """Get user's liked artists.
 
