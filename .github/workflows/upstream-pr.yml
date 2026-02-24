@@ -106,29 +106,8 @@ jobs:
               --body "$PR_BODY"
           fi
 
-      - name: Update integration/pending-upstream
-        env:
-          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
-        run: |
-          DOMAIN="${{ inputs.domain }}"
-          DOMAINS="yandex_music kion_music zvuk_music msx_bridge"
-
-          git fetch origin
-
-          # Rebuild integration/pending-upstream = upstream/dev + all active upstream/<domain> branches
-          git remote add upstream https://github.com/music-assistant/server.git 2>/dev/null || true
-          git fetch upstream dev
-
-          git checkout -B integration/pending-upstream upstream/dev
-
-          for domain in $DOMAINS; do
-            if git ls-remote --heads origin "upstream/${domain}" | grep -q .; then
-              git checkout "origin/upstream/${domain}" -- "music_assistant/providers/${domain}/" 2>/dev/null || true
-            fi
-          done
-
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: rebuild integration/pending-upstream after ${DOMAIN} update"
-          fi
-          git push origin integration/pending-upstream --force
+  rebuild-integration:
+    name: Rebuild integration/pending-upstream
+    needs: create-upstream-pr
+    uses: ./.github/workflows/rebuild-integration.yml
+    secrets: inherit
