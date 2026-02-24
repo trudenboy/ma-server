@@ -93,6 +93,37 @@ docker volume rm ma-data              # wipe persistent data
 ```
 
 > To switch branches: `git checkout <branch>`, then stop and recreate the container.
+**Or use Docker Compose** — create a `docker-compose.yml` in the cloned repo:
+
+```yaml
+services:
+  ma:
+    image: ghcr.io/music-assistant/server:nightly
+    container_name: music-assistant
+    ports:
+      - "8095:8095"
+      - "8097:8097"
+    privileged: true
+    restart: unless-stopped
+    volumes:
+      - ./music_assistant:/mnt/ma-fork:ro
+      - ma-data:/data
+    entrypoint: /bin/sh
+    command: >-
+      -c 'cp -r /mnt/ma-fork/. "$(/app/venv/bin/python3 -c
+      "import music_assistant,os; print(os.path.dirname(music_assistant.__file__))")/"
+      && exec /usr/local/bin/entrypoint.sh --data-dir /data --cache-dir /data/.cache'
+
+volumes:
+  ma-data:
+```
+
+```bash
+docker compose up -d          # start in background
+docker compose logs -f        # follow logs
+docker compose down           # stop
+docker compose down -v        # stop and wipe data
+```
 
 ## How Providers Are Integrated
 
@@ -219,6 +250,37 @@ docker volume rm ma-data              # сбросить постоянные д
 ```
 
 > Чтобы переключить ветку: `git checkout <branch>`, затем останови и пересоздай контейнер.
+**Или используй Docker Compose** — создай `docker-compose.yml` в директории клонированного репо:
+
+```yaml
+services:
+  ma:
+    image: ghcr.io/music-assistant/server:nightly
+    container_name: music-assistant
+    ports:
+      - "8095:8095"
+      - "8097:8097"
+    privileged: true
+    restart: unless-stopped
+    volumes:
+      - ./music_assistant:/mnt/ma-fork:ro
+      - ma-data:/data
+    entrypoint: /bin/sh
+    command: >-
+      -c 'cp -r /mnt/ma-fork/. "$(/app/venv/bin/python3 -c
+      "import music_assistant,os; print(os.path.dirname(music_assistant.__file__))")/"
+      && exec /usr/local/bin/entrypoint.sh --data-dir /data --cache-dir /data/.cache'
+
+volumes:
+  ma-data:
+```
+
+```bash
+docker compose up -d          # запустить в фоне
+docker compose logs -f        # следить за логами
+docker compose down           # остановить
+docker compose down -v        # остановить и сбросить данные
+```
 
 ## Как провайдеры интегрируются
 
