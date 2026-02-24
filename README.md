@@ -29,7 +29,40 @@ The fork extends the upstream server with provider integrations and stays in syn
 
 > `copilot/*` and `backport/*` branches are created automatically by CI — they can be ignored.
 
-## How Providers Connect
+## Running with Docker
+
+Clone any branch and start Music Assistant with the fork's code overlaid on the official nightly image:
+
+```bash
+# 1. Clone the desired branch (e.g. integration/dev)
+git clone -b integration/dev https://github.com/trudenboy/ma-server.git
+cd ma-server
+
+# 2. Start
+docker run -d \
+  --name music-assistant \
+  -p 8095:8095 -p 8097:8097 \
+  --privileged \
+  -v "$(pwd)/music_assistant":/mnt/ma-fork:ro \
+  -v ma-data:/data \
+  --entrypoint /bin/sh \
+  ghcr.io/music-assistant/server:nightly \
+  -c 'cp -r /mnt/ma-fork/. "$(/app/venv/bin/python3 -c "import music_assistant,os; print(os.path.dirname(music_assistant.__file__))")/" \
+      && exec /usr/local/bin/entrypoint.sh --data-dir /data --cache-dir /data/.cache'
+```
+
+Open **http://localhost:8095** in the browser.
+
+```bash
+# Useful commands
+docker logs -f music-assistant       # follow logs
+docker stop music-assistant          # stop
+docker rm music-assistant            # remove container (data volume is preserved)
+docker volume rm ma-data             # wipe persistent data
+```
+
+> The `music_assistant/` directory from the cloned branch is copied over the package inside the
+> container at startup. Switch branches with `git checkout <branch>` and recreate the container to apply.
 
 Each provider repo has a `sync-to-fork.yml` workflow. On every release it rsyncs provider files
 into `music_assistant/providers/<domain>/` in this fork and opens a PR against `dev`.
@@ -86,7 +119,40 @@ Upstream changes are pulled into `integration/pending-upstream` and merged into 
 
 > Ветки `copilot/*` и `backport/*` создаются автоматически CI-пайплайном, их можно игнорировать.
 
-## Как подключаются провайдеры
+## Запуск через Docker
+
+Клонируй любую ветку и запусти Music Assistant с кодом форка поверх официального nightly-образа:
+
+```bash
+# 1. Клонируй нужную ветку (например, integration/dev)
+git clone -b integration/dev https://github.com/trudenboy/ma-server.git
+cd ma-server
+
+# 2. Запусти
+docker run -d \
+  --name music-assistant \
+  -p 8095:8095 -p 8097:8097 \
+  --privileged \
+  -v "$(pwd)/music_assistant":/mnt/ma-fork:ro \
+  -v ma-data:/data \
+  --entrypoint /bin/sh \
+  ghcr.io/music-assistant/server:nightly \
+  -c 'cp -r /mnt/ma-fork/. "$(/app/venv/bin/python3 -c "import music_assistant,os; print(os.path.dirname(music_assistant.__file__))")/" \
+      && exec /usr/local/bin/entrypoint.sh --data-dir /data --cache-dir /data/.cache'
+```
+
+Открой **http://localhost:8095** в браузере.
+
+```bash
+# Полезные команды
+docker logs -f music-assistant       # следить за логами
+docker stop music-assistant          # остановить
+docker rm music-assistant            # удалить контейнер (том с данными сохраняется)
+docker volume rm ma-data             # сбросить постоянные данные
+```
+
+> Директория `music_assistant/` из клонированной ветки копируется поверх пакета внутри контейнера
+> при старте. Чтобы переключить ветку — сделай `git checkout <branch>` и пересоздай контейнер.
 
 В каждом репозитории провайдера есть workflow `sync-to-fork.yml`. При каждом релизе он rsync-ит
 файлы провайдера в `music_assistant/providers/<domain>/` этого форка и открывает PR в ветку `dev`.
