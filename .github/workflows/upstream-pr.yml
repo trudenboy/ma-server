@@ -1,0 +1,105 @@
+name: Submit Provider to Upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Provider domain to submit"
+        required: true
+        type: choice
+        options:
+          - yandex_music
+          - kion_music
+          - zvuk_music
+          - msx_bridge
+      version:
+        description: "Provider release version (e.g. 1.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  create-upstream-pr:
+    name: Create draft PR to upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve domain and clone provider release
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+        run: |
+          case "${{ inputs.domain }}" in
+            yandex_music) PROVIDER_REPO="trudenboy/ma-provider-yandex-music"; PROVIDER_PATH="provider/" ;;
+            kion_music) PROVIDER_REPO="trudenboy/ma-provider-kion-music"; PROVIDER_PATH="provider/" ;;
+            zvuk_music) PROVIDER_REPO="trudenboy/ma-provider-zvuk-music"; PROVIDER_PATH="provider/" ;;
+            msx_bridge) PROVIDER_REPO="trudenboy/ma-provider-msx-bridge"; PROVIDER_PATH="provider/" ;;
+            *) echo "Unknown domain: ${{ inputs.domain }}"; exit 1 ;;
+          esac
+          echo "PROVIDER_REPO=$PROVIDER_REPO" >> $GITHUB_ENV
+          echo "PROVIDER_PATH=$PROVIDER_PATH" >> $GITHUB_ENV
+
+          gh repo clone "$PROVIDER_REPO" provider-repo -- \
+            --depth 1 --branch "v${{ inputs.version }}"
+
+      - name: Prepare branch and create draft PR
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/music-assistant/server.git
+          git fetch upstream dev
+
+          DOMAIN="${{ inputs.domain }}"
+          VERSION="v${{ inputs.version }}"
+          BRANCH="upstream/${DOMAIN}-${VERSION}"
+
+          git checkout -B "$BRANCH" upstream/dev
+
+          DEST="music_assistant/providers/${DOMAIN}"
+          mkdir -p "$DEST"
+          rsync -av --delete "provider-repo/${PROVIDER_PATH}" "$DEST/"
+
+          if [ -d "provider-repo/tests" ]; then
+            mkdir -p "tests/providers/${DOMAIN}"
+            rsync -av --delete provider-repo/tests/ "tests/providers/${DOMAIN}/"
+          fi
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes vs upstream/dev — nothing to submit"
+            exit 0
+          fi
+
+          git commit -m "feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}"
+          git push origin "$BRANCH" --force
+
+          PR_BODY=$(printf '## Add %s provider %s\n\n**Source**: [%s %s](https://github.com/%s/releases/tag/%s)\n\nProvider code taken from the release tag. This is a draft PR — please review before requesting merge into upstream.' \
+            "$DOMAIN" "$VERSION" "$PROVIDER_REPO" "$VERSION" "$PROVIDER_REPO" "$VERSION")
+
+          EXISTING_PR=$(gh pr list \
+            --repo music-assistant/server \
+            --head "trudenboy:${BRANCH}" \
+            --json number --jq '.[0].number' 2>/dev/null || true)
+
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "PR #${EXISTING_PR} already exists — updating body"
+            gh pr edit "$EXISTING_PR" \
+              --repo music-assistant/server \
+              --body "$PR_BODY"
+          else
+            gh pr create \
+              --draft \
+              --repo music-assistant/server \
+              --head "trudenboy:${BRANCH}" \
+              --base dev \
+              --title "feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}" \
+              --body "$PR_BODY"
+          fi
