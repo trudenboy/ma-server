@@ -31,6 +31,35 @@ maintained as an integration base for a set of custom providers for Russian stre
 
 > `copilot/*` and `backport/*` branches are created automatically by CI — they can be ignored.
 
+## Running via Home Assistant Addon
+
+The official [Music Assistant DEV SERVER addon](https://github.com/music-assistant/home-assistant-addon/tree/main/music_assistant_dev)
+supports a `server_repo` option that installs directly from any fork or branch — no Docker build required.
+
+**1. Add the addon repository to Home Assistant:**
+
+[![Add repository](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmusic-assistant%2Fhome-assistant-addon)
+
+**2. Install "Music Assistant DEV SERVER"** from the addon store.
+
+**3. Set `server_repo` in the addon configuration:**
+
+| Goal | `server_repo` value |
+|------|-------------------|
+| Fork, default branch (`dev`) | `trudenboy/ma-server` |
+| Fork, specific branch | `trudenboy/ma-server@integration/dev` |
+| Fork, specific branch | `trudenboy/ma-server@stable` |
+
+```yaml
+# addon configuration
+server_repo: "trudenboy/ma-server@integration/dev"
+```
+
+**4. Start the addon.** It will install the fork's code on startup and start MA normally.
+
+> The addon re-installs from source on every restart, so it always picks up the latest commits
+> from the specified branch. No manual steps needed after a branch update.
+
 ## Running with Docker
 
 Clone any branch and start Music Assistant with the fork's code applied on top of the official nightly image — no build step required.
@@ -127,6 +156,35 @@ Upstream changes are pulled into `integration/pending-upstream` and merged into 
 | `feat/msx-bridge-player-provider` | Активная feature-ветка MSX Bridge. |
 
 > Ветки `copilot/*` и `backport/*` создаются автоматически CI-пайплайном — их можно игнорировать.
+
+## Запуск через аддон Home Assistant
+
+Официальный [аддон Music Assistant DEV SERVER](https://github.com/music-assistant/home-assistant-addon/tree/main/music_assistant_dev)
+поддерживает опцию `server_repo`, которая устанавливает код напрямую из любого форка или ветки — без сборки Docker-образа.
+
+**1. Добавь репозиторий аддонов в Home Assistant:**
+
+[![Добавить репозиторий](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmusic-assistant%2Fhome-assistant-addon)
+
+**2. Установи "Music Assistant DEV SERVER"** из магазина аддонов.
+
+**3. Укажи `server_repo` в конфигурации аддона:**
+
+| Цель | Значение `server_repo` |
+|------|----------------------|
+| Форк, ветка по умолчанию (`dev`) | `trudenboy/ma-server` |
+| Форк, конкретная ветка | `trudenboy/ma-server@integration/dev` |
+| Форк, конкретная ветка | `trudenboy/ma-server@stable` |
+
+```yaml
+# конфигурация аддона
+server_repo: "trudenboy/ma-server@integration/dev"
+```
+
+**4. Запусти аддон.** При старте он установит код из форка и запустит MA в штатном режиме.
+
+> Аддон переустанавливает пакет из исходников при каждом перезапуске — всегда подхватывает
+> последние коммиты из указанной ветки. Никаких ручных действий после обновления ветки не нужно.
 
 ## Запуск через Docker
 
