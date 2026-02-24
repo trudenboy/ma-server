@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+import dataclasses
+from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
 from music_assistant_models.enums import ConfigEntryType, ProviderFeature
@@ -13,6 +14,8 @@ from .constants import (
     CONF_LIKED_TRACKS_MAX_TRACKS,
     CONF_MY_WAVE_MAX_TRACKS,
     CONF_QUALITY,
+    CONF_STREAM_BUFFER_MB,
+    CONF_STREAMING_MODE,
     CONF_TOKEN,
     DEFAULT_BASE_URL,
     QUALITY_BALANCED,

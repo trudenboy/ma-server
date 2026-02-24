@@ -179,6 +179,10 @@ class YandexMusicProvider(MusicProvider):
 
         :param is_removed: Whether the provider is being removed.
         """
+        # Clean up any temp files and close streaming session
+        if self._streaming:
+            self._streaming.cleanup_all_temp_files()
+            await self._streaming.close()
         if self._client:
             await self._client.disconnect()
         self._client = None
@@ -1269,6 +1273,404 @@ class YandexMusicProvider(MusicProvider):
         return await self._browse_wave_categories(
             path, path_parts, mixes_data or [], MY_WAVES_SET_FOLDER_ID
         )
+
+    @use_cache(600)
+    async def _get_tag_playlists_as_browse(
+        self, tag_id: str
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+        """Get playlists for a tag and return as browse items.
+
+        :param tag_id: Tag identifier (e.g. 'chill', '80s').
+        :return: List of Playlist objects.
+        """
+        self.logger.debug("Fetching playlists for tag: %s", tag_id)
+        playlists = await self.client.get_tag_playlists(tag_id)
+        self.logger.debug("Got %d playlists for tag %s", len(playlists), tag_id)
+        result: list[Playlist] = []
+        for playlist in playlists:
+            try:
+                result.append(parse_playlist(self, playlist))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing tag playlist: %s", err)
+        self.logger.debug("Parsed %d playlists for tag %s", len(result), tag_id)
+        return result
+
+    async def _browse_my_wave(
+        self, path: str, sub_subpath: str | None
+    ) -> list[Track | BrowseFolder]:
+        """Browse My Wave tracks (must be called under _my_wave_lock).
+
+        :param path: Full browse path.
+        :param sub_subpath: Sub-path part ('next' for load more, or track_id cursor).
+        :return: List of Track and optional BrowseFolder for "Load more".
+        """
+        max_tracks_config = int(
+            self.config.get_value(CONF_MY_WAVE_MAX_TRACKS) or 150  # type: ignore[arg-type]
+        )
+        batch_size_config = MY_WAVE_BATCH_SIZE
+
+        # Effective limit on tracks to collect for this call:
+        # initial browse is capped to BROWSE_INITIAL_TRACKS to avoid marking
+        # extra tracks as "seen" that are never shown to the user.
+        effective_limit = min(
+            BROWSE_INITIAL_TRACKS if sub_subpath != "next" else max_tracks_config,
+            max_tracks_config,
+        )
+
+        # Root my_wave: fetch up to batch_size_config batches so Play adds more tracks.
+        # "Load more" always uses single next batch.
+        max_batches = batch_size_config if sub_subpath != "next" else 1
+
+        # Reset seen tracks on fresh browse (not "load more")
+        if sub_subpath != "next":
+            self._my_wave_seen_track_ids = set()
+
+        queue: str | int | None = None
+        if sub_subpath == "next":
+            queue = self._my_wave_last_track_id
+        elif sub_subpath:
+            queue = sub_subpath
+
+        all_tracks: list[Track | BrowseFolder] = []
+        last_batch_id: str | None = None
+        first_track_id_this_batch: str | None = None
+        total_track_count = 0
+
+        for _ in range(max_batches):
+            if total_track_count >= effective_limit:
+                break
+
+            yandex_tracks, batch_id = await self.client.get_my_wave_tracks(queue=queue)
+            if batch_id:
+                self._my_wave_batch_id = batch_id
+                last_batch_id = batch_id
+            if not self._my_wave_radio_started_sent and yandex_tracks:
+                sent = await self.client.send_rotor_station_feedback(
+                    ROTOR_STATION_MY_WAVE,
+                    "radioStarted",
+                    batch_id=batch_id,
+                )
+                if sent:
+                    self._my_wave_radio_started_sent = True
+            first_track_id_this_batch = None
+            for yt in yandex_tracks:
+                if total_track_count >= effective_limit:
+                    break
+
+                track = self._parse_my_wave_track(yt)
+                if track is None:
+                    continue
+                all_tracks.append(track)
+                total_track_count += 1
+
+                track_id = track.item_id.split(RADIO_TRACK_ID_SEP, 1)[0]
+                if first_track_id_this_batch is None:
+                    first_track_id_this_batch = track_id
+
+            if first_track_id_this_batch is not None:
+                self._my_wave_last_track_id = first_track_id_this_batch
+            if (
+                first_track_id_this_batch is None
+                or not batch_id
+                or not yandex_tracks
+                or total_track_count >= effective_limit
+            ):
+                break
+            queue = first_track_id_this_batch
+
+        # Only show "Load more" if we haven't reached the limit and there's more data
+        if last_batch_id and total_track_count < max_tracks_config:
+            names = self._get_browse_names()
+            next_name = "Ещё" if names == BROWSE_NAMES_RU else "Load more"
+            all_tracks.append(
+                BrowseFolder(
+                    item_id="next",
+                    provider=self.instance_id,
+                    path=f"{path.rstrip('/')}/next",
+                    name=next_name,
+                    is_playable=False,
+                )
+            )
+        return all_tracks
+
+    def _parse_my_wave_track(self, yt: Any, seen_ids: set[str] | None = None) -> Track | None:
+        """Parse a Yandex track into a My Wave Track with composite item_id.
+
+        Extracts the track_id, checks for duplicates in the seen_ids set,
+        sets composite item_id (track_id@station_id), and updates provider_mappings.
+        Must be called under _my_wave_lock when using the shared seen set.
+
+        :param yt: Yandex track object from rotor station response.
+        :param seen_ids: Set of already-seen track IDs (defaults to shared state).
+        :return: Parsed Track with composite item_id, or None if duplicate/invalid.
+        """
+        if seen_ids is None:
+            seen_ids = self._my_wave_seen_track_ids
+
+        try:
+            t = parse_track(self, yt)
+        except InvalidDataError as err:
+            self.logger.debug("Error parsing My Wave track: %s", err)
+            return None
+
+        track_id = str(yt.id) if hasattr(yt, "id") and yt.id else getattr(yt, "track_id", None)
+        if not track_id:
+            return t
+
+        if track_id in seen_ids:
+            self.logger.debug("Skipping duplicate My Wave track: %s", track_id)
+            return None
+
+        seen_ids.add(track_id)
+        t.item_id = f"{track_id}{RADIO_TRACK_ID_SEP}{ROTOR_STATION_MY_WAVE}"
+        for pm in t.provider_mappings:
+            if pm.provider_instance == self.instance_id:
+                pm.item_id = t.item_id
+                break
+        return t
+
+    @use_cache(3600)
+    async def _validate_tag(self, tag_slug: str) -> bool:
+        """Check if a tag has playlists by calling client.get_tag_playlists().
+
+        :param tag_slug: Tag identifier (e.g. 'chill', '80s').
+        :return: True if the tag has at least one playlist.
+        """
+        try:
+            playlists = await self.client.get_tag_playlists(tag_slug)
+            return len(playlists) > 0
+        except Exception as err:
+            self.logger.debug("Tag validation failed for %s: %s", tag_slug, err)
+            return False
+
+    @use_cache(3600)
+    async def _get_valid_tags_for_category(self, category: str) -> list[str]:
+        """Get validated tags for a category (only those with playlists).
+
+        Combines hardcoded tags from the category lists with any landing-discovered
+        tags, validates each by calling client.tags(), and returns only those with
+        playlists.
+
+        :param category: Category name ('mood', 'activity', 'era', 'genres').
+        :return: List of valid tag slugs.
+        """
+        category_lists: dict[str, list[str]] = {
+            "mood": list(TAG_CATEGORY_MOOD),
+            "activity": list(TAG_CATEGORY_ACTIVITY),
+            "era": list(TAG_CATEGORY_ERA),
+            "genres": list(TAG_CATEGORY_GENRES),
+        }
+        tags = category_lists.get(category, [])
+
+        # Add landing-discovered tags for this category
+        try:
+            landing_tags = await self.client.get_landing_tags()
+            for slug, _title in landing_tags:
+                cat = TAG_SLUG_CATEGORY.get(slug, "mood")
+                if cat == category and slug not in tags:
+                    tags.append(slug)
+        except Exception as err:
+            self.logger.debug("Landing tag discovery failed: %s", err)
+
+        # Validate tags in parallel with bounded concurrency
+        sem = asyncio.Semaphore(8)
+
+        async def _check(tag: str) -> str | None:
+            async with sem:
+                return tag if await self._validate_tag(tag) else None
+
+        results = await asyncio.gather(*[_check(tag) for tag in tags])
+        return [tag for tag in results if tag is not None]
+
+    @use_cache(3600)
+    async def _get_discovered_tags(self, locale: str) -> list[tuple[str, str]]:
+        """Get all available tags by combining hardcoded tags with landing discovery.
+
+        Starts with all hardcoded tags from category lists, adds landing-discovered
+        tags, validates each via client.tags(), and returns only those with playlists.
+        Results are cached for 1 hour. The locale parameter is included in the cache
+        key so that a locale change invalidates the cached result.
+
+        :param locale: Current metadata locale (used as part of cache key).
+        :return: List of (slug, title) tuples for tags that have playlists.
+        """
+        names = self._get_browse_names()
+
+        # Collect all hardcoded tags (non-seasonal)
+        all_tags: dict[str, str] = {}
+        for slug, cat in TAG_SLUG_CATEGORY.items():
+            if cat != "seasonal":
+                all_tags[slug] = names.get(slug, slug.title())
+
+        # Add landing-discovered tags
+        try:
+            landing_tags = await self.client.get_landing_tags()
+            for slug, title in landing_tags:
+                if slug not in all_tags:
+                    all_tags[slug] = title
+        except Exception as err:
+            self.logger.debug("Failed to discover tags from landing API: %s", err)
+
+        # Validate tags in parallel with bounded concurrency
+        sem = asyncio.Semaphore(8)
+
+        async def _check(slug: str) -> bool:
+            async with sem:
+                return await self._validate_tag(slug)
+
+        tag_items = list(all_tags.items())
+        results = await asyncio.gather(*[_check(slug) for slug, _ in tag_items])
+        return [
+            (slug, title) for (slug, title), valid in zip(tag_items, results, strict=True) if valid
+        ]
+
+    async def _get_discovered_tag_slugs(self) -> set[str]:
+        """Get set of all valid tag slugs (cached).
+
+        :return: Set of tag slug strings that have playlists.
+        """
+        discovered = await self._get_discovered_tags(self.mass.metadata.locale)
+        return {slug for slug, _title in discovered}
+
+    async def _browse_picks(
+        self, path: str, path_parts: list[str]
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+        """Browse picks folder using hardcoded tags validated against the API.
+
+        Tags are sourced from hardcoded category lists and landing API discovery,
+        then validated via client.tags() to ensure they have playlists.
+        Only categories with at least one valid tag are shown.
+
+        :param path: Full browse path.
+        :param path_parts: Split path parts after ://.
+        :return: List of folders or playlists.
+        """
+        names = self._get_browse_names()
+        base = path.rstrip("/") + "/"
+
+        # Get validated tags
+        discovered = await self._get_discovered_tags(self.mass.metadata.locale)
+
+        # Categorize valid tags
+        categorized: dict[str, list[tuple[str, str]]] = {}
+        for slug, title in discovered:
+            cat = TAG_SLUG_CATEGORY.get(slug, "mood")
+            # Skip seasonal tags — they belong in mixes, not picks
+            if cat == "seasonal":
+                continue
+            categorized.setdefault(cat, []).append((slug, title))
+
+        # Sort tags within each category by preferred order
+        for cat, cat_tags in categorized.items():
+            order = TAG_CATEGORY_ORDER.get(cat, [])
+            order_map = {s: i for i, s in enumerate(order)}
+            cat_tags.sort(key=lambda t: order_map.get(t[0], len(order)))
+
+        # picks/ - show category folders (only those with valid tags)
+        if len(path_parts) == 1:
+            category_display_order = ["mood", "activity", "era", "genres"]
+            folders: list[BrowseFolder] = []
+            for cat in category_display_order:
+                if cat in categorized:
+                    folders.append(
+                        BrowseFolder(
+                            item_id=cat,
+                            provider=self.instance_id,
+                            path=f"{base}{cat}",
+                            name=names.get(cat, cat.title()),
+                            is_playable=False,
+                        )
+                    )
+            # Show any extra categories not in the standard order
+            for cat in categorized:
+                if cat not in category_display_order:
+                    folders.append(
+                        BrowseFolder(
+                            item_id=cat,
+                            provider=self.instance_id,
+                            path=f"{base}{cat}",
+                            name=names.get(cat, cat.title()),
+                            is_playable=False,
+                        )
+                    )
+            return folders
+
+        category: str | None = path_parts[1] if len(path_parts) > 1 else None
+        tag: str | None = path_parts[2] if len(path_parts) > 2 else None
+
+        self.logger.debug(
+            "Browse picks: path=%s, category=%s, tag=%s",
+            path,
+            category,
+            tag,
+        )
+
+        # picks/category/ - show valid tag folders for this category
+        if category and not tag:
+            category_tags = categorized.get(category, [])
+            folders = []
+            for slug, title in category_tags:
+                folders.append(
+                    BrowseFolder(
+                        item_id=slug,
+                        provider=self.instance_id,
+                        path=f"{base}{slug}",
+                        name=names.get(slug, title),
+                        is_playable=False,
+                    )
+                )
+            self.logger.debug("Returning %d tag folders for category %s", len(folders), category)
+            return folders
+
+        # picks/category/tag - show playlists for the tag
+        if tag:
+            discovered_slugs = {slug for slug, _ in discovered}
+            if tag in discovered_slugs:
+                self.logger.debug("Fetching playlists for tag: %s", tag)
+                return await self._get_tag_playlists_as_browse(tag)
+
+        self.logger.debug("No match found, returning empty list")
+        return []
+
+    async def _browse_mixes(
+        self, path: str, path_parts: list[str]
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+        """Browse mixes folder (seasonal collections) using hardcoded tags.
+
+        Uses TAG_MIXES directly and validates each tag via client.tags()
+        to check if it has playlists. Does not depend on landing API discovery.
+
+        :param path: Full browse path.
+        :param path_parts: Split path parts after ://.
+        :return: List of folders or playlists.
+        """
+        names = self._get_browse_names()
+        base = path.rstrip("/") + "/"
+
+        # Validate seasonal tags directly (no landing dependency)
+        available_mixes = [t for t in TAG_MIXES if await self._validate_tag(t)]
+
+        # mixes/ - show seasonal folders (only valid ones)
+        if len(path_parts) == 1:
+            folders = []
+            for t in available_mixes:
+                folders.append(
+                    BrowseFolder(
+                        item_id=t,
+                        provider=self.instance_id,
+                        path=f"{base}{t}",
+                        name=names.get(t, t.title()),
+                        is_playable=False,
+                    )
+                )
+            return folders
+
+        # mixes/tag - show playlists for the tag
+        tag = path_parts[1] if len(path_parts) > 1 else None
+        if tag and tag in TAG_MIXES:
+            return await self._get_tag_playlists_as_browse(tag)
+
+        return []
 
     @use_cache(600)
     async def _get_tag_playlists_as_browse(
@@ -2481,10 +2883,10 @@ class YandexMusicProvider(MusicProvider):
                 break
 
     async def on_streamed(self, streamdetails: StreamDetails) -> None:
-        """Report stream completion for My Wave rotor feedback.
+        """Report stream completion for My Wave rotor feedback and cleanup temp files.
 
         Sends trackFinished or skip with actual seconds_streamed so Yandex
-        can improve recommendations.
+        can improve recommendations. Also cleans up any temp files from preload mode.
         """
         # Radio feedback always enabled
         track_id, station_id = _parse_radio_item_id(streamdetails.item_id)
