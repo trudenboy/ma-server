@@ -127,15 +127,7 @@ docker compose down -v        # stop and wipe data
 
 ## How Providers Are Integrated
 
-Each provider repo has a `sync-to-fork.yml` workflow. On every release it rsyncs the provider
-files into `music_assistant/providers/<domain>/` in this fork and opens a PR against `dev`.
-
-```
-provider repo (release) → sync-to-fork.yml → PR → dev → stable
-```
-
-The `integration/dev` branch always contains the latest `dev` of all providers merged together,
-and is used for end-to-end testing before individual providers are released.
+See [trudenboy/ma-provider-tools](https://github.com/trudenboy/ma-provider-tools) for the full CI/CD architecture, wrapper distribution system, and incident pipeline.
 
 ## Where to File Incidents
 
@@ -284,15 +276,7 @@ docker compose down -v        # остановить и сбросить дан�
 
 ## Как провайдеры интегрируются
 
-В каждом репозитории провайдера есть workflow `sync-to-fork.yml`. При каждом релизе он rsync-ит
-файлы провайдера в `music_assistant/providers/<domain>/` этого форка и открывает PR в ветку `dev`.
-
-```
-репозиторий провайдера (релиз) → sync-to-fork.yml → PR → dev → stable
-```
-
-Ветка `integration/dev` всегда содержит последние dev-ветки всех провайдеров, объединённые вместе,
-и используется для сквозного тестирования до выпуска отдельных провайдеров.
+Полная архитектура CI/CD, система дистрибуции файлов и пайплайн инцидентов описаны в [trudenboy/ma-provider-tools](https://github.com/trudenboy/ma-provider-tools).
 
 ## Где заводить инциденты
 
