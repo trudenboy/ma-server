@@ -11,12 +11,15 @@ maintained as an integration base for a set of custom providers for Russian stre
 
 ## Providers
 
-| Provider | Repository | Type |
-|----------|-----------|------|
-| Yandex Music | [ma-provider-yandex-music](https://github.com/trudenboy/ma-provider-yandex-music) | Music |
-| KION Music | [ma-provider-kion-music](https://github.com/trudenboy/ma-provider-kion-music) | Music |
-| Zvuk Music | [ma-provider-zvuk-music](https://github.com/trudenboy/ma-provider-zvuk-music) | Music |
-| MSX Bridge | [ma-provider-msx-bridge](https://github.com/trudenboy/ma-provider-msx-bridge) | Player |
+| Provider | Repository | Type | Issues |
+|----------|-----------|------|--------|
+| Yandex Music | [ma-provider-yandex-music](https://github.com/trudenboy/ma-provider-yandex-music) | Music | [Issues →](https://github.com/trudenboy/ma-provider-yandex-music/issues) |
+| KION Music | [ma-provider-kion-music](https://github.com/trudenboy/ma-provider-kion-music) | Music | [Issues →](https://github.com/trudenboy/ma-provider-kion-music/issues) |
+| Zvuk Music | [ma-provider-zvuk-music](https://github.com/trudenboy/ma-provider-zvuk-music) | Music | [Issues →](https://github.com/trudenboy/ma-provider-zvuk-music/issues) |
+| MSX Bridge | [ma-provider-msx-bridge](https://github.com/trudenboy/ma-provider-msx-bridge) | Player | [Issues →](https://github.com/trudenboy/ma-provider-msx-bridge/issues) |
+
+> **Do not open issues in this repository.** File them in the affected provider's repo (see Issues column above).
+> For upstream Music Assistant bugs use the [official support repo](https://github.com/music-assistant/support/issues).
 
 ## Branch Structure
 
@@ -93,6 +96,7 @@ docker volume rm ma-data              # wipe persistent data
 ```
 
 > To switch branches: `git checkout <branch>`, then stop and recreate the container.
+
 **Or use Docker Compose** — create a `docker-compose.yml` in the cloned repo:
 
 ```yaml
@@ -129,26 +133,6 @@ docker compose down -v        # stop and wipe data
 
 See [trudenboy/ma-provider-tools](https://github.com/trudenboy/ma-provider-tools) for the full CI/CD architecture, wrapper distribution system, and incident pipeline.
 
-## Where to File Incidents
-
-> **Do not open issues in this repository.**
-
-File issues in the affected provider's repository:
-
-| Provider | Issues |
-|----------|--------|
-| Yandex Music | [Issues →](https://github.com/trudenboy/ma-provider-yandex-music/issues) |
-| KION Music | [Issues →](https://github.com/trudenboy/ma-provider-kion-music/issues) |
-| Zvuk Music | [Issues →](https://github.com/trudenboy/ma-provider-zvuk-music/issues) |
-| MSX Bridge | [Issues →](https://github.com/trudenboy/ma-provider-msx-bridge/issues) |
-
-For upstream Music Assistant bugs use the [official support repo](https://github.com/music-assistant/support/issues).
-
-## Upstream
-
-This fork tracks [music-assistant/server](https://github.com/music-assistant/server).
-Upstream changes are pulled into `integration/pending-upstream` and merged into `dev` after validation.
-
 ---
 
 <a name="русский"></a>
@@ -160,12 +144,15 @@ Upstream changes are pulled into `integration/pending-upstream` and merged into 
 
 ## Провайдеры
 
-| Провайдер | Репозиторий | Тип |
-|-----------|------------|-----|
-| Яндекс Музыка | [ma-provider-yandex-music](https://github.com/trudenboy/ma-provider-yandex-music) | Музыка |
-| KION Музыка | [ma-provider-kion-music](https://github.com/trudenboy/ma-provider-kion-music) | Музыка |
-| Звук | [ma-provider-zvuk-music](https://github.com/trudenboy/ma-provider-zvuk-music) | Музыка |
-| MSX Bridge | [ma-provider-msx-bridge](https://github.com/trudenboy/ma-provider-msx-bridge) | Плеер |
+| Провайдер | Репозиторий | Тип | Задачи |
+|-----------|------------|-----|--------|
+| Яндекс Музыка | [ma-provider-yandex-music](https://github.com/trudenboy/ma-provider-yandex-music) | Музыка | [Issues →](https://github.com/trudenboy/ma-provider-yandex-music/issues) |
+| KION Музыка | [ma-provider-kion-music](https://github.com/trudenboy/ma-provider-kion-music) | Музыка | [Issues →](https://github.com/trudenboy/ma-provider-kion-music/issues) |
+| Звук | [ma-provider-zvuk-music](https://github.com/trudenboy/ma-provider-zvuk-music) | Музыка | [Issues →](https://github.com/trudenboy/ma-provider-zvuk-music/issues) |
+| MSX Bridge | [ma-provider-msx-bridge](https://github.com/trudenboy/ma-provider-msx-bridge) | Плеер | [Issues →](https://github.com/trudenboy/ma-provider-msx-bridge/issues) |
+
+> **Не открывай задачи в этом репозитории.** Заводи их в репозитории конкретного провайдера (столбец «Задачи»).
+> Для багов в upstream Music Assistant используй [официальный репозиторий поддержки](https://github.com/music-assistant/support/issues).
 
 ## Структура веток
 
@@ -242,6 +229,7 @@ docker volume rm ma-data              # сбросить постоянные д
 ```
 
 > Чтобы переключить ветку: `git checkout <branch>`, затем останови и пересоздай контейнер.
+
 **Или используй Docker Compose** — создай `docker-compose.yml` в директории клонированного репо:
 
 ```yaml
@@ -277,23 +265,3 @@ docker compose down -v        # остановить и сбросить дан�
 ## Как провайдеры интегрируются
 
 Полная архитектура CI/CD, система дистрибуции файлов и пайплайн инцидентов описаны в [trudenboy/ma-provider-tools](https://github.com/trudenboy/ma-provider-tools).
-
-## Где заводить инциденты
-
-> **Не открывай задачи в этом репозитории.**
-
-Заводи задачи в репозитории конкретного провайдера:
-
-| Провайдер | Задачи |
-|-----------|--------|
-| Яндекс Музыка | [Issues →](https://github.com/trudenboy/ma-provider-yandex-music/issues) |
-| KION Музыка | [Issues →](https://github.com/trudenboy/ma-provider-kion-music/issues) |
-| Звук | [Issues →](https://github.com/trudenboy/ma-provider-zvuk-music/issues) |
-| MSX Bridge | [Issues →](https://github.com/trudenboy/ma-provider-msx-bridge/issues) |
-
-Для багов в upstream Music Assistant используй [официальный репозиторий поддержки](https://github.com/music-assistant/support/issues).
-
-## Upstream
-
-Этот форк отслеживает [music-assistant/server](https://github.com/music-assistant/server).
-Изменения из upstream подтягиваются в `integration/pending-upstream` и вливаются в `dev` после валидации.
