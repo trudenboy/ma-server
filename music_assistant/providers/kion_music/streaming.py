@@ -17,12 +17,12 @@ from .constants import (
     CONF_QUALITY,
     QUALITY_EFFICIENT,
     QUALITY_HIGH,
-    QUALITY_SUPERB,
+    QUALITY_LOSSLESS,
     RADIO_TRACK_ID_SEP,
 )
 
 if TYPE_CHECKING:
-    from kion_music import DownloadInfo
+    from yandex_music import DownloadInfo
 
     from .provider import KionMusicProvider
 
@@ -41,7 +41,7 @@ class KionMusicStreamingManager:
         self.logger = provider.logger
 
     def _track_id_from_item_id(self, item_id: str) -> str:
-        """Extract API track ID from item_id (may be track_id@station_id for My Wave)."""
+        """Extract API track ID from item_id (may be track_id@station_id for My Mix)."""
         if RADIO_TRACK_ID_SEP in item_id:
             return item_id.split(RADIO_TRACK_ID_SEP, 1)[0]
         return item_id
@@ -49,7 +49,7 @@ class KionMusicStreamingManager:
     async def get_stream_details(self, item_id: str) -> StreamDetails:
         """Get stream details for a track.
 
-        :param item_id: Track ID or composite track_id@station_id for My Wave.
+        :param item_id: Track ID or composite track_id@station_id for My Mix.
         :return: StreamDetails for the track (item_id preserved for on_streamed).
         :raises MediaNotFoundError: If stream URL cannot be obtained.
         """
@@ -63,7 +63,7 @@ class KionMusicStreamingManager:
         preferred_normalized = (quality_str or "").strip().lower()
 
         # Check for superb (lossless) quality
-        want_lossless = preferred_normalized in (QUALITY_SUPERB, "superb")
+        want_lossless = preferred_normalized in (QUALITY_LOSSLESS, "superb")
 
         # Backward compatibility: also check old "lossless" value (exact match)
         if preferred_normalized == "lossless":
@@ -183,7 +183,7 @@ class KionMusicStreamingManager:
         )
 
         # Superb: Prefer FLAC (backward compatibility with "lossless")
-        if preferred_normalized == QUALITY_SUPERB or "lossless" in preferred_normalized:
+        if preferred_normalized == QUALITY_LOSSLESS or "lossless" in preferred_normalized:
             # Note: flac-mp4 typically comes from get-file-info API, not download-info,
             # but we check here for forward compatibility in case the API changes.
             for codec in ("flac-mp4", "flac"):
@@ -255,12 +255,12 @@ class KionMusicStreamingManager:
         return sorted_infos[0] if sorted_infos else None
 
     def _get_content_type(self, codec: str | None) -> tuple[ContentType, ContentType]:
-        """Determine container and codec type from Yandex API codec string.
+        """Determine container and codec type from Kion API codec string.
 
-        Yandex API returns codec strings like "flac-mp4" (FLAC in MP4 container),
+        Kion API returns codec strings like "flac-mp4" (FLAC in MP4 container),
         "aac-mp4" (AAC in MP4 container), or plain "flac", "mp3", "aac".
 
-        :param codec: Codec string from Yandex API.
+        :param codec: Codec string from Kion API.
         :return: Tuple of (content_type/container, codec_type).
         """
         if not codec:
@@ -287,11 +287,11 @@ class KionMusicStreamingManager:
     def _get_audio_params(self, codec: str | None) -> tuple[int, int]:
         """Return (sample_rate, bit_depth) defaults based on codec string.
 
-        The Yandex get-file-info API does not return sample rate or bit depth,
+        The Kion get-file-info API does not return sample rate or bit depth,
         so we use codec-based defaults. These values help the core select the
         correct PCM output format and avoid unnecessary resampling.
 
-        :param codec: Codec string from Yandex API (e.g. "flac-mp4", "flac", "mp3").
+        :param codec: Codec string from Kion API (e.g. "flac-mp4", "flac", "mp3").
         :return: Tuple of (sample_rate, bit_depth).
         """
         if codec and codec.lower() == "flac-mp4":
@@ -302,7 +302,7 @@ class KionMusicStreamingManager:
     def _build_audio_format(self, codec: str | None, bit_rate: int = 0) -> AudioFormat:
         """Build AudioFormat with content type and codec-based audio params.
 
-        :param codec: Codec string from Yandex API (e.g. "flac-mp4", "flac", "mp3").
+        :param codec: Codec string from Kion API (e.g. "flac-mp4", "flac", "mp3").
         :param bit_rate: Bitrate in kbps (0 for variable/unknown).
         :return: Configured AudioFormat instance.
         """

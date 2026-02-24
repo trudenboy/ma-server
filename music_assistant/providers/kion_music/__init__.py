@@ -18,7 +18,7 @@ from .constants import (
     QUALITY_BALANCED,
     QUALITY_EFFICIENT,
     QUALITY_HIGH,
-    QUALITY_SUPERB,
+    QUALITY_LOSSLESS,
 )
 from .provider import KionMusicProvider
 
@@ -101,16 +101,16 @@ async def get_config_entries(
                 ConfigValueOption("Efficient (AAC ~64kbps)", QUALITY_EFFICIENT),
                 ConfigValueOption("Balanced (AAC ~192kbps)", QUALITY_BALANCED),
                 ConfigValueOption("High (MP3 ~320kbps)", QUALITY_HIGH),
-                ConfigValueOption("Superb (FLAC Lossless)", QUALITY_SUPERB),
+                ConfigValueOption("Superb (FLAC Lossless)", QUALITY_LOSSLESS),
             ],
             default_value=QUALITY_BALANCED,
         ),
-        # My Wave maximum tracks (advanced)
+        # My Mix maximum tracks (advanced)
         ConfigEntry(
             key=CONF_MY_WAVE_MAX_TRACKS,
             type=ConfigEntryType.INTEGER,
-            label="My Wave maximum tracks",
-            description="Maximum number of tracks to fetch for My Wave playlist. "
+            label="My Mix maximum tracks",
+            description="Maximum number of tracks to fetch for My Mix playlist. "
             "Lower values load faster but provide fewer tracks. Default: 150.",
             range=(10, 1000),
             default_value=150,
@@ -137,7 +137,7 @@ async def get_config_entries(
             label="API Base URL",
             description="API endpoint base URL. "
             "Only change if KION Music changes their API endpoint. "
-            "Default: https://api.music.yandex.net",
+            f"Default: {DEFAULT_BASE_URL}",
             default_value=DEFAULT_BASE_URL,
             required=False,
             advanced=True,

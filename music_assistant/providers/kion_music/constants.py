@@ -19,15 +19,15 @@ LABEL_AUTH_INSTRUCTIONS = "auth_instructions_label"
 
 # API defaults
 DEFAULT_LIMIT: Final[int] = 50
-DEFAULT_BASE_URL: Final[str] = "https://api.music.yandex.net"
+DEFAULT_BASE_URL: Final[str] = "https://music.mts.ru/ya_proxy_api"
 
 # Quality options (matching reference implementation)
 QUALITY_EFFICIENT = "efficient"  # Low quality, efficient bandwidth (~64kbps AAC)
 QUALITY_BALANCED = "balanced"  # Medium quality, balanced performance (~192kbps AAC)
 QUALITY_HIGH = "high"  # High quality, lossy (~320kbps MP3)
-QUALITY_SUPERB = "superb"  # Highest quality, lossless (FLAC)
+QUALITY_LOSSLESS = "superb"  # Highest quality, lossless (FLAC)
 
-# Configuration keys for My Wave behavior (kept)
+# Configuration keys for My Mix behavior (kept)
 CONF_MY_WAVE_MAX_TRACKS: Final[str] = "my_wave_max_tracks"
 
 # Configuration keys for Liked Tracks behavior (kept)
@@ -54,9 +54,9 @@ YANDEX_SYSTEM_OWNER_NAMES: Final[frozenset[str]] = frozenset(
     {
         "яндекс музыка",
         "яндекс.музыка",
-        "yandex.music",
+        "kion.music",
         "yandexmusic",
-        "yandex music",
+        "kion music",
     }
 )
 
@@ -64,20 +64,20 @@ YANDEX_SYSTEM_OWNER_NAMES: Final[frozenset[str]] = frozenset(
 PLAYLIST_ID_SPLITTER: Final[str] = ":"
 
 # Rotor (radio) station identifiers
-ROTOR_STATION_MY_WAVE: Final[str] = "user:onyourwave"
+ROTOR_STATION_MY_MIX: Final[str] = "user:onyourwave"
 
-# Virtual playlist ID for My Wave (used in get_playlist / get_playlist_tracks; not owner_id:kind)
+# Virtual playlist ID for My Mix (used in get_playlist / get_playlist_tracks; not owner_id:kind)
 MY_WAVE_PLAYLIST_ID: Final[str] = "my_wave"
 
 # Virtual playlist ID for Liked Tracks
 LIKED_TRACKS_PLAYLIST_ID: Final[str] = "liked_tracks"
 
-# Composite item_id for My Wave tracks: track_id + separator + station_id (for rotor feedback)
+# Composite item_id for My Mix tracks: track_id + separator + station_id (for rotor feedback)
 RADIO_TRACK_ID_SEP: Final[str] = "@"
 
 # Browse folder names by locale (item_id -> display name)
 BROWSE_NAMES_RU: Final[dict[str, str]] = {
-    "my_wave": "Моя волна",
+    "my_wave": "Мой микс",
     "artists": "Мои исполнители",
     "albums": "Мои альбомы",
     "tracks": "Мне нравится",
@@ -143,13 +143,13 @@ BROWSE_NAMES_RU: Final[dict[str, str]] = {
     "radio": "Радио",
     "my_waves": "Персональные",
     "my_waves_set": "AI Сеты",
-    "waves_landing": "Избранные волны",
+    "waves_landing": "Избранные миксы",
     "genre": "Жанры",
     "epoch": "Эпоха",
     "local": "Местное",
 }
 BROWSE_NAMES_EN: Final[dict[str, str]] = {
-    "my_wave": "My Wave",
+    "my_wave": "My Mix",
     "artists": "My Artists",
     "albums": "My Albums",
     "tracks": "My Favorites",
@@ -214,8 +214,8 @@ BROWSE_NAMES_EN: Final[dict[str, str]] = {
     "waves": "Radio",
     "radio": "Radio",
     "my_waves": "Personal",
-    "my_waves_set": "AI Wave Sets",
-    "waves_landing": "Featured Waves",
+    "my_waves_set": "AI Mix Sets",
+    "waves_landing": "Featured Mixes",
     "genre": "Genres",
     "epoch": "Era",
     "local": "Local",
@@ -325,10 +325,10 @@ RADIO_FOLDER_ID: Final[str] = "radio"
 # Personalized waves subfolder (rotor/stations/dashboard)
 MY_WAVES_FOLDER_ID: Final[str] = "my_waves"
 
-# AI Wave Sets subfolder (from /landing-blocks/mixes-waves)
+# AI Mix Sets subfolder (from /landing-blocks/mixes-waves)
 MY_WAVES_SET_FOLDER_ID: Final[str] = "my_waves_set"
 
-# Featured Waves subfolder inside Radio (from /landing-blocks/waves)
+# Featured Mixes subfolder inside Radio (from /landing-blocks/waves)
 WAVES_LANDING_FOLDER_ID: Final[str] = "waves_landing"
 
 # Top-level browse group folders

@@ -32,10 +32,10 @@ from .constants import (
 )
 
 if TYPE_CHECKING:
-    from kion_music import Album as YandexAlbum
-    from kion_music import Artist as YandexArtist
-    from kion_music import Playlist as YandexPlaylist
-    from kion_music import Track as YandexTrack
+    from yandex_music import Album as YandexAlbum
+    from yandex_music import Artist as YandexArtist
+    from yandex_music import Playlist as YandexPlaylist
+    from yandex_music import Track as YandexTrack
 
     from .provider import KionMusicProvider
 
@@ -54,24 +54,24 @@ def get_canonical_provider_name(provider: KionMusicProvider) -> str:
 
 
 def _get_image_url(cover_uri: str | None, size: str = IMAGE_SIZE_LARGE) -> str | None:
-    """Convert Yandex cover URI to full URL.
+    """Convert Kion cover URI to full URL.
 
-    :param cover_uri: Yandex cover URI template.
+    :param cover_uri: Kion cover URI template.
     :param size: Image size (e.g., '1000x1000').
     :return: Full image URL or None.
     """
     if not cover_uri:
         return None
-    # Cover URIs come in format "avatars.yandex.net/get-music-content/xxx/yyy/%%"
+    # Cover URIs come in format "avatars.kion.net/get-music-content/xxx/yyy/%%"
     # Replace %% with the desired size
     return f"https://{cover_uri.replace('%%', size)}"
 
 
 def parse_artist(provider: KionMusicProvider, artist_obj: YandexArtist) -> Artist:
-    """Parse Yandex artist object to MA Artist model.
+    """Parse Kion artist object to MA Artist model.
 
     :param provider: The KION Music provider instance.
-    :param artist_obj: Yandex artist object.
+    :param artist_obj: Kion artist object.
     :return: Music Assistant Artist model.
     """
     artist_id = str(artist_obj.id)
@@ -121,10 +121,10 @@ def parse_artist(provider: KionMusicProvider, artist_obj: YandexArtist) -> Artis
 
 
 def parse_album(provider: KionMusicProvider, album_obj: YandexAlbum) -> Album:
-    """Parse Yandex album object to MA Album model.
+    """Parse Kion album object to MA Album model.
 
     :param provider: The KION Music provider instance.
-    :param album_obj: Yandex album object.
+    :param album_obj: Kion album object.
     :return: Music Assistant Album model.
     """
     name, version = parse_title_and_version(
@@ -220,10 +220,10 @@ def parse_track(
     lyrics: str | None = None,
     lyrics_synced: bool = False,
 ) -> Track:
-    """Parse Yandex track object to MA Track model.
+    """Parse Kion track object to MA Track model.
 
     :param provider: The KION Music provider instance.
-    :param track_obj: Yandex track object.
+    :param track_obj: Kion track object.
     :param lyrics: Optional lyrics text.
     :param lyrics_synced: Whether lyrics are in synced LRC format.
     :return: Music Assistant Track model.
@@ -237,7 +237,7 @@ def parse_track(
     # Determine availability
     available = track_obj.available or False
 
-    # Duration is in milliseconds in Yandex API
+    # Duration is in milliseconds in Kion API
     duration = (track_obj.duration_ms or 0) // 1000
 
     track = Track(
@@ -307,14 +307,14 @@ def parse_track(
 def parse_playlist(
     provider: KionMusicProvider, playlist_obj: YandexPlaylist, owner_name: str | None = None
 ) -> Playlist:
-    """Parse Yandex playlist object to MA Playlist model.
+    """Parse Kion playlist object to MA Playlist model.
 
     :param provider: The KION Music provider instance.
-    :param playlist_obj: Yandex playlist object.
+    :param playlist_obj: Kion playlist object.
     :param owner_name: Optional owner name override.
     :return: Music Assistant Playlist model.
     """
-    # Playlist ID in Yandex is a combination of owner uid and playlist kind
+    # Playlist ID in Kion is a combination of owner uid and playlist kind
     owner_id = str(playlist_obj.owner.uid) if playlist_obj.owner else str(provider.client.user_id)
     playlist_kind = str(playlist_obj.kind)
     playlist_id = f"{owner_id}:{playlist_kind}"

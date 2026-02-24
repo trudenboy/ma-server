@@ -59,7 +59,7 @@ from .constants import (
     PLAYLIST_ID_SPLITTER,
     RADIO_FOLDER_ID,
     RADIO_TRACK_ID_SEP,
-    ROTOR_STATION_MY_WAVE,
+    ROTOR_STATION_MY_MIX,
     TAG_CATEGORY_ACTIVITY,
     TAG_CATEGORY_ERA,
     TAG_CATEGORY_GENRES,
@@ -92,7 +92,7 @@ if TYPE_CHECKING:
 def _parse_radio_item_id(item_id: str) -> tuple[str, str | None]:
     """Extract track_id and optional station_id from provider item_id.
 
-    My Wave tracks use item_id format 'track_id@station_id'. Other tracks use
+    My Mix tracks use item_id format 'track_id@station_id'. Other tracks use
     plain track_id.
 
     :param item_id: Provider item_id (may contain RADIO_TRACK_ID_SEP).
@@ -124,8 +124,8 @@ class KionMusicProvider(MusicProvider):
     _my_wave_last_track_id: str | None = None  # last track id for "Load more" (API queue param)
     _my_wave_playlist_next_cursor: str | None = None  # first_track_id for next playlist page
     _my_wave_radio_started_sent: bool = False
-    _my_wave_seen_track_ids: set[str]  # Track IDs seen in current My Wave session
-    _my_wave_lock: asyncio.Lock  # Protects My Wave mutable state
+    _my_wave_seen_track_ids: set[str]  # Track IDs seen in current My Mix session
+    _my_wave_lock: asyncio.Lock  # Protects My Mix mutable state
     _wave_states: dict[str, _WaveState]  # Per-station state for tagged wave stations
     _wave_bg_colors: dict[str, str]  # image_url -> hex bg color for transparent covers
 
@@ -166,7 +166,7 @@ class KionMusicProvider(MusicProvider):
         # Suppress kion_music library DEBUG dumps (full API request/response JSON)
         logging.getLogger("kion_music").setLevel(self.logger.level + 10)
         self._streaming = KionMusicStreamingManager(self)
-        # Initialize My Wave duplicate tracking
+        # Initialize My Mix duplicate tracking
         self._my_wave_seen_track_ids = set()
         self._my_wave_lock = asyncio.Lock()
         # Initialize per-station wave state dict
@@ -203,10 +203,10 @@ class KionMusicProvider(MusicProvider):
         )
 
     async def browse(self, path: str) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
-        """Browse provider items with locale-based folder names and My Wave.
+        """Browse provider items with locale-based folder names and My Mix.
 
-        Root level shows My Wave, artists, albums, liked tracks, playlists. Names
-        are in Russian when MA locale is ru_*, otherwise in English. My Wave
+        Root level shows My Mix, artists, albums, liked tracks, playlists. Names
+        are in Russian when MA locale is ru_*, otherwise in English. My Mix
         tracks use item_id format track_id@station_id for rotor feedback.
 
         :param path: The path to browse (e.g. provider_id:// or provider_id://artists).
@@ -242,11 +242,11 @@ class KionMusicProvider(MusicProvider):
         if subpath in (WAVES_FOLDER_ID, RADIO_FOLDER_ID):
             return await self._browse_waves(path, path_parts)
 
-        # Handle my_waves_set/ path (AI Wave Sets from /landing-blocks/mixes-waves)
+        # Handle my_waves_set/ path (AI Mix Sets from /landing-blocks/mixes-waves)
         if subpath == MY_WAVES_SET_FOLDER_ID:
             return await self._browse_vibe_sets(path, path_parts)
 
-        # Handle waves_landing/ path (Featured Waves from /landing-blocks/waves)
+        # Handle waves_landing/ path (Featured Mixes from /landing-blocks/waves)
         if subpath == WAVES_LANDING_FOLDER_ID:
             return await self._browse_waves_landing(path, path_parts)
 
@@ -287,7 +287,7 @@ class KionMusicProvider(MusicProvider):
 
         folders: list[BrowseFolder] = []
         base = path if path.endswith("//") else path.rstrip("/") + "/"
-        # My Wave folder (always enabled — Яндекс «Моя волна»)
+        # My Mix folder (always enabled — Яндекс «Мой микс»)
         folders.append(
             BrowseFolder(
                 item_id=MY_WAVE_PLAYLIST_ID,
@@ -337,13 +337,13 @@ class KionMusicProvider(MusicProvider):
                 is_playable=False,
             )
         )
-        # AI Wave Sets — parametric stations from /landing-blocks/mixes-waves
+        # AI Mix Sets — parametric stations from /landing-blocks/mixes-waves
         folders.append(
             BrowseFolder(
                 item_id=MY_WAVES_SET_FOLDER_ID,
                 provider=self.instance_id,
                 path=f"{base}{MY_WAVES_SET_FOLDER_ID}",
-                name=names.get(MY_WAVES_SET_FOLDER_ID, "AI Wave Sets"),
+                name=names.get(MY_WAVES_SET_FOLDER_ID, "AI Mix Sets"),
                 is_playable=False,
             )
         )
@@ -354,7 +354,7 @@ class KionMusicProvider(MusicProvider):
     async def _browse_my_wave(
         self, path: str, sub_subpath: str | None
     ) -> list[Track | BrowseFolder]:
-        """Browse My Wave tracks (must be called under _my_wave_lock).
+        """Browse My Mix tracks (must be called under _my_wave_lock).
 
         :param path: Full browse path.
         :param sub_subpath: Sub-path part ('next' for load more, or track_id cursor).
@@ -402,7 +402,7 @@ class KionMusicProvider(MusicProvider):
                 last_batch_id = batch_id
             if not self._my_wave_radio_started_sent and yandex_tracks:
                 sent = await self.client.send_rotor_station_feedback(
-                    ROTOR_STATION_MY_WAVE,
+                    ROTOR_STATION_MY_MIX,
                     "radioStarted",
                     batch_id=batch_id,
                 )
@@ -450,20 +450,20 @@ class KionMusicProvider(MusicProvider):
         return all_tracks
 
     def _parse_my_wave_track(self, yt: Any, seen_ids: set[str]) -> Track | None:
-        """Parse a Yandex track into a My Wave Track with composite item_id.
+        """Parse a Kion track into a My Mix Track with composite item_id.
 
         Extracts the track_id, checks for duplicates in the seen_ids set,
         sets composite item_id (track_id@station_id), and updates provider_mappings.
         Callers using shared state must hold _my_wave_lock.
 
-        :param yt: Yandex track object from rotor station response.
+        :param yt: Kion track object from rotor station response.
         :param seen_ids: Set of already-seen track IDs to check and update.
         :return: Parsed Track with composite item_id, or None if duplicate/invalid.
         """
         try:
             t = parse_track(self, yt)
         except InvalidDataError as err:
-            self.logger.debug("Error parsing My Wave track: %s", err)
+            self.logger.debug("Error parsing My Mix track: %s", err)
             return None
 
         track_id = str(yt.id) if hasattr(yt, "id") and yt.id else getattr(yt, "track_id", None)
@@ -471,11 +471,11 @@ class KionMusicProvider(MusicProvider):
             return t
 
         if track_id in seen_ids:
-            self.logger.debug("Skipping duplicate My Wave track: %s", track_id)
+            self.logger.debug("Skipping duplicate My Mix track: %s", track_id)
             return None
 
         seen_ids.add(track_id)
-        t.item_id = f"{track_id}{RADIO_TRACK_ID_SEP}{ROTOR_STATION_MY_WAVE}"
+        t.item_id = f"{track_id}{RADIO_TRACK_ID_SEP}{ROTOR_STATION_MY_MIX}"
         for pm in t.provider_mappings:
             if pm.provider_instance == self.instance_id:
                 pm.item_id = t.item_id
@@ -836,7 +836,7 @@ class KionMusicProvider(MusicProvider):
     ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
         """Browse waves folder (rotor stations by genre/mood/activity/epoch/local).
 
-        Fetches available stations from the Yandex rotor API and groups them by category.
+        Fetches available stations from the Kion rotor API and groups them by category.
 
         :param path: Full browse path.
         :param path_parts: Split path parts after ://.
@@ -858,7 +858,7 @@ class KionMusicProvider(MusicProvider):
         # waves/ — show category folders
         if len(path_parts) == 1:
             folders: list[BrowseFolder] = []
-            # Personalized "My Waves" first — only show if dashboard returns stations
+            # Personalized "My Mixs" first — only show if dashboard returns stations
             dashboard_stations = await self._get_dashboard_stations_cached()
             if dashboard_stations:
                 folders.append(
@@ -866,11 +866,11 @@ class KionMusicProvider(MusicProvider):
                         item_id=MY_WAVES_FOLDER_ID,
                         provider=self.instance_id,
                         path=f"{base}{MY_WAVES_FOLDER_ID}",
-                        name=names.get(MY_WAVES_FOLDER_ID, "My Waves"),
+                        name=names.get(MY_WAVES_FOLDER_ID, "My Mixs"),
                         is_playable=False,
                     )
                 )
-            # Featured Waves — only show if landing-blocks/waves returns data
+            # Featured Mixes — only show if landing-blocks/waves returns data
             waves_landing = await self._get_waves_landing_cached()
             if waves_landing:
                 folders.append(
@@ -878,7 +878,7 @@ class KionMusicProvider(MusicProvider):
                         item_id=WAVES_LANDING_FOLDER_ID,
                         provider=self.instance_id,
                         path=f"{base}{WAVES_LANDING_FOLDER_ID}",
-                        name=names.get(WAVES_LANDING_FOLDER_ID, "Featured Waves"),
+                        name=names.get(WAVES_LANDING_FOLDER_ID, "Featured Mixes"),
                         is_playable=False,
                     )
                 )
@@ -914,7 +914,7 @@ class KionMusicProvider(MusicProvider):
         if category == MY_WAVES_FOLDER_ID and not tag:
             return await self._browse_my_waves_stations(path)
 
-        # waves/waves_landing/... — redirect to Featured Waves browse
+        # waves/waves_landing/... — redirect to Featured Mixes browse
         if category == WAVES_LANDING_FOLDER_ID:
             return await self._browse_waves_landing(path, path_parts[1:])
 
@@ -978,7 +978,7 @@ class KionMusicProvider(MusicProvider):
 
         Names are resolved from the non-personalized station list so that
         stations show their actual genre/mood name (e.g. "Рок") rather than
-        the generic "Моя волна" label that the dashboard API returns.
+        the generic "Мой микс" label that the dashboard API returns.
 
         :param path: Full browse path (used to build sub-paths).
         :return: List of playable BrowseFolder items, one per station.
@@ -1094,7 +1094,7 @@ class KionMusicProvider(MusicProvider):
             result: list[Track | BrowseFolder] = list(tracks)
 
             # Append "Load more" sentinel so MA knows to call browse again for next batch.
-            # This mirrors the My Wave mechanism and enables continuous radio playback.
+            # This mirrors the My Mix mechanism and enables continuous radio playback.
             if tracks and len(state.seen_track_ids) < max_tracks and path:
                 names = self._get_browse_names()
                 next_name = "Ещё" if names == BROWSE_NAMES_RU else "Load more"
@@ -1135,7 +1135,7 @@ class KionMusicProvider(MusicProvider):
 
     @use_cache(3600)
     async def _get_waves_landing_cached(self) -> list[dict[str, Any]] | None:
-        """Get Featured Waves data from /landing-blocks/waves, cached for 1 hour.
+        """Get Featured Mixes data from /landing-blocks/waves, cached for 1 hour.
 
         :return: List of wave category dicts from the API, or None on error.
         """
@@ -1144,7 +1144,7 @@ class KionMusicProvider(MusicProvider):
     async def _browse_waves_landing(
         self, path: str, path_parts: list[str]
     ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
-        """Browse Featured Waves (from /landing-blocks/waves).
+        """Browse Featured Mixes (from /landing-blocks/waves).
 
         :param path: Full browse path.
         :param path_parts: Split path parts after ://.
@@ -1259,7 +1259,7 @@ class KionMusicProvider(MusicProvider):
     async def _browse_vibe_sets(
         self, path: str, path_parts: list[str]
     ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
-        """Browse AI Wave Sets (from /landing-blocks/mixes-waves).
+        """Browse AI Mix Sets (from /landing-blocks/mixes-waves).
 
         :param path: Full browse path.
         :param path_parts: Split path parts after ://.
@@ -1307,7 +1307,7 @@ class KionMusicProvider(MusicProvider):
         result = SearchResults()
 
         # Determine search type based on requested media types
-        # Map MediaType to Yandex API search type
+        # Map MediaType to Kion API search type
         type_mapping = {
             MediaType.TRACK: "track",
             MediaType.ALBUM: "album",
@@ -1388,7 +1388,7 @@ class KionMusicProvider(MusicProvider):
     async def get_track(self, prov_track_id: str) -> Track:
         """Get track details by ID.
 
-        Supports composite item_id (track_id@station_id) for My Wave tracks;
+        Supports composite item_id (track_id@station_id) for My Mix tracks;
         only the track_id part is used for the API. Normalizes the ID before
         caching to avoid duplicate cache entries.
 
@@ -1419,7 +1419,7 @@ class KionMusicProvider(MusicProvider):
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get playlist details by ID.
 
-        Supports virtual playlists MY_WAVE_PLAYLIST_ID (My Wave) and
+        Supports virtual playlists MY_WAVE_PLAYLIST_ID (My Mix) and
         LIKED_TRACKS_PLAYLIST_ID (Liked Tracks). Real playlists use format "owner_id:kind".
 
         :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind",
@@ -1488,7 +1488,7 @@ class KionMusicProvider(MusicProvider):
         return parse_playlist(self, playlist)
 
     async def _get_my_wave_playlist_tracks(self, page: int) -> list[Track]:
-        """Get My Wave tracks for virtual playlist (uncached; uses cursor for page > 0).
+        """Get My Mix tracks for virtual playlist (uncached; uses cursor for page > 0).
 
         Fetches MY_WAVE_BATCH_SIZE Rotor API batches per page call to reduce
         the number of round-trips when the player controller paginates through pages.
@@ -1528,7 +1528,7 @@ class KionMusicProvider(MusicProvider):
                     self._my_wave_batch_id = batch_id
                 if not self._my_wave_radio_started_sent and yandex_tracks:
                     sent = await self.client.send_rotor_station_feedback(
-                        ROTOR_STATION_MY_WAVE,
+                        ROTOR_STATION_MY_MIX,
                         "radioStarted",
                         batch_id=batch_id,
                     )
@@ -1644,9 +1644,9 @@ class KionMusicProvider(MusicProvider):
 
     @use_cache(3600 * 3)
     async def get_similar_tracks(self, prov_track_id: str, limit: int = 25) -> list[Track]:
-        """Get similar tracks using Yandex Rotor station for this track.
+        """Get similar tracks using Kion Rotor station for this track.
 
-        Uses rotor station track:{id} so MA radio mode gets Yandex recommendations.
+        Uses rotor station track:{id} so MA radio mode gets Kion recommendations.
 
         :param prov_track_id: Provider track ID (plain or track_id@station_id).
         :param limit: Maximum number of tracks to return.
@@ -1666,7 +1666,7 @@ class KionMusicProvider(MusicProvider):
     async def recommendations(self) -> list[RecommendationFolder]:
         """Get recommendations with multiple discovery folders.
 
-        Returns My Wave, Feed (Made for You), Chart, New Releases, and
+        Returns My Mix, Feed (Made for You), Chart, New Releases, and
         New Playlists sections.
 
         :return: List of recommendation folders.
@@ -1720,9 +1720,9 @@ class KionMusicProvider(MusicProvider):
 
     @use_cache(600)
     async def _get_my_wave_recommendations(self) -> RecommendationFolder | None:
-        """Get My Wave recommendation folder with personalized tracks.
+        """Get My Mix recommendation folder with personalized tracks.
 
-        :return: RecommendationFolder with My Wave tracks, or None if empty.
+        :return: RecommendationFolder with My Mix tracks, or None if empty.
         """
         max_tracks_config = int(
             self.config.get_value(CONF_MY_WAVE_MAX_TRACKS) or 150  # type: ignore[arg-type]
@@ -2053,7 +2053,7 @@ class KionMusicProvider(MusicProvider):
         )
 
         if prov_playlist_id == MY_WAVE_PLAYLIST_ID:
-            self.logger.debug("Fetching My Wave tracks")
+            self.logger.debug("Fetching My Mix tracks")
             return await self._get_my_wave_playlist_tracks(page)
 
         if prov_playlist_id == LIKED_TRACKS_PLAYLIST_ID:
@@ -2101,7 +2101,7 @@ class KionMusicProvider(MusicProvider):
         if not tracks_list:
             return []
 
-        # Yandex returns TrackShort objects, we need to fetch full track info
+        # Kion returns TrackShort objects, we need to fetch full track info
         track_ids = [
             str(track.track_id) if hasattr(track, "track_id") else str(track.id)
             for track in tracks_list
@@ -2213,7 +2213,7 @@ class KionMusicProvider(MusicProvider):
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Retrieve library playlists from KION Music.
 
-        Includes virtual playlists (My Wave and Liked Tracks if enabled), user-created playlists,
+        Includes virtual playlists (My Mix and Liked Tracks if enabled), user-created playlists,
         and user-liked editorial playlists (returned by a separate API endpoint).
         """
         yield await self.get_playlist(MY_WAVE_PLAYLIST_ID)
@@ -2289,7 +2289,7 @@ class KionMusicProvider(MusicProvider):
     ) -> StreamDetails:
         """Get stream details for a track.
 
-        :param item_id: The track ID (or track_id@station_id for My Wave).
+        :param item_id: The track ID (or track_id@station_id for My Mix).
         :param media_type: The media type (should be TRACK).
         :return: StreamDetails for the track.
         """
@@ -2314,7 +2314,7 @@ class KionMusicProvider(MusicProvider):
         """Resolve wave cover image with background color fill for transparent PNGs.
 
         If the image URL has an associated background color (stored in _wave_bg_colors),
-        downloads the PNG from Yandex CDN and composites it on a solid color background
+        downloads the PNG from Kion CDN and composites it on a solid color background
         using Pillow, returning JPEG bytes. Falls back to the original URL on any error.
 
         :param path: Image URL (may include #rrggbb fragment used as cache key).
@@ -2364,7 +2364,7 @@ class KionMusicProvider(MusicProvider):
         media_item: MediaItemType,
         is_playing: bool = False,
     ) -> None:
-        """Report playback for rotor feedback when the track is from My Wave.
+        """Report playback for rotor feedback when the track is from My Mix.
 
         Sends trackStarted when the track is currently playing (is_playing=True).
         trackFinished/skip are sent from on_streamed to use accurate seconds_streamed.
@@ -2383,7 +2383,7 @@ class KionMusicProvider(MusicProvider):
         # for short tracks that finish before the 30-second periodic callback.
         self._ensure_dont_stop_the_music(prov_item_id)
         if is_playing:
-            if station_id == ROTOR_STATION_MY_WAVE:
+            if station_id == ROTOR_STATION_MY_MIX:
                 batch_id = self._my_wave_batch_id
             else:
                 state = self._wave_states.get(station_id)
@@ -2481,9 +2481,9 @@ class KionMusicProvider(MusicProvider):
                 break
 
     async def on_streamed(self, streamdetails: StreamDetails) -> None:
-        """Report stream completion for My Wave rotor feedback.
+        """Report stream completion for My Mix rotor feedback.
 
-        Sends trackFinished or skip with actual seconds_streamed so Yandex
+        Sends trackFinished or skip with actual seconds_streamed so Kion
         can improve recommendations.
         """
         # Radio feedback always enabled
@@ -2496,7 +2496,7 @@ class KionMusicProvider(MusicProvider):
         seconds = int(streamdetails.seconds_streamed or 0)
         duration = streamdetails.duration or 0
         feedback_type = "trackFinished" if duration and seconds >= max(0, duration - 10) else "skip"
-        if station_id == ROTOR_STATION_MY_WAVE:
+        if station_id == ROTOR_STATION_MY_MIX:
             batch_id = self._my_wave_batch_id
         else:
             state = self._wave_states.get(station_id)
