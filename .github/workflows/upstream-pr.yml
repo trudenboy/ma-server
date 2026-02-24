@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   create-upstream-pr:
-    name: Create draft PR to upstream
+    name: Create/update draft PR to upstream
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork
@@ -47,7 +47,7 @@ jobs:
           gh repo clone "$PROVIDER_REPO" provider-repo -- \
             --depth 1 --branch "v${{ inputs.version }}"
 
-      - name: Prepare branch and create draft PR
+      - name: Prepare upstream/<domain> branch and create/update draft PR
         env:
           GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
         run: |
@@ -59,7 +59,8 @@ jobs:
 
           DOMAIN="${{ inputs.domain }}"
           VERSION="v${{ inputs.version }}"
-          BRANCH="upstream/${DOMAIN}-${VERSION}"
+          # Branch name has no version — one branch/PR per domain, updated on each run
+          BRANCH="upstream/${DOMAIN}"
 
           git checkout -B "$BRANCH" upstream/dev
 
@@ -90,9 +91,10 @@ jobs:
             --json number --jq '.[0].number' 2>/dev/null || true)
 
           if [[ -n "$EXISTING_PR" ]]; then
-            echo "PR #${EXISTING_PR} already exists — updating body"
+            echo "PR #${EXISTING_PR} already exists — updating title and body"
             gh pr edit "$EXISTING_PR" \
               --repo music-assistant/server \
+              --title "feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}" \
               --body "$PR_BODY"
           else
             gh pr create \
@@ -103,3 +105,30 @@ jobs:
               --title "feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}" \
               --body "$PR_BODY"
           fi
+
+      - name: Update integration/pending-upstream
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+        run: |
+          DOMAIN="${{ inputs.domain }}"
+          DOMAINS="yandex_music kion_music zvuk_music msx_bridge"
+
+          git fetch origin
+
+          # Rebuild integration/pending-upstream = upstream/dev + all active upstream/<domain> branches
+          git remote add upstream https://github.com/music-assistant/server.git 2>/dev/null || true
+          git fetch upstream dev
+
+          git checkout -B integration/pending-upstream upstream/dev
+
+          for domain in $DOMAINS; do
+            if git ls-remote --heads origin "upstream/${domain}" | grep -q .; then
+              git checkout "origin/upstream/${domain}" -- "music_assistant/providers/${domain}/" 2>/dev/null || true
+            fi
+          done
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: rebuild integration/pending-upstream after ${DOMAIN} update"
+          fi
+          git push origin integration/pending-upstream --force
