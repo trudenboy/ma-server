@@ -71,16 +71,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git remote add upstream https://github.com/music-assistant/server.git
-          git fetch upstream stable
-
           # Skip if fork has no stable branch
           if ! git ls-remote --heads origin stable | grep -q stable; then
             echo "No stable branch in fork, skipping"
             exit 0
           fi
 
-          git checkout stable
+          git remote add upstream https://github.com/music-assistant/server.git
+          git fetch upstream stable
+
+          git checkout --track origin/stable
           FORK_HEAD=$(git rev-parse HEAD)
 
           git merge upstream/stable --no-edit -X ours || {
