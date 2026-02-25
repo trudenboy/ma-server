@@ -98,6 +98,9 @@ jobs:
             rsync -av --delete provider-repo/tests/ "tests/providers/${DOMAIN}/"
           fi
 
+          # Remove the cloned provider-repo dir before staging to avoid adding it as a submodule
+          rm -rf provider-repo
+
           git add -A
           if git diff --cached --quiet; then
             echo "No changes vs upstream/dev — nothing to submit"
