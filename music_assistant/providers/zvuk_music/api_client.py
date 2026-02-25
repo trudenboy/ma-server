@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, ParamSpec, TypeVar, cast
 
+import aiohttp
 from music_assistant_models.errors import (
     LoginFailed,
     ProviderUnavailableError,
@@ -117,6 +118,30 @@ class ZvukMusicClient:
         """Disconnect the client."""
         self._client = None
         self._user_id = None
+
+    async def _tiny_get(self, path: str, params: dict[str, str]) -> dict[str, Any] | None:
+        """Perform an authenticated GET to a /api/tiny endpoint.
+
+        Uses an independent aiohttp session instead of the library's internal
+        _request attribute, avoiding coupling to library implementation details.
+
+        :param path: Endpoint path relative to TINY_API_URL (e.g. ``"lyrics"``).
+        :param params: Query parameters.
+        :return: Parsed JSON dict, or None on non-200 response or empty body.
+        """
+        url = f"{TINY_API_URL}/{path}"
+        headers = {"X-Auth-Token": self._token}
+        try:
+            async with (
+                aiohttp.ClientSession(headers=headers) as session,
+                session.get(url, params=params) as resp,
+            ):
+                if resp.status != 200:
+                    return None
+                return cast("dict[str, Any]", await resp.json())
+        except Exception as err:
+            LOGGER.debug("Tiny API request to %s failed: %s", url, err)
+            return None
 
     def _ensure_connected(self) -> ClientAsync:
         """Ensure the client is connected and return it."""
@@ -313,11 +338,7 @@ class ZvukMusicClient:
         :param quality: Quality string — "flac", "high", or "mid".
         :return: Stream URL string, or None if not found.
         """
-        client = self._ensure_connected()
-        result = await client._request.get(
-            f"{TINY_API_URL}/track/stream",
-            params={"quality": quality, "id": track_id},
-        )
+        result = await self._tiny_get("track/stream", {"quality": quality, "id": track_id})
         if not result or "stream" not in result:
             return None
         return str(result["stream"])
@@ -374,10 +395,8 @@ class ZvukMusicClient:
 
         :return: List of playlist IDs.
         """
-        client = self._ensure_connected()
-        result = await client._request.get(
-            f"{TINY_API_URL}/grid/content",
-            params={"name": "editorial_playlist", "ranker_enabled": "true"},
+        result = await self._tiny_get(
+            "grid/content", {"name": "editorial_playlist", "ranker_enabled": "true"}
         )
         if not result:
             return []
@@ -408,11 +427,7 @@ class ZvukMusicClient:
         :return: Dict with ``lyrics`` (str or None), ``type`` (str or None),
             ``translation`` (str or None), or None on error.
         """
-        client = self._ensure_connected()
-        result = await client._request.get(
-            f"{TINY_API_URL}/lyrics",
-            params={"track_id": track_id},
-        )
+        result = await self._tiny_get("lyrics", {"track_id": track_id})
         if not result or not result.get("lyrics"):
             return None
         return result
