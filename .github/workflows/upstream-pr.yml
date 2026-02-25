@@ -150,10 +150,9 @@ jobs:
           git commit -m "$PR_TITLE"
           git push origin "$BRANCH" $FORCE_PUSH
 
-          EXISTING_PR=$(gh pr list \
-            --repo music-assistant/server \
-            --head "trudenboy:${BRANCH}" \
-            --json number --jq '.[0].number' 2>/dev/null || true)
+          EXISTING_PR=$(gh api "repos/music-assistant/server/pulls" \
+            -X GET -f state=open -f head="trudenboy:${BRANCH}" \
+            --jq '.[0].number // ""' 2>/dev/null || true)
 
           if [[ -n "$EXISTING_PR" ]]; then
             echo "PR #${EXISTING_PR} already exists — updating title and body"
