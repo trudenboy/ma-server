@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: false
+      pr_summary:
+        description: "Short title tagline (e.g. 'FLAC streaming, Lyrics, rich metadata'). Leave empty to use a generic title."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -40,17 +45,22 @@ jobs:
           GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           case "${{ inputs.domain }}" in
-            yandex_music) PROVIDER_REPO="trudenboy/ma-provider-yandex-music"; PROVIDER_PATH="provider/" ;;
-            kion_music) PROVIDER_REPO="trudenboy/ma-provider-kion-music"; PROVIDER_PATH="provider/" ;;
-            zvuk_music) PROVIDER_REPO="trudenboy/ma-provider-zvuk-music"; PROVIDER_PATH="provider/" ;;
-            msx_bridge) PROVIDER_REPO="trudenboy/ma-provider-msx-bridge"; PROVIDER_PATH="provider/" ;;
+            yandex_music) PROVIDER_REPO="trudenboy/ma-provider-yandex-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music" ;;
+            kion_music) PROVIDER_REPO="trudenboy/ma-provider-kion-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="KION Music" ;;
+            zvuk_music) PROVIDER_REPO="trudenboy/ma-provider-zvuk-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Zvuk Music" ;;
+            msx_bridge) PROVIDER_REPO="trudenboy/ma-provider-msx-bridge"; PROVIDER_PATH="provider/"; DISPLAY_NAME="MSX Bridge" ;;
             *) echo "Unknown domain: ${{ inputs.domain }}"; exit 1 ;;
           esac
           echo "PROVIDER_REPO=$PROVIDER_REPO" >> $GITHUB_ENV
           echo "PROVIDER_PATH=$PROVIDER_PATH" >> $GITHUB_ENV
+          echo "DISPLAY_NAME=$DISPLAY_NAME" >> $GITHUB_ENV
 
           gh repo clone "$PROVIDER_REPO" provider-repo -- \
             --depth 1 --branch "v${{ inputs.version }}"
+
+          PREV_TAG=$(gh api "repos/${PROVIDER_REPO}/releases?per_page=2" \
+            --jq '.[1].tag_name // ""' 2>/dev/null || echo "")
+          echo "PREV_TAG=$PREV_TAG" >> $GITHUB_ENV
 
       - name: Prepare upstream/<domain> branch and create/update draft PR
         env:
@@ -94,11 +104,87 @@ jobs:
             exit 0
           fi
 
-          git commit -m "feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}"
+          export PR_SUMMARY_INPUT="${{ inputs.pr_summary }}"
+          python3 - <<'PYEOF'
+import os, json, subprocess
+
+domain = os.environ['DOMAIN']
+version = os.environ['VERSION']
+provider_repo = os.environ['PROVIDER_REPO']
+display_name = os.environ.get('DISPLAY_NAME', domain)
+prev_tag = os.environ.get('PREV_TAG', '')
+pr_summary = os.environ.get('PR_SUMMARY_INPUT', '').strip()
+
+def gh_api(path):
+    r = subprocess.run(['gh', 'api', path], capture_output=True, text=True)
+    return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+
+what_new_lines, file_rows = [], []
+compare_label = f'vs {prev_tag}' if prev_tag else 'initial'
+
+if prev_tag:
+    data = gh_api(f'repos/{provider_repo}/compare/{prev_tag}...{version}')
+    if data:
+        for c in data.get('commits', []):
+            msg = c['commit']['message'].split('\n')[0]
+            if msg.startswith(('feat:', 'fix:')):
+                what_new_lines.append(f'- {msg}')
+        for f in data.get('files', []):
+            fn = f['filename']
+            if fn.startswith('provider/') or fn.startswith('tests/'):
+                file_rows.append(
+                    f'| `{fn}` | {f["status"]} | +{f["additions"]}/-{f["deletions"]} |'
+                )
+
+if not what_new_lines:
+    what_new_lines = ['_No feat/fix commits found_']
+
+title = (
+    f'feat({domain}): {version} — {pr_summary}'
+    if pr_summary
+    else f'feat({domain}): add {domain} provider {version}'
+)
+
+what_new = '\n'.join(what_new_lines)
+files_section = (
+    '| File | Status | Changes |\n|------|--------|---------|' +
+    '\n' + '\n'.join(file_rows)
+    if file_rows else '_No provider/tests files changed_'
+)
+
+body = f"""## {display_name} provider {version}
+
+**Source**: [{provider_repo}](https://github.com/{provider_repo}) · tag [{version}](https://github.com/{provider_repo}/releases/tag/{version})
+
+---
+
+### What's new ({compare_label})
+
+{what_new}
+
+---
+
+### Changed files ({compare_label})
+
+{files_section}
+
+---
+
+> Draft PR — please review before requesting merge into upstream."""
+
+with open('/tmp/pr_title.txt', 'w') as f:
+    f.write(title)
+with open('/tmp/pr_body.md', 'w') as f:
+    f.write(body)
+
+print(f'Title: {title}')
+PYEOF
+
+          PR_TITLE=$(cat /tmp/pr_title.txt)
+          git commit -m "$PR_TITLE"
           git push origin "$BRANCH" $FORCE_PUSH
 
-          PR_BODY=$(printf '## Add %s provider %s\n\n**Source**: [%s %s](https://github.com/%s/releases/tag/%s)\n\nProvider code taken from the release tag. This is a draft PR — please review before requesting merge into upstream.' \
-            "$DOMAIN" "$VERSION" "$PROVIDER_REPO" "$VERSION" "$PROVIDER_REPO" "$VERSION")
+          PR_BODY=$(cat /tmp/pr_body.md)
 
           EXISTING_PR=$(gh pr list \
             --repo music-assistant/server \
@@ -109,7 +195,7 @@ jobs:
             echo "PR #${EXISTING_PR} already exists — updating title and body"
             gh pr edit "$EXISTING_PR" \
               --repo music-assistant/server \
-              --title "feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}" \
+              --title "$PR_TITLE" \
               --body "$PR_BODY"
           else
             gh pr create \
@@ -117,7 +203,7 @@ jobs:
               --repo music-assistant/server \
               --head "trudenboy:${BRANCH}" \
               --base dev \
-              --title "feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}" \
+              --title "$PR_TITLE" \
               --body "$PR_BODY"
           fi
 
