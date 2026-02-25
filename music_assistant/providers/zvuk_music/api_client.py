@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
-import aiohttp
+if TYPE_CHECKING:
+    import aiohttp
 from music_assistant_models.errors import (
     LoginFailed,
     ProviderUnavailableError,
@@ -78,12 +79,14 @@ def handle_zvuk_errors(
 class ZvukMusicClient:
     """Wrapper around zvuk-music ClientAsync."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, http_session: aiohttp.ClientSession) -> None:
         """Initialize the Zvuk Music client.
 
         :param token: Zvuk Music X-Auth-Token.
+        :param http_session: Shared aiohttp session from MA (``self.mass.http_session``).
         """
         self._token = token
+        self._http_session = http_session
         self._client: ClientAsync | None = None
         self._user_id: str | None = None
 
@@ -122,20 +125,18 @@ class ZvukMusicClient:
     async def _tiny_get(self, path: str, params: dict[str, str]) -> dict[str, Any] | None:
         """Perform an authenticated GET to a /api/tiny endpoint.
 
-        Uses an independent aiohttp session instead of the library's internal
-        _request attribute, avoiding coupling to library implementation details.
+        Reuses the shared ``http_session`` passed at construction to benefit from
+        connection pooling and avoid per-call session overhead.
 
         :param path: Endpoint path relative to TINY_API_URL (e.g. ``"lyrics"``).
         :param params: Query parameters.
         :return: Parsed JSON dict, or None on non-200 response or empty body.
         """
         url = f"{TINY_API_URL}/{path}"
-        headers = {"X-Auth-Token": self._token}
         try:
-            async with (
-                aiohttp.ClientSession(headers=headers) as session,
-                session.get(url, params=params) as resp,
-            ):
+            async with self._http_session.get(
+                url, params=params, headers={"X-Auth-Token": self._token}
+            ) as resp:
                 if resp.status != 200:
                     return None
                 return cast("dict[str, Any]", await resp.json())
