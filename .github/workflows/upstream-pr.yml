@@ -156,10 +156,10 @@ jobs:
 
           if [[ -n "$EXISTING_PR" ]]; then
             echo "PR #${EXISTING_PR} already exists — updating title and body"
-            gh pr edit "$EXISTING_PR" \
-              --repo music-assistant/server \
-              --title "$PR_TITLE" \
-              --body "$PR_BODY"
+            gh api "repos/music-assistant/server/pulls/${EXISTING_PR}" \
+              -X PATCH \
+              -f title="$PR_TITLE" \
+              -f body="$PR_BODY"
           else
             gh pr create \
               --draft \
