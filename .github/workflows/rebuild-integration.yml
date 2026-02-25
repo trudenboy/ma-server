@@ -35,6 +35,7 @@ jobs:
           for domain in $DOMAINS; do
             if git ls-remote --heads origin "upstream/${domain}" | grep -q .; then
               git checkout "origin/upstream/${domain}" -- "music_assistant/providers/${domain}/" 2>/dev/null || true
+              git checkout "origin/upstream/${domain}" -- "tests/providers/${domain}/" 2>/dev/null || true
             fi
           done
 
