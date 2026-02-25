@@ -104,87 +104,48 @@ jobs:
             exit 0
           fi
 
-          export PR_SUMMARY_INPUT="${{ inputs.pr_summary }}"
-          python3 - <<'PYEOF'
-import os, json, subprocess
+          # Generate PR title
+          PR_SUMMARY="${{ inputs.pr_summary }}"
+          if [[ -n "$PR_SUMMARY" ]]; then
+            PR_TITLE="feat(${DOMAIN}): ${VERSION} — ${PR_SUMMARY}"
+          else
+            PR_TITLE="feat(${DOMAIN}): add ${DOMAIN} provider ${VERSION}"
+          fi
 
-domain = os.environ['DOMAIN']
-version = os.environ['VERSION']
-provider_repo = os.environ['PROVIDER_REPO']
-display_name = os.environ.get('DISPLAY_NAME', domain)
-prev_tag = os.environ.get('PREV_TAG', '')
-pr_summary = os.environ.get('PR_SUMMARY_INPUT', '').strip()
+          # Get changelog data from GitHub API
+          COMPARE_LABEL="initial"
+          WHAT_NEW="_No feat/fix commits found_"
+          FILES_SECTION="_No provider/tests files changed_"
 
-def gh_api(path):
-    r = subprocess.run(['gh', 'api', path], capture_output=True, text=True)
-    return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+          if [[ -n "$PREV_TAG" ]]; then
+            COMPARE_LABEL="vs ${PREV_TAG}"
+            WHAT_NEW=$(gh api "repos/${PROVIDER_REPO}/compare/${PREV_TAG}...${VERSION}" \
+              --jq '.commits[].commit.message | split("\n")[0] | select(test("^(feat|fix):")) | "- " + .' \
+              2>/dev/null || true)
+            [[ -z "$WHAT_NEW" ]] && WHAT_NEW="_No feat/fix commits found_"
+            FILE_ROWS=$(gh api "repos/${PROVIDER_REPO}/compare/${PREV_TAG}...${VERSION}" \
+              --jq '[.files[] | select(.filename | startswith("provider/") or startswith("tests/")) | "| `" + .filename + "` | " + .status + " | +" + (.additions|tostring) + "/-" + (.deletions|tostring) + " |"] | join("\n")' \
+              2>/dev/null || true)
+            if [[ -n "$FILE_ROWS" ]]; then
+              FILES_SECTION='| File | Status | Changes |'$'\n''|------|--------|---------|'$'\n'"${FILE_ROWS}"
+            fi
+          fi
 
-what_new_lines, file_rows = [], []
-compare_label = f'vs {prev_tag}' if prev_tag else 'initial'
+          # Build PR body (string concatenation avoids heredoc/YAML indentation issues)
+          PR_BODY="## ${DISPLAY_NAME} provider ${VERSION}"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="**Source**: [${PROVIDER_REPO}](https://github.com/${PROVIDER_REPO}) · tag [${VERSION}](https://github.com/${PROVIDER_REPO}/releases/tag/${VERSION})"
+          PR_BODY+=$'\n\n---\n\n'
+          PR_BODY+="### What's new (${COMPARE_LABEL})"
+          PR_BODY+=$'\n\n'"${WHAT_NEW}"
+          PR_BODY+=$'\n\n---\n\n'
+          PR_BODY+="### Changed files (${COMPARE_LABEL})"
+          PR_BODY+=$'\n\n'"${FILES_SECTION}"
+          PR_BODY+=$'\n\n---\n\n'
+          PR_BODY+="> Draft PR — please review before requesting merge into upstream."
 
-if prev_tag:
-    data = gh_api(f'repos/{provider_repo}/compare/{prev_tag}...{version}')
-    if data:
-        for c in data.get('commits', []):
-            msg = c['commit']['message'].split('\n')[0]
-            if msg.startswith(('feat:', 'fix:')):
-                what_new_lines.append(f'- {msg}')
-        for f in data.get('files', []):
-            fn = f['filename']
-            if fn.startswith('provider/') or fn.startswith('tests/'):
-                file_rows.append(
-                    f'| `{fn}` | {f["status"]} | +{f["additions"]}/-{f["deletions"]} |'
-                )
-
-if not what_new_lines:
-    what_new_lines = ['_No feat/fix commits found_']
-
-title = (
-    f'feat({domain}): {version} — {pr_summary}'
-    if pr_summary
-    else f'feat({domain}): add {domain} provider {version}'
-)
-
-what_new = '\n'.join(what_new_lines)
-files_section = (
-    '| File | Status | Changes |\n|------|--------|---------|' +
-    '\n' + '\n'.join(file_rows)
-    if file_rows else '_No provider/tests files changed_'
-)
-
-body = f"""## {display_name} provider {version}
-
-**Source**: [{provider_repo}](https://github.com/{provider_repo}) · tag [{version}](https://github.com/{provider_repo}/releases/tag/{version})
-
----
-
-### What's new ({compare_label})
-
-{what_new}
-
----
-
-### Changed files ({compare_label})
-
-{files_section}
-
----
-
-> Draft PR — please review before requesting merge into upstream."""
-
-with open('/tmp/pr_title.txt', 'w') as f:
-    f.write(title)
-with open('/tmp/pr_body.md', 'w') as f:
-    f.write(body)
-
-print(f'Title: {title}')
-PYEOF
-
-          PR_TITLE=$(cat /tmp/pr_title.txt)
           git commit -m "$PR_TITLE"
           git push origin "$BRANCH" $FORCE_PUSH
-
-          PR_BODY=$(cat /tmp/pr_body.md)
 
           EXISTING_PR=$(gh pr list \
             --repo music-assistant/server \
