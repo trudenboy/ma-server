@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
-from provider.provider import ZvukMusicProvider
+from music_assistant.providers.zvuk_music.provider import ZvukMusicProvider
 
 
 def _make_provider(lyrics_result: dict[str, str | None] | None) -> ZvukMusicProvider:
