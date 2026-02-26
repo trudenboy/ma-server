@@ -1,0 +1,46 @@
+name: Rebuild integration/pending-upstream
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    name: Rebuild integration/pending-upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild integration/pending-upstream
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          DOMAINS="yandex_music kion_music zvuk_music msx_bridge"
+
+          git remote add upstream https://github.com/music-assistant/server.git
+          git fetch upstream dev
+          git fetch origin
+
+          git checkout -B integration/pending-upstream upstream/dev
+
+          for domain in $DOMAINS; do
+            if git ls-remote --heads origin "upstream/${domain}" | grep -q .; then
+              git checkout "origin/upstream/${domain}" -- "music_assistant/providers/${domain}/" 2>/dev/null || true
+              git checkout "origin/upstream/${domain}" -- "tests/providers/${domain}/" 2>/dev/null || true
+            fi
+          done
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: rebuild integration/pending-upstream"
+          fi
+          git push origin integration/pending-upstream --force
