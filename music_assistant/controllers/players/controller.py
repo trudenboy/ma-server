@@ -1453,17 +1453,14 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
                 if removed_player := self.get_player(_removed_player_id):
                     removed_player.update_state()
 
-        # Handle external source takeover - detect when active_source changes to
+        # detect when active_source changes to
         # something external while we have a grouped protocol active
         if ATTR_ACTIVE_SOURCE in changed_values:
-            prev_source, new_source = changed_values[ATTR_ACTIVE_SOURCE]
             task_id = f"external_source_takeover_{player_id}"
             self.mass.call_later(
-                3,
-                self._handle_external_source_takeover,
+                5,
+                self._check_external_source_takeover,
                 player,
-                prev_source,
-                new_source,
                 task_id=task_id,
             )
         became_inactive = (
@@ -2178,9 +2175,7 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
             # - the leader has DSP enabled
             self.mass.create_task(self.mass.players.on_player_dsp_change(player.player_id))
 
-    def _handle_external_source_takeover(
-        self, player: Player, prev_source: str | None, new_source: str | None
-    ) -> None:
+    def _check_external_source_takeover(self, player: Player) -> None:
         """
         Handle when an external source takes over playback on a player.
 
@@ -2192,8 +2187,6 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
         but is actually playing from a different source.
 
         :param player: The player whose active_source changed.
-        :param prev_source: The previous active_source value.
-        :param new_source: The new active_source value.
         """
         # Only relevant for non-protocol players
         if player.type == PlayerType.PROTOCOL:
@@ -2207,6 +2200,8 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
         if not player.active_output_protocol or player.active_output_protocol == "native":
             return
 
+        new_source = player.state.active_source
+
         # Check if new source is external (not MA-managed)
         if self._is_ma_managed_source(player, new_source):
             return
@@ -2219,6 +2214,15 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
         # If the source matches the active protocol's domain, it's expected - not a takeover
         # e.g., source "airplay" when using AirPlay protocol is normal
         if new_source and new_source.lower() == protocol_player.provider.domain.lower():
+            return
+
+        if (
+            new_source
+            and new_source.lower() in ("airplay", "cast", "chromecast", "network")
+            and protocol_player.provider.domain.lower() == "sendspin"
+        ):
+            # Special case for Sendspin bridge: if the new source matches cast or airplay and the
+            # active protocol is Sendspin, we consider this a normal behavior and not a takeover
             return
 
         # Confirmed external source takeover
@@ -2572,18 +2576,19 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
             return  # nothing to do
 
         # ungroup player at power off
-        player_was_synced = bool(
-            player.state.synced_to or player.group_members or player.state.active_group
-        )
-        if player_was_synced and player.type == PlayerType.PLAYER and not powered:
+        player_was_sync_child = bool(player.state.synced_to or player.state.active_group)
+        if (
+            (player_was_sync_child or player.group_members)
+            and player.type == PlayerType.PLAYER
+            and not powered
+        ):
             # ungroup player if it is synced (or is a sync leader itself)
-            # NOTE: ungroup will be ignored if the player is not grouped or synced
             await self.cmd_ungroup(player_id)
 
         # always stop player at power off
         if (
             not powered
-            and not player_was_synced
+            and not player_was_sync_child
             and player_state.playback_state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         ):
             await self._handle_cmd_stop(player_id)
@@ -2735,6 +2740,10 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
         # set active source if media has a source_id (e.g. plugin source or mass queue source)
         if media.source_id:
             player.set_active_mass_source(media.source_id)
+
+        # power on the player if needed
+        if not player.state.powered and player.state.power_control != PLAYER_CONTROL_NONE:
+            await self._handle_cmd_power(player.player_id, True)
 
         # Determine output protocol to use:
         # If player already has an active protocol set, prefer that.
