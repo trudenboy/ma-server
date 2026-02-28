@@ -20,6 +20,8 @@ from music_assistant.models.player import DeviceInfo, Player, PlayerMedia
 from .constants import CONF_ENTRY_SGP_NOTE, CONF_MEMBERS_FILTER, EXTRA_FEATURES_FROM_MEMBERS
 
 if TYPE_CHECKING:
+    from music_assistant_models.player import PlayerSource
+
     from .provider import SyncGroupProvider
 
 
@@ -85,11 +87,6 @@ class SyncGroupPlayer(Player):
         return base_features
 
     @property
-    def playback_state(self) -> PlaybackState:
-        """Return the current playback state of the player."""
-        return self.sync_leader.state.playback_state if self.sync_leader else PlaybackState.IDLE
-
-    @property
     def requires_flow_mode(self) -> bool:
         """Return if the player needs flow mode."""
         if leader := self.sync_leader:
@@ -97,14 +94,74 @@ class SyncGroupPlayer(Player):
         return False
 
     @property
+    def playback_state(self) -> PlaybackState:
+        """Return the current playback state of the player."""
+        # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
+        return self.sync_leader.playback_state if self.sync_leader else PlaybackState.IDLE
+
+    @property
     def elapsed_time(self) -> float | None:
         """Return the elapsed time in (fractional) seconds of the current track (if any)."""
-        return self.sync_leader.state.elapsed_time if self.sync_leader else None
+        # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
+        return self.sync_leader.elapsed_time if self.sync_leader else None
 
     @property
     def elapsed_time_last_updated(self) -> float | None:
         """Return when the elapsed time was last updated."""
-        return self.sync_leader.state.elapsed_time_last_updated if self.sync_leader else None
+        # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
+        return self.sync_leader.elapsed_time_last_updated if self.sync_leader else None
+
+    @property
+    def current_media(self) -> PlayerMedia | None:
+        """Return the currently playing media (if any)."""
+        # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
+        return self.sync_leader.current_media if self.sync_leader else None
+
+    @property
+    def active_source(self) -> str | None:
+        """Return the active source id of the current media (if any)."""
+        # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
+        if not self.sync_leader:
+            return None
+        # if a plugin source is active on the syncleader, return that
+        for plugin_source in self.mass.players.get_plugin_sources():
+            if plugin_source.in_use_by == self.sync_leader.player_id:
+                return plugin_source.id
+        # deal with output protocols on the sync leader
+        output_protocol_domain: str | None = None
+        if (
+            self.sync_leader.active_output_protocol
+            and self.sync_leader.active_output_protocol != "native"
+        ):
+            if protocol_player := self.mass.players.get_player(
+                self.sync_leader.active_output_protocol
+            ):
+                output_protocol_domain = protocol_player.provider.domain
+        # active source as reported by the player itself
+        if (
+            self.sync_leader.active_source
+            # try to catch cases where player reports an active source
+            # that is actually from an active output protocol (e.g. AirPlay)
+            and self.sync_leader.active_source.lower() != output_protocol_domain
+            and not (
+                # try to handle sendspin bridge where the player itself
+                # is reporting the bridged protocol as active source
+                # we need to ignore that
+                output_protocol_domain == "sendspin"
+                and (
+                    self.sync_leader.active_source.lower()
+                    in ("airplay", "cast", "chromecast", "network")
+                )
+            )
+        ):
+            return self.sync_leader.active_source
+        return None
+
+    @property
+    def source_list(self) -> list[PlayerSource]:
+        """Return list of available (native) sources for this player."""
+        # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
+        return self.sync_leader.source_list if self.sync_leader else []
 
     @property
     def can_group_with(self) -> set[str]:
