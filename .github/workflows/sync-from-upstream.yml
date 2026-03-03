@@ -92,6 +92,8 @@ jobs:
           printf "%b" "$SUMMARY" >> $GITHUB_STEP_SUMMARY
 
       - name: Rebuild integration/pending-upstream
+        env:
+          FORK_SYNC_PAT: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           DOMAINS="yandex_music kion_music zvuk_music msx_bridge"
 
