@@ -61,7 +61,24 @@ class SyncGroupPlayer(Player):
         """Handle logic when the PlayerConfig is first loaded or updated."""
         # Config is only available after the player was registered
         self._cache.clear()  # clear to prevent loading old is_dynamic
-        static_members = cast("list[str]", self.config.get_value(CONF_GROUP_MEMBERS, []))
+        static_members_conf = cast("list[str]", self.config.get_value(CONF_GROUP_MEMBERS, []))
+        static_members: list[str] = []
+        # TEMP: migrate protocol id's to protocol parent id's for static members
+        # TODO: remove this logic once 2.8 is released and we start the 2.9 cycle.
+        changes_made = False
+        for member_id in static_members_conf:
+            if (
+                member_player := self.mass.players.get_player(member_id)
+            ) and member_player.protocol_parent_id:
+                static_members.append(member_player.protocol_parent_id)
+                changes_made = True
+            else:
+                static_members.append(member_id)
+        if changes_made:
+            self.mass.config.set_raw_player_config_value(
+                self.player_id, CONF_GROUP_MEMBERS, static_members
+            )
+
         self._attr_static_group_members = static_members.copy()
         if self.is_dynamic:
             self._attr_supported_features.add(PlayerFeature.SET_MEMBERS)
@@ -96,20 +113,47 @@ class SyncGroupPlayer(Player):
     @property
     def playback_state(self) -> PlaybackState:
         """Return the current playback state of the player."""
-        # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
-        return self.sync_leader.playback_state if self.sync_leader else PlaybackState.IDLE
+        return self.sync_leader.state.playback_state if self.sync_leader else PlaybackState.IDLE
 
     @property
     def elapsed_time(self) -> float | None:
         """Return the elapsed time in (fractional) seconds of the current track (if any)."""
         # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
-        return self.sync_leader.elapsed_time if self.sync_leader else None
+        if sync_leader := self.sync_leader:
+            # If an output protocol is active (and not native), use the protocol player's state
+            if (
+                sync_leader.active_output_protocol
+                and sync_leader.active_output_protocol != "native"
+                and (
+                    protocol_player := self.mass.players.get_player(
+                        sync_leader.active_output_protocol
+                    )
+                )
+                and protocol_player.playback_state != PlaybackState.IDLE
+            ):
+                return protocol_player.elapsed_time
+            return sync_leader.elapsed_time
+        return None
 
     @property
     def elapsed_time_last_updated(self) -> float | None:
         """Return when the elapsed time was last updated."""
         # NOTE: Not using 'state' here as we need the 'raw' value provided by the sync leader player
-        return self.sync_leader.elapsed_time_last_updated if self.sync_leader else None
+        if sync_leader := self.sync_leader:
+            # If an output protocol is active (and not native), use the protocol player's state
+            if (
+                sync_leader.active_output_protocol
+                and sync_leader.active_output_protocol != "native"
+                and (
+                    protocol_player := self.mass.players.get_player(
+                        sync_leader.active_output_protocol
+                    )
+                )
+                and protocol_player.playback_state != PlaybackState.IDLE
+            ):
+                return protocol_player.elapsed_time_last_updated
+            return sync_leader.elapsed_time_last_updated
+        return None
 
     @property
     def current_media(self) -> PlayerMedia | None:
@@ -376,7 +420,8 @@ class SyncGroupPlayer(Player):
             if member_id in self._attr_static_group_members:
                 # static members can not be removed from the group
                 raise PlayerCommandFailed(
-                    f"Cannot remove {self.display_name} from group since it's a static member!"
+                    f"Cannot remove {member_id} from group {self.display_name} "
+                    "since it's a static member!"
                 )
             if self.sync_leader and member_id == self.sync_leader.player_id:
                 leader_removed = True
@@ -391,6 +436,7 @@ class SyncGroupPlayer(Player):
         if self.sync_leader and leader_removed and self._attr_group_members:
             # we removed the current sync leader, but we still have members in the group
             # we need to select a new leader and re-form the syncgroup with it
+            old_leader_id = self.sync_leader.player_id
             self.logger.info(
                 "Removing current sync leader %s from group %s while it is active, "
                 "dissolving the current syncgroup and will re-form it with a new leader",
@@ -400,7 +446,10 @@ class SyncGroupPlayer(Player):
             await self.mass.players._handle_cmd_stop(self.sync_leader.player_id)
             await asyncio.sleep(1)
             await self._dissolve_syncgroup()
-            if was_playing:
+            # remove the old leader from the group members list so it won't be re-selected
+            if old_leader_id in self._attr_group_members:
+                self._attr_group_members.remove(old_leader_id)
+            if was_playing and self._attr_group_members:
                 await asyncio.sleep(2)
                 await self.play()
         elif self.sync_leader and (leader_removed or not self._attr_group_members):

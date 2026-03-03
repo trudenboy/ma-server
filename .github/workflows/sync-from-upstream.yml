@@ -34,7 +34,9 @@ jobs:
           git fetch upstream dev
 
           git merge upstream/dev --no-edit -X ours || {
-            git diff --name-only --diff-filter=U | xargs -r git checkout --ours --
+            git diff --name-only --diff-filter=U | while read -r f; do
+              git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
+            done
             git add -A
             git commit -m "chore: merge upstream/dev (conflicts: kept fork version)"
           }
@@ -136,7 +138,9 @@ jobs:
 
           git checkout --track origin/stable
           git merge upstream/stable --no-edit -X ours || {
-            git diff --name-only --diff-filter=U | xargs -r git checkout --ours --
+            git diff --name-only --diff-filter=U | while read -r f; do
+              git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
+            done
             git add -A
             git commit -m "chore: merge upstream/stable (conflicts: kept fork version)"
           }
