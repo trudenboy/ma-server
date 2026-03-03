@@ -13,7 +13,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   sync-dev:
@@ -112,6 +111,8 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "chore: rebuild integration/pending-upstream after upstream sync"
           fi
+          # Use PAT to push — GITHUB_TOKEN cannot push .github/workflows/ files
+          git remote set-url origin "https://x-access-token:${FORK_SYNC_PAT}@github.com/${{ github.repository }}.git"
           git push origin integration/pending-upstream --force
 
   sync-stable:
