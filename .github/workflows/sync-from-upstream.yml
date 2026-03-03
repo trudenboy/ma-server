@@ -92,6 +92,8 @@ jobs:
           printf "%b" "$SUMMARY" >> $GITHUB_STEP_SUMMARY
 
       - name: Rebuild integration/pending-upstream
+        env:
+          FORK_SYNC_PAT: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           DOMAINS="yandex_music kion_music zvuk_music msx_bridge"
 
@@ -111,6 +113,8 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "chore: rebuild integration/pending-upstream after upstream sync"
           fi
+          # Use PAT to push — GITHUB_TOKEN cannot push .github/workflows/ files
+          git remote set-url origin "https://x-access-token:${FORK_SYNC_PAT}@github.com/${{ github.repository }}.git"
           git push origin integration/pending-upstream --force
 
   sync-stable:
