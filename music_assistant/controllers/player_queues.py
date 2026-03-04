@@ -1168,18 +1168,28 @@ class PlayerQueuesController(CoreController):
             await self.mass.players.cmd_ungroup(group_id)
             await asyncio.sleep(3)
 
+        # capture source state before stopping (stop resets these)
         source_items = self._queue_items[source_queue_id]
+        source_resume_pos = int(source_queue.corrected_elapsed_time)
+        source_current_index = source_queue.current_index
+        source_current_item = source_queue.current_item
+
+        # stop the source player synchronously to prevent the async stop from
+        # clear() racing with the target's sync group formation/protocol switching
+        if source_queue.state != PlaybackState.IDLE:
+            await self.stop(source_queue_id)
+
         target_queue.repeat_mode = source_queue.repeat_mode
         target_queue.shuffle_enabled = source_queue.shuffle_enabled
         target_queue.dont_stop_the_music_enabled = source_queue.dont_stop_the_music_enabled
         target_queue.radio_source = source_queue.radio_source
         target_queue.enqueued_media_items = source_queue.enqueued_media_items
-        target_queue.resume_pos = int(source_queue.elapsed_time)
-        target_queue.current_index = source_queue.current_index
-        if source_queue.current_item:
-            target_queue.current_item = source_queue.current_item
+        target_queue.resume_pos = source_resume_pos
+        target_queue.current_index = source_current_index
+        if source_current_item:
+            target_queue.current_item = source_current_item
             target_queue.current_item.queue_id = target_queue_id
-        self.clear(source_queue_id)
+        self.clear(source_queue_id, skip_stop=True)
 
         await self.load(target_queue_id, source_items, keep_remaining=False, keep_played=False)
         for item in source_items:
@@ -2625,23 +2635,19 @@ class PlayerQueuesController(CoreController):
                 return current_item_id
             return None
         # try to extract the item id from a mass stream url
+        # URL format: {base_url}/{mode}/{session_id}/{queue_id}/{queue_item_id}/{player_id}.{fmt}
+        base_url = self.mass.streams.base_url
         if (
             protocol_player.current_media.uri
-            and queue_id in protocol_player.current_media.uri
-            and self.mass.streams.base_url in protocol_player.current_media.uri
+            and base_url
+            and protocol_player.current_media.uri.startswith(base_url)
         ):
-            current_item_id = protocol_player.current_media.uri.rsplit("/")[-1].split(".")[0]
-            if self.get_item(queue_id, current_item_id):
-                return current_item_id
-        # try to extract the item id from a queue_id/item_id combi
-        if (
-            protocol_player.current_media.uri
-            and queue_id in protocol_player.current_media.uri
-            and "/" in protocol_player.current_media.uri
-        ):
-            current_item_id = protocol_player.current_media.uri.split("/")[1]
-            if self.get_item(queue_id, current_item_id):
-                return current_item_id
+            path_parts = protocol_player.current_media.uri[len(base_url) :].strip("/").split("/")
+            # path_parts: [mode, session_id, queue_id, queue_item_id, player_id.fmt]
+            if len(path_parts) >= 5:
+                current_item_id = path_parts[3]
+                if self.get_item(queue_id, current_item_id):
+                    return current_item_id
 
         return None
 
