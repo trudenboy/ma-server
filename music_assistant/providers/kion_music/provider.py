@@ -858,7 +858,7 @@ class KionMusicProvider(MusicProvider):
         # waves/ — show category folders
         if len(path_parts) == 1:
             folders: list[BrowseFolder] = []
-            # Personalized "My Mixs" first — only show if dashboard returns stations
+            # Personalized "My Mixes" first — only show if dashboard returns stations
             dashboard_stations = await self._get_dashboard_stations_cached()
             if dashboard_stations:
                 folders.append(
@@ -866,7 +866,7 @@ class KionMusicProvider(MusicProvider):
                         item_id=MY_WAVES_FOLDER_ID,
                         provider=self.instance_id,
                         path=f"{base}{MY_WAVES_FOLDER_ID}",
-                        name=names.get(MY_WAVES_FOLDER_ID, "My Mixs"),
+                        name=names.get(MY_WAVES_FOLDER_ID, "My Mixes"),
                         is_playable=False,
                     )
                 )
