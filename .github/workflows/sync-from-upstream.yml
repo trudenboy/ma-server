@@ -23,12 +23,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Sync dev from upstream
+        env:
+          FORK_SYNC_PAT: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          git remote set-url origin "https://x-access-token:${FORK_SYNC_PAT}@github.com/trudenboy/ma-server.git"
           git checkout dev
           git remote add upstream https://github.com/music-assistant/server.git
           git fetch upstream dev
@@ -124,7 +128,7 @@ jobs:
           done
 
           # Remove upstream workflow files that are deleted in this fork (legacy_files)
-          git rm --ignore-unmatch .github/workflows/release.yml || true
+          git rm --ignore-unmatch .github/workflows/release.yml .github/workflows/auto-release.yml || true
 
           git add -A
           if ! git diff --cached --quiet; then
@@ -141,8 +145,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Merge upstream stable, update integration/stable
+        env:
+          FORK_SYNC_PAT: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -153,6 +160,7 @@ jobs:
             exit 0
           fi
 
+          git remote set-url origin "https://x-access-token:${FORK_SYNC_PAT}@github.com/trudenboy/ma-server.git"
           git remote add upstream https://github.com/music-assistant/server.git
           git fetch upstream stable
 
