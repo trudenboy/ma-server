@@ -49,6 +49,14 @@ jobs:
             git commit -m "chore: merge upstream/dev (conflicts: kept fork version)"
           }
 
+          # Dependency files must always match upstream to avoid version desyncs.
+          # -X ours can keep stale pins when both sides touch the same dependency line.
+          git checkout upstream/dev -- requirements_all.txt
+          git add requirements_all.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync requirements_all.txt with upstream/dev"
+          fi
+
           git push origin dev
 
       - name: Update integration/dev
@@ -176,6 +184,14 @@ jobs:
             git add -A
             git commit -m "chore: merge upstream/stable (conflicts: kept fork version)"
           }
+
+          # Dependency files must always match upstream to avoid version desyncs.
+          # -X ours can keep stale pins when both sides touch the same dependency line.
+          git checkout upstream/stable -- requirements_all.txt
+          git add requirements_all.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync requirements_all.txt with upstream/stable"
+          fi
 
           git push origin stable
 
