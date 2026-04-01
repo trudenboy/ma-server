@@ -34,6 +34,7 @@ jobs:
           git fetch upstream dev
 
           git merge upstream/dev --no-edit -X ours || {
+            rm -f .git/index.lock
             git diff --name-only --diff-filter=U | while read -r f; do
               git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
             done
@@ -50,7 +51,14 @@ jobs:
           else
             git checkout -b integration/dev dev
           fi
-          git merge dev --no-edit
+          git merge dev --no-edit -X theirs || {
+            rm -f .git/index.lock
+            git diff --name-only --diff-filter=U | while read -r f; do
+              git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
+            done
+            git add -A
+            git commit -m "chore: merge dev into integration/dev (conflicts: kept dev version)"
+          }
           git push origin integration/dev
 
       - name: Check for merged upstream PRs and clean up
@@ -141,6 +149,7 @@ jobs:
 
           git checkout --track origin/stable
           git merge upstream/stable --no-edit -X ours || {
+            rm -f .git/index.lock
             git diff --name-only --diff-filter=U | while read -r f; do
               git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
             done
@@ -153,6 +162,13 @@ jobs:
           # Update integration/stable if it exists
           if git ls-remote --heads origin integration/stable | grep -q .; then
             git checkout --track origin/integration/stable 2>/dev/null || git checkout integration/stable
-            git merge stable --no-edit
+            git merge stable --no-edit -X theirs || {
+              rm -f .git/index.lock
+              git diff --name-only --diff-filter=U | while read -r f; do
+                git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
+              done
+              git add -A
+              git commit -m "chore: merge stable into integration/stable (conflicts: kept stable version)"
+            }
             git push origin integration/stable
           fi
