@@ -37,8 +37,10 @@ jobs:
             rm -f .git/index.lock
             CONFLICTS=$(git diff --name-only --diff-filter=U)
             for f in $CONFLICTS; do
-              git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
+              rm -f .git/index.lock
+              git checkout --ours -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
             done
+            rm -f .git/index.lock
             git add -A
             git commit -m "chore: merge upstream/dev (conflicts: kept fork version)"
           }
@@ -56,8 +58,10 @@ jobs:
             rm -f .git/index.lock
             CONFLICTS=$(git diff --name-only --diff-filter=U)
             for f in $CONFLICTS; do
-              git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
+              rm -f .git/index.lock
+              git checkout --theirs -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
             done
+            rm -f .git/index.lock
             git add -A
             git commit -m "chore: merge dev into integration/dev (conflicts: kept dev version)"
           }
@@ -157,8 +161,10 @@ jobs:
             rm -f .git/index.lock
             CONFLICTS=$(git diff --name-only --diff-filter=U)
             for f in $CONFLICTS; do
-              git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
+              rm -f .git/index.lock
+              git checkout --ours -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
             done
+            rm -f .git/index.lock
             git add -A
             git commit -m "chore: merge upstream/stable (conflicts: kept fork version)"
           }
@@ -172,8 +178,10 @@ jobs:
               rm -f .git/index.lock
               CONFLICTS=$(git diff --name-only --diff-filter=U)
               for f in $CONFLICTS; do
-                git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
+                rm -f .git/index.lock
+                git checkout --theirs -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
               done
+              rm -f .git/index.lock
               git add -A
               git commit -m "chore: merge stable into integration/stable (conflicts: kept stable version)"
             }
