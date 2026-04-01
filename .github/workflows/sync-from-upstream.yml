@@ -35,9 +35,12 @@ jobs:
 
           git merge upstream/dev --no-edit -X ours || {
             rm -f .git/index.lock
-            git diff --name-only --diff-filter=U | while read -r f; do
-              git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            for f in $CONFLICTS; do
+              rm -f .git/index.lock
+              git checkout --ours -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
             done
+            rm -f .git/index.lock
             git add -A
             git commit -m "chore: merge upstream/dev (conflicts: kept fork version)"
           }
@@ -53,9 +56,12 @@ jobs:
           fi
           git merge dev --no-edit -X theirs || {
             rm -f .git/index.lock
-            git diff --name-only --diff-filter=U | while read -r f; do
-              git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            for f in $CONFLICTS; do
+              rm -f .git/index.lock
+              git checkout --theirs -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
             done
+            rm -f .git/index.lock
             git add -A
             git commit -m "chore: merge dev into integration/dev (conflicts: kept dev version)"
           }
@@ -100,6 +106,8 @@ jobs:
           printf "%b" "$SUMMARY" >> $GITHUB_STEP_SUMMARY
 
       - name: Rebuild integration/pending-upstream
+        env:
+          FORK_SYNC_PAT: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           DOMAINS="yandex_music kion_music zvuk_music msx_bridge"
 
@@ -122,6 +130,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "chore: rebuild integration/pending-upstream after upstream sync"
           fi
+          git remote set-url origin "https://x-access-token:${FORK_SYNC_PAT}@github.com/trudenboy/ma-server.git"
           git push origin integration/pending-upstream --force
 
   sync-stable:
@@ -150,9 +159,12 @@ jobs:
           git checkout --track origin/stable
           git merge upstream/stable --no-edit -X ours || {
             rm -f .git/index.lock
-            git diff --name-only --diff-filter=U | while read -r f; do
-              git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            for f in $CONFLICTS; do
+              rm -f .git/index.lock
+              git checkout --ours -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
             done
+            rm -f .git/index.lock
             git add -A
             git commit -m "chore: merge upstream/stable (conflicts: kept fork version)"
           }
@@ -164,9 +176,12 @@ jobs:
             git checkout --track origin/integration/stable 2>/dev/null || git checkout integration/stable
             git merge stable --no-edit -X theirs || {
               rm -f .git/index.lock
-              git diff --name-only --diff-filter=U | while read -r f; do
-                git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
+              CONFLICTS=$(git diff --name-only --diff-filter=U)
+              for f in $CONFLICTS; do
+                rm -f .git/index.lock
+                git checkout --theirs -- "$f" 2>/dev/null || { rm -f .git/index.lock; git rm -f -- "$f"; }
               done
+              rm -f .git/index.lock
               git add -A
               git commit -m "chore: merge stable into integration/stable (conflicts: kept stable version)"
             }
