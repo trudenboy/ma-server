@@ -34,6 +34,7 @@ from music_assistant.helpers.compare import (
     create_safe_string,
     loose_compare_strings,
 )
+from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import serialize_to_json
 from music_assistant.models.music_provider import MusicProvider
 
@@ -84,6 +85,7 @@ class TracksController(MediaControllerBase[Track]):
                     'name', albums.name,
                     'sort_name', albums.sort_name,
                     'media_type', 'album',
+                    'year', albums.year,
                     'disc_number', album_tracks.disc_number,
                     'track_number', album_tracks.track_number,
                     'images', json_extract(albums.metadata, '$.images')
@@ -102,6 +104,7 @@ class TracksController(MediaControllerBase[Track]):
         self,
         item_id: str,
         provider_instance_id_or_domain: str,
+        allow_update_metadata: bool = True,
         recursive: bool = True,
         album_uri: str | None = None,
     ) -> Track:
@@ -109,6 +112,7 @@ class TracksController(MediaControllerBase[Track]):
         track = await super().get(
             item_id,
             provider_instance_id_or_domain,
+            allow_update_metadata=allow_update_metadata,
         )
         if not recursive and album_uri is None:
             # return early if we do not want recursive full details and no album uri is provided
@@ -117,7 +121,7 @@ class TracksController(MediaControllerBase[Track]):
         # append full album details to full track item (resolve ItemMappings)
         try:
             if album_uri:
-                item = await self.mass.music.get_item_by_uri(album_uri)
+                item = await self.mass.music.get_item_by_uri(album_uri, allow_update_metadata=False)
                 if isinstance(item, Album):
                     track.album = item
             elif provider_instance_id_or_domain == "library":
@@ -130,7 +134,10 @@ class TracksController(MediaControllerBase[Track]):
                     )
             elif isinstance(track.album, ItemMapping) or (track.album and not track.album.image):
                 track.album = await self.mass.music.albums.get(
-                    track.album.item_id, track.album.provider, recursive=False
+                    track.album.item_id,
+                    track.album.provider,
+                    allow_update_metadata=False,
+                    recursive=False,
                 )
         except MusicAssistantError as err:
             # edge case where playlist track has invalid albumdetails
@@ -150,6 +157,7 @@ class TracksController(MediaControllerBase[Track]):
                     await self.mass.music.artists.get(
                         artist.item_id,
                         artist.provider,
+                        allow_update_metadata=False,
                     )
                 )
             except MusicAssistantError as err:
@@ -197,6 +205,7 @@ class TracksController(MediaControllerBase[Track]):
         result = await self.get_library_items_by_query(
             favorite=favorite,
             search=search,
+            genre_ids=genre,
             limit=limit,
             offset=offset,
             order_by=order_by,
@@ -218,6 +227,7 @@ class TracksController(MediaControllerBase[Track]):
             for _track in await self.get_library_items_by_query(
                 favorite=favorite,
                 search=None,
+                genre_ids=genre,
                 limit=limit,
                 order_by=order_by,
                 provider_filter=self._ensure_provider_filter(provider),
@@ -523,6 +533,7 @@ class TracksController(MediaControllerBase[Track]):
                 "metadata": serialize_to_json(item.metadata),
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
+                "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
             },
         )
         # update/set provider_mappings table
@@ -564,6 +575,9 @@ class TracksController(MediaControllerBase[Track]):
                 ),
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
+                "timestamp_added": int(update.date_added.timestamp())
+                if update.date_added
+                else UNSET,
             },
         )
         # update/set provider_mappings table

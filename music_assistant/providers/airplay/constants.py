@@ -5,7 +5,8 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Final
 
-from music_assistant_models.enums import ContentType
+from music_assistant_models.config_entries import ConfigEntry
+from music_assistant_models.enums import ConfigEntryType, ContentType, PlayerFeature
 from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.constants import INTERNAL_PCM_FORMAT
@@ -20,15 +21,15 @@ class StreamingProtocol(IntEnum):
     AIRPLAY2 = 2  # AirPlay 2
 
 
-CACHE_CATEGORY_PREV_VOLUME: Final[int] = 1
-
 CONF_ENCRYPTION: Final[str] = "encryption"
 CONF_ALAC_ENCODE: Final[str] = "alac_encode"
 CONF_VOLUME_START: Final[str] = "volume_start"
 CONF_PASSWORD: Final[str] = "password"
+CONF_AP2PASSWORD: Final[str] = "ap2password"
 CONF_IGNORE_VOLUME: Final[str] = "ignore_volume"
 CONF_CREDENTIALS: Final[str] = "credentials"
 CONF_AIRPLAY_PROTOCOL: Final[str] = "airplay_protocol"
+CONF_STORED_VOLUME: Final[str] = "stored_volume"
 
 AIRPLAY_DISCOVERY_TYPE: Final[str] = "_airplay._tcp.local."
 RAOP_DISCOVERY_TYPE: Final[str] = "_raop._tcp.local."
@@ -80,3 +81,28 @@ AIRPLAY_2_DEFAULT_MODELS = (
     # These use the translated/friendly model names from get_model_info()
     ("Ubiquiti Inc.", "*"),
 )
+
+BROKEN_AIRPLAY_WARN = ConfigEntry(
+    key="BROKEN_AIRPLAY",
+    type=ConfigEntryType.ALERT,
+    default_value=None,
+    required=False,
+    label="This player is known to have broken AirPlay support. "
+    "Playback may fail or simply be silent. "
+    "There is no workaround for this issue at the moment. \n"
+    "If you already enforced AirPlay 2 on the player and it remains silent, "
+    "this is one of the known broken models. Only remedy is to nag the manufacturer for a fix.",
+)
+
+BASE_PLAYER_FEATURES: Final[set[PlayerFeature]] = {
+    PlayerFeature.PLAY_MEDIA,
+    PlayerFeature.SET_MEMBERS,
+    PlayerFeature.MULTI_DEVICE_DSP,
+    PlayerFeature.VOLUME_SET,
+    PlayerFeature.VOLUME_MUTE,
+}
+
+
+PIN_REQUIRED = 0x8
+PASSWORD_BIT = 0x80
+LEGACY_PAIRING_BIT = 0x200

@@ -9,8 +9,10 @@ without deadlocking.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
 import os
+import sys
 
 # if TYPE_CHECKING:
 from collections.abc import AsyncGenerator
@@ -122,7 +124,9 @@ class AsyncProcess:
             stdout=asyncio.subprocess.PIPE if self._stdout is True else self._stdout,
             stderr=asyncio.subprocess.PIPE if self._stderr is True else self._stderr,
             env=self._env,
+            bufsize=0,
         )
+        _try_increase_pipe_buffer(self.proc)
         self.logger.log(
             VERBOSE_LOG_LEVEL, "Process %s started with PID %s", self.name, self.proc.pid
         )
@@ -171,21 +175,24 @@ class AsyncProcess:
 
     async def write(self, data: bytes) -> None:
         """Write data to process stdin."""
-        if self._close_called:
+        if self._close_called or self.proc is None:
             return
-        assert self.proc is not None  # for type checking
-        assert self.proc.stdin is not None  # for type checking
+        if self.proc.stdin is None:
+            return
         async with self._stdin_lock:
-            self.proc.stdin.write(data)
+            mv = memoryview(data)
+            chunk_size = 65536
             with suppress(BrokenPipeError, ConnectionResetError):
-                await self.proc.stdin.drain()
+                for i in range(0, len(mv), chunk_size):
+                    self.proc.stdin.write(mv[i : i + chunk_size])
+                    await self.proc.stdin.drain()
 
     async def write_eof(self) -> None:
         """Write end of file to to process stdin."""
-        if self._close_called:
+        if self._close_called or self.proc is None:
             return
-        assert self.proc is not None  # for type checking
-        assert self.proc.stdin is not None  # for type checking
+        if self.proc.stdin is None:
+            return
         async with self._stdin_lock:
             try:
                 if self.proc.stdin.can_write_eof():
@@ -260,10 +267,16 @@ class AsyncProcess:
                 self._stdin_feeder_task.cancel()
             # Always await the task to consume any exception and prevent
             # "Task exception was never retrieved" errors.
-            # Suppress CancelledError (from cancel) and any other exception
-            # since exceptions have already been propagated through the generator chain.
-            with suppress(asyncio.CancelledError, Exception):
+            try:
                 await self._stdin_feeder_task
+            except asyncio.CancelledError:
+                pass  # Expected when we cancel the task
+            except Exception as err:
+                # Log unexpected exceptions from the stdin feeder before suppressing
+                LOGGER.warning(
+                    "Process stdin feeder task ended with error: %s",
+                    err,
+                )
 
         # close stdin to signal we're done sending data
         with suppress(TimeoutError, asyncio.CancelledError):

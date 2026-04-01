@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import TYPE_CHECKING
@@ -11,7 +12,6 @@ from typing import TYPE_CHECKING
 from music_assistant_models.errors import PlayerCommandFailed
 
 from music_assistant.constants import CONF_SYNC_ADJUST
-from music_assistant.helpers.audio import get_player_filter_params
 from music_assistant.helpers.ffmpeg import FFMpeg
 from music_assistant.providers.airplay.helpers import ntp_to_unix_time, unix_time_to_ntp
 
@@ -136,9 +136,9 @@ class AirPlayStreamSession:
         """Add a sync client to the session as a late joiner.
 
         The late joiner will:
-        1. Start playing at a compensated NTP timestamp (start_ntp + offset)
-        2. Receive silence calculated dynamically based on how much audio has been sent
-        3. Then receive real audio chunks in sync with other players
+        1. Start with NTP timestamp accounting for buffered chunks we'll send
+        2. Receive buffered chunks immediately to prime the ffmpeg/CLI pipeline
+        3. Join the real-time stream in perfect sync with other players
         """
         sync_leader = self.sync_clients[0]
         if not sync_leader.stream or not sync_leader.stream.running:
@@ -264,6 +264,28 @@ class AirPlayStreamSession:
             if ffmpeg.closed:
                 return
             await asyncio.wait_for(ffmpeg.write(chunk), timeout=35.0)
+
+    async def _feed_buffered_chunks(
+        self,
+        airplay_player: AirPlayPlayer,
+        buffered_chunks: list[tuple[bytes, float]],
+    ) -> None:
+        """Feed buffered chunks to a late joiner to prime the ffmpeg pipeline.
+
+        :param airplay_player: The late joiner player.
+        :param buffered_chunks: List of (chunk_data, position) tuples to send.
+        """
+        try:
+            for chunk, _position in buffered_chunks:
+                await self._write_chunk_to_player(airplay_player, chunk)
+        except Exception as err:
+            self.prov.logger.warning(
+                "Failed to feed buffered chunks to late joiner %s: %s",
+                airplay_player.player_id,
+                err,
+            )
+            # Remove the client if feeding buffered chunks fails
+            self.mass.create_task(self.remove_client(airplay_player))
 
     async def _write_eof_to_player(self, airplay_player: AirPlayPlayer) -> None:
         """Write EOF to a specific player."""

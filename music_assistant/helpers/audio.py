@@ -2,36 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import re
 import struct
-import time
+import urllib.parse
 from collections.abc import AsyncGenerator
 from io import BytesIO
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
-import aiofiles
-import shortuuid
-from aiohttp import ClientTimeout
-from music_assistant_models.dsp import DSPConfig, DSPDetails, DSPState
 from music_assistant_models.enums import (
     ContentType,
     MediaType,
     PlayerFeature,
     PlayerType,
-    StreamType,
     VolumeNormalizationMode,
 )
-from music_assistant_models.errors import (
-    AudioError,
-    InvalidDataError,
-    MediaNotFoundError,
-    MusicAssistantError,
-    ProviderUnavailableError,
-)
-from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.streamdetails import MultiPartPath
 
 from music_assistant.constants import (
@@ -40,35 +26,23 @@ from music_assistant.constants import (
     CONF_OUTPUT_CHANNELS,
     CONF_VOLUME_NORMALIZATION,
     CONF_VOLUME_NORMALIZATION_RADIO,
-    CONF_VOLUME_NORMALIZATION_TARGET,
     CONF_VOLUME_NORMALIZATION_TRACKS,
     MASS_LOGGER_NAME,
     VERBOSE_LOG_LEVEL,
 )
-from music_assistant.controllers.players.sync_groups import SyncGroupPlayer
 from music_assistant.helpers.json import JSON_DECODE_EXCEPTIONS, json_loads
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
-from music_assistant.helpers.util import clean_stream_title, remove_file
 
-from .audio_buffer import AudioBuffer
-from .dsp import filter_to_ffmpeg_params
-from .ffmpeg import FFMpeg, get_ffmpeg_args, get_ffmpeg_stream
-from .playlists import IsHLSPlaylist, PlaylistItem, fetch_playlist, parse_m3u
+from .ffmpeg import get_ffmpeg_args
 from .process import AsyncProcess, communicate
-from .util import detect_charset
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import CoreConfig, PlayerConfig
-    from music_assistant_models.queue_item import QueueItem
+    from music_assistant_models.media_items import AudioFormat
     from music_assistant_models.streamdetails import StreamDetails
 
-    from music_assistant.mass import MusicAssistant
-    from music_assistant.models.music_provider import MusicProvider
     from music_assistant.models.player import Player
 
-LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.audio")
-
-# ruff: noqa: PLR0915
+LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.helpers.audio")
 
 HTTP_HEADERS = {"User-Agent": "Lavf/60.16.100.MusicAssistant"}
 HTTP_HEADERS_ICY = {**HTTP_HEADERS, "Icy-MetaData": "1"}
@@ -118,12 +92,16 @@ def align_audio_to_frame_boundary(audio_data: bytes, pcm_format: AudioFormat) ->
 
 
 async def strip_silence(
-    mass: MusicAssistant,  # noqa: ARG001
     audio_data: bytes,
     pcm_format: AudioFormat,
     reverse: bool = False,
 ) -> bytes:
-    """Strip silence from begin or end of pcm audio using ffmpeg."""
+    """Strip silence from begin or end of pcm audio using ffmpeg.
+
+    :param audio_data: Raw PCM audio data.
+    :param pcm_format: AudioFormat of the audio data.
+    :param reverse: If True, strip from end instead of beginning.
+    """
     args = ["ffmpeg", "-hide_banner", "-loglevel", "quiet"]
     args += [
         "-acodec",
@@ -137,22 +115,20 @@ async def strip_silence(
         "-i",
         "-",
     ]
-    # filter args
     if reverse:
         args += [
             "-af",
-            "areverse,atrim=start=0.2,silenceremove=start_periods=1:start_silence=0.1:start_threshold=0.02,areverse",
+            "areverse,atrim=start=0.2,silenceremove=start_periods=1"
+            ":start_silence=0.1:start_threshold=0.02,areverse",
         ]
     else:
         args += [
             "-af",
             "atrim=start=0.2,silenceremove=start_periods=1:start_silence=0.1:start_threshold=0.02",
         ]
-    # output args
     args += ["-f", pcm_format.content_type.value, "-"]
     _returncode, stripped_data, _stderr = await communicate(args, audio_data)
 
-    # return stripped audio
     bytes_stripped = len(audio_data) - len(stripped_data)
     if LOGGER.isEnabledFor(VERBOSE_LOG_LEVEL):
         seconds_stripped = round(bytes_stripped / pcm_format.pcm_sample_size, 2)
@@ -696,7 +672,10 @@ async def get_media_stream(
 
 
 def create_wave_header(
-    samplerate: int = 44100, channels: int = 2, bitspersample: int = 16, duration: int | None = None
+    samplerate: int = 44100,
+    channels: int = 2,
+    bitspersample: int = 16,
+    duration: int | None = None,
 ) -> bytes:
     """Generate a wave header from given params."""
     file = BytesIO()
@@ -750,16 +729,14 @@ def create_wave_header(
     return file.getvalue()
 
 
-async def resolve_radio_stream(mass: MusicAssistant, url: str) -> tuple[str, StreamType]:
+def parse_extinf_metadata(extinf_line: str) -> dict[str, str]:
     """
-    Resolve a streaming radio URL.
+    Parse metadata from HLS EXTINF line.
 
-    Unwraps any playlists if needed.
-    Determines if the stream supports ICY metadata.
+    Extracts structured metadata like title="...", artist="..." from EXTINF lines.
+    Common in iHeartRadio and other commercial radio HLS streams.
 
-    Returns tuple;
-    - unfolded URL as string
-    - StreamType to determine ICY (radio) or HLS stream.
+    :param extinf_line: The EXTINF line containing metadata
     """
     if cache := await mass.cache.get(
         key=url, provider=CACHE_PROVIDER, category=CACHE_CATEGORY_RESOLVED_RADIO_URL
@@ -801,20 +778,13 @@ async def resolve_radio_stream(mass: MusicAssistant, url: str) -> tuple[str, Str
             except IsHLSPlaylist:
                 stream_type = StreamType.HLS
 
-    except Exception as err:
-        LOGGER.warning("Error while parsing radio URL %s: %s", url, str(err))
-        return (url, stream_type)
+    # Pattern to match key="value" pairs in the EXTINF line
+    # Handles nested quotes by matching everything until the closing quote
+    pattern = r'(\w+)="([^"]*)"'
 
-    result = (resolved_url, stream_type)
-    cache_expiration = 3600 * 3
-    await mass.cache.set(
-        url,
-        result,
-        expiration=cache_expiration,
-        provider=CACHE_PROVIDER,
-        category=CACHE_CATEGORY_RESOLVED_RADIO_URL,
-    )
-    return result
+    matches = re.findall(pattern, extinf_line)
+    for key, value in matches:
+        metadata[key.lower()] = value
 
 
 async def get_icy_radio_stream(
@@ -1025,7 +995,8 @@ async def get_file_stream(
 
 
 def _get_parts_from_position(
-    parts: list[MultiPartPath], seek_position: int
+    parts: list[MultiPartPath],
+    seek_position: int,
 ) -> tuple[list[MultiPartPath], int]:
     """Get the remaining parts list from a timestamp.
 
@@ -1054,94 +1025,15 @@ def _get_parts_from_position(
         # the previous track. If we're within 2 second of the end, skip the current track
         if position + 2 >= part.duration:
             LOGGER.debug(
-                f"Skipping to the next part due to seek position being at the end: {position}"
+                f"Skipping to the next part due to seek position being at the end: {position}",
             )
             if i + 1 < len(parts):
                 return parts[i + 1 :], 0
-            else:
-                return parts[i:], int(position)  # last part, cannot skip
+            return parts[i:], int(position)  # last part, cannot skip
 
         return parts[i:], int(position)
 
     raise IndexError(f"Could not find any candidate part for position {seek_position}")
-
-
-async def get_multi_file_stream(
-    mass: MusicAssistant,  # noqa: ARG001
-    streamdetails: StreamDetails,
-    seek_position: int = 0,
-) -> AsyncGenerator[bytes, None]:
-    """Return audio stream for a concatenation of multiple files.
-
-    Arguments:
-    seek_position: The position to seek to in seconds
-    """
-    if not isinstance(streamdetails.path, list):
-        raise InvalidDataError("Multi-file streamdetails requires a list of MultiPartPath")
-    parts, seek_position = _get_parts_from_position(streamdetails.path, seek_position)
-    files_list = [part.path for part in parts]
-
-    # concat input files
-    temp_file = f"/tmp/{shortuuid.random(20)}.txt"  # noqa: S108
-    async with aiofiles.open(temp_file, "w") as f:
-        for path in files_list:
-            await f.write(f"file '{path}'\n")
-
-    try:
-        async for chunk in get_ffmpeg_stream(
-            audio_input=temp_file,
-            input_format=streamdetails.audio_format,
-            output_format=AudioFormat(
-                content_type=ContentType.NUT,
-                sample_rate=streamdetails.audio_format.sample_rate,
-                bit_depth=streamdetails.audio_format.bit_depth,
-                channels=streamdetails.audio_format.channels,
-            ),
-            extra_input_args=[
-                "-safe",
-                "0",
-                "-f",
-                "concat",
-                "-i",
-                temp_file,
-                "-ss",
-                str(seek_position),
-            ],
-        ):
-            yield chunk
-    finally:
-        await remove_file(temp_file)
-
-
-async def get_preview_stream(
-    mass: MusicAssistant,
-    provider_instance_id_or_domain: str,
-    item_id: str,
-    media_type: MediaType = MediaType.TRACK,
-) -> AsyncGenerator[bytes, None]:
-    """Create a 30 seconds preview audioclip for the given streamdetails."""
-    if not (music_prov := mass.get_provider(provider_instance_id_or_domain)):
-        raise ProviderUnavailableError
-    if TYPE_CHECKING:  # avoid circular import
-        assert isinstance(music_prov, MusicProvider)
-    streamdetails = await music_prov.get_stream_details(item_id, media_type)
-    pcm_format = AudioFormat(
-        content_type=ContentType.from_bit_depth(streamdetails.audio_format.bit_depth),
-        sample_rate=streamdetails.audio_format.sample_rate,
-        bit_depth=streamdetails.audio_format.bit_depth,
-        channels=streamdetails.audio_format.channels,
-    )
-    async for chunk in get_ffmpeg_stream(
-        audio_input=get_media_stream(
-            mass=mass,
-            streamdetails=streamdetails,
-            pcm_format=pcm_format,
-        ),
-        input_format=pcm_format,
-        output_format=AudioFormat(content_type=ContentType.AAC),
-        extra_input_args=["-t", "30"],  # cut after 30 seconds
-    ):
-        yield chunk
 
 
 async def get_silence(
@@ -1205,7 +1097,9 @@ async def resample_pcm_audio(
     LOGGER.log(VERBOSE_LOG_LEVEL, f"Resampling audio from {input_format} to {output_format}")
     try:
         ffmpeg_args = get_ffmpeg_args(
-            input_format=input_format, output_format=output_format, filter_params=[]
+            input_format=input_format,
+            output_format=output_format,
+            filter_params=[],
         )
         _, stdout, stderr = await communicate(ffmpeg_args, input_audio)
         if not stdout:
@@ -1251,124 +1145,35 @@ def get_chunksize(
     return int((320000 / 8) * seconds)
 
 
+def get_bit_rate(fmt: AudioFormat) -> int:
+    """Get the (estimated) bit rate for a given AudioFormat, if known."""
+    if fmt.bit_rate:
+        return int(fmt.bit_rate / 1000) if fmt.bit_rate >= 10000 else fmt.bit_rate
+    return int((get_chunksize(fmt, seconds=1) / 1000) * 8)
+
+
 def is_grouping_preventing_dsp(player: Player) -> bool:
     """Check if grouping is preventing DSP from being applied to this leader/PlayerGroup.
 
     If this returns True, no DSP should be applied to the player.
     This function will not check if the Player is in a group, the caller should do that first.
     """
-    # We require the caller to handle non-leader cases themselves since player.synced_to
+    # We require the caller to handle non-leader cases themselves since player.state.synced_to
     # can be unreliable in some edge cases
-    multi_device_dsp_supported = PlayerFeature.MULTI_DEVICE_DSP in player.supported_features
-    child_count = len(player.group_members) if player.group_members else 0
+    multi_device_dsp_supported = PlayerFeature.MULTI_DEVICE_DSP in player.state.supported_features
+    child_count = len(player.state.group_members) if player.state.group_members else 0
 
     is_multiple_devices: bool
     if player.provider.domain == "player_group":
         # PlayerGroups have no leader, so having a child count of 1 means
         # the group actually contains only a single player.
         is_multiple_devices = child_count > 1
-    elif player.type == PlayerType.GROUP:
+    elif player.state.type == PlayerType.GROUP:
         # This is an group player external to Music Assistant.
         is_multiple_devices = True
     else:
         is_multiple_devices = child_count > 0
     return is_multiple_devices and not multi_device_dsp_supported
-
-
-def is_output_limiter_enabled(mass: MusicAssistant, player: Player) -> bool:
-    """Check if the player has the output limiter enabled.
-
-    Unlike DSP, the limiter is still configurable when synchronized without MULTI_DEVICE_DSP.
-    So in grouped scenarios without MULTI_DEVICE_DSP, the permanent sync group or the leader gets
-    decides if the limiter should be turned on or not.
-    """
-    deciding_player_id = player.player_id
-    if player.active_group:
-        # Syncgroup, get from the group player
-        deciding_player_id = player.active_group
-    elif player.synced_to:
-        # Not in sync group, but synced, get from the leader
-        deciding_player_id = player.synced_to
-    output_limiter_enabled = mass.config.get_raw_player_config_value(
-        deciding_player_id,
-        CONF_ENTRY_OUTPUT_LIMITER.key,
-        CONF_ENTRY_OUTPUT_LIMITER.default_value,
-    )
-    return bool(output_limiter_enabled)
-
-
-def get_player_filter_params(
-    mass: MusicAssistant,
-    player_id: str,
-    input_format: AudioFormat,
-    output_format: AudioFormat,
-) -> list[str]:
-    """Get player specific filter parameters for ffmpeg (if any)."""
-    filter_params = []
-
-    dsp = mass.config.get_player_dsp_config(player_id)
-    limiter_enabled = True
-
-    if player := mass.players.get(player_id):
-        if is_grouping_preventing_dsp(player):
-            # We can not correctly apply DSP to a grouped player without multi-device DSP support,
-            # so we disable it.
-            dsp.enabled = False
-        elif player.provider.domain == "player_group" and (
-            PlayerFeature.MULTI_DEVICE_DSP not in player.supported_features
-        ):
-            # This is a special case! We have a player group where:
-            # - The group leader does not support MULTI_DEVICE_DSP
-            # - But only contains a single player (since nothing is preventing DSP)
-            # We can still apply the DSP of that single player.
-            if player.group_members:
-                child_player = mass.players.get(player.group_members[0])
-                assert child_player is not None  # for type checking
-                dsp = mass.config.get_player_dsp_config(child_player.player_id)
-            else:
-                # This should normally never happen, but if it does, we disable DSP.
-                dsp.enabled = False
-
-        # We here implicitly know what output format is used for the player
-        # in the audio processing steps. We save this information to
-        # later be able to show this to the user in the UI.
-        player.extra_data["output_format"] = output_format
-
-        limiter_enabled = is_output_limiter_enabled(mass, player)
-
-    if dsp.enabled:
-        # Apply input gain
-        if dsp.input_gain != 0:
-            filter_params.append(f"volume={dsp.input_gain}dB")
-
-        # Process each DSP filter sequentially
-        for f in dsp.filters:
-            if not f.enabled:
-                continue
-
-            # Apply filter
-            filter_params.extend(filter_to_ffmpeg_params(f, input_format))
-
-        # Apply output gain
-        if dsp.output_gain != 0:
-            filter_params.append(f"volume={dsp.output_gain}dB")
-
-    conf_channels = mass.config.get_raw_player_config_value(
-        player_id, CONF_OUTPUT_CHANNELS, "stereo"
-    )
-
-    # handle output mixing only left or right
-    if conf_channels == "left":
-        filter_params.append("pan=mono|c0=FL")
-    elif conf_channels == "right":
-        filter_params.append("pan=mono|c0=FR")
-
-    # Add safety limiter at the end
-    if limiter_enabled:
-        filter_params.append("alimiter=limit=-2dB:level=false:asc=true")
-
-    LOGGER.debug("Generated ffmpeg params for player %s: %s", player_id, filter_params)
-    return filter_params
 
 
 def parse_loudnorm(raw_stderr: bytes | str) -> float | None:
@@ -1386,96 +1191,10 @@ def parse_loudnorm(raw_stderr: bytes | str) -> float | None:
     return None
 
 
-async def analyze_loudness(
-    mass: MusicAssistant,
-    streamdetails: StreamDetails,
-) -> None:
-    """Analyze media item's audio, to calculate EBU R128 loudness."""
-    if await mass.music.get_loudness(
-        streamdetails.item_id,
-        streamdetails.provider,
-        media_type=streamdetails.media_type,
-    ):
-        # only when needed we do the analyze job
-        return
-
-    logger = LOGGER.getChild("analyze_loudness")
-    logger.debug("Start analyzing audio for %s", streamdetails.uri)
-
-    extra_input_args = [
-        # limit to 10 minutes to reading too much in memory
-        "-t",
-        "600",
-    ]
-    # work out audio source for these streamdetails
-    stream_type = streamdetails.stream_type
-    audio_source: str | AsyncGenerator[bytes, None]
-    if stream_type == StreamType.CUSTOM:
-        music_prov = mass.get_provider(streamdetails.provider)
-        if TYPE_CHECKING:  # avoid circular import
-            assert isinstance(music_prov, MusicProvider)
-        audio_source = music_prov.get_audio_stream(streamdetails)
-    elif stream_type == StreamType.ICY:
-        assert isinstance(streamdetails.path, str)  # for type checking
-        audio_source = get_icy_radio_stream(mass, streamdetails.path, streamdetails)
-    elif stream_type == StreamType.HLS:
-        assert isinstance(streamdetails.path, str)  # for type checking
-        substream = await get_hls_substream(mass, streamdetails.path)
-        audio_source = substream.path
-    else:
-        # all other stream types (HTTP, FILE, etc)
-        if stream_type == StreamType.ENCRYPTED_HTTP:
-            assert streamdetails.decryption_key is not None  # for type checking
-            extra_input_args += ["-decryption_key", streamdetails.decryption_key]
-        if isinstance(streamdetails.path, list):
-            # multi part stream - just use a single file for the measurement
-            audio_source = streamdetails.path[1].path
-        else:
-            # regular single file/url stream
-            assert isinstance(streamdetails.path, str)  # for type checking
-            audio_source = streamdetails.path
-
-    # calculate BS.1770 R128 integrated loudness with ffmpeg
-    async with FFMpeg(
-        audio_input=audio_source,
-        input_format=streamdetails.audio_format,
-        output_format=streamdetails.audio_format,
-        audio_output="NULL",
-        filter_params=["ebur128=framelog=verbose"],
-        extra_input_args=extra_input_args,
-        collect_log_history=True,
-        loglevel="info",
-    ) as ffmpeg_proc:
-        await ffmpeg_proc.wait()
-        log_lines = ffmpeg_proc.log_history
-        log_lines_str = "\n".join(log_lines)
-        try:
-            loudness_str = (
-                log_lines_str.split("Integrated loudness")[1].split("I:")[1].split("LUFS")[0]
-            )
-            loudness = float(loudness_str.strip())
-        except (IndexError, ValueError, AttributeError):
-            LOGGER.warning(
-                "Could not determine integrated loudness of %s - %s",
-                streamdetails.uri,
-                log_lines_str or "received empty value",
-            )
-        else:
-            await mass.music.set_loudness(
-                streamdetails.item_id,
-                streamdetails.provider,
-                loudness,
-                media_type=streamdetails.media_type,
-            )
-            logger.debug(
-                "Integrated loudness of %s is: %s",
-                streamdetails.uri,
-                loudness,
-            )
-
-
 def _get_normalization_mode(
-    core_config: CoreConfig, player_config: PlayerConfig, streamdetails: StreamDetails
+    core_config: CoreConfig,
+    player_config: PlayerConfig,
+    streamdetails: StreamDetails,
 ) -> VolumeNormalizationMode:
     if not player_config.get_value(CONF_VOLUME_NORMALIZATION):
         # disabled for this player
@@ -1490,8 +1209,8 @@ def _get_normalization_mode(
                 CONF_VOLUME_NORMALIZATION_RADIO
                 if streamdetails.media_type == MediaType.RADIO
                 else CONF_VOLUME_NORMALIZATION_TRACKS,
-            )
-        )
+            ),
+        ),
     )
 
     # handle no measurement available but fallback to dynamic mode is allowed

@@ -82,8 +82,10 @@ class WebRTCGateway:
         certificate: RTCCertificate,
         signaling_url: str = "wss://signaling.music-assistant.io/ws",
         local_ws_url: str = "ws://localhost:8095/ws",
+        sendspin_url: str = "ws://localhost:8927/sendspin",
         ice_servers: list[dict[str, Any]] | None = None,
         ice_servers_callback: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
+        set_sendspin_player_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         """
         Initialize the WebRTC Gateway.
@@ -93,16 +95,19 @@ class WebRTCGateway:
         :param certificate: Persistent RTCCertificate for DTLS, enabling client-side pinning.
         :param signaling_url: WebSocket URL of the signaling server.
         :param local_ws_url: Local WebSocket URL to bridge to.
+        :param sendspin_url: Internal Sendspin WebSocket URL to bridge to.
         :param ice_servers: List of ICE server configurations (used at registration time).
         :param ice_servers_callback: Optional callback to fetch fresh ICE servers for each session.
         """
         self.http_session = http_session
         self.signaling_url = signaling_url
         self.local_ws_url = local_ws_url
+        self.sendspin_url = sendspin_url
         self._remote_id = remote_id
         self._certificate = certificate
         self.logger = LOGGER
         self._ice_servers_callback = ice_servers_callback
+        self._set_sendspin_player_callback = set_sendspin_player_callback
 
         # Static ICE servers used at registration time (relayed to clients via signaling server)
         self.ice_servers = ice_servers or self.DEFAULT_ICE_SERVERS
@@ -534,7 +539,9 @@ class WebRTCGateway:
         if not channel:
             return
         try:
-            session.local_ws = await self.http_session.ws_connect(self.local_ws_url)
+            # Include session_id in URL so server can track WebRTC sessions
+            ws_url = f"{self.local_ws_url}?webrtc_session_id={session.session_id}"
+            session.local_ws = await self.http_session.ws_connect(ws_url)
             loop = asyncio.get_event_loop()
 
             # Store task references for proper cleanup

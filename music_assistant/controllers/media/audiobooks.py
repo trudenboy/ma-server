@@ -9,17 +9,21 @@ from music_assistant_models.media_items import Audiobook, ProviderMapping, Uniqu
 
 from music_assistant.constants import DB_TABLE_AUDIOBOOKS, DB_TABLE_PLAYLOG
 from music_assistant.controllers.media.base import MediaControllerBase
+from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers.compare import (
     compare_audiobook,
     compare_media_item,
     create_safe_string,
     loose_compare_strings,
 )
+from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.datetime import utc_timestamp
 from music_assistant.helpers.json import serialize_to_json
+from music_assistant.helpers.util import parse_optional_bool
 from music_assistant.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
+    from music_assistant_models.auth import User
     from music_assistant_models.media_items import Track
 
     from music_assistant import MusicAssistant
@@ -83,6 +87,7 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
         result = await self.get_library_items_by_query(
             favorite=favorite,
             search=search,
+            genre_ids=genre,
             limit=limit,
             offset=offset,
             order_by=order_by,
@@ -99,6 +104,7 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
             return result + await self.get_library_items_by_query(
                 favorite=favorite,
                 search=None,
+                genre_ids=genre,
                 limit=limit,
                 order_by=order_by,
                 provider_filter=self._ensure_provider_filter(provider),
@@ -148,6 +154,7 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
                 "duration": item.duration,
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
+                "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
             },
         )
         # update/set provider_mappings table
@@ -187,6 +194,9 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
                 "duration": update.duration if overwrite else cur_item.duration or update.duration,
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
+                "timestamp_added": int(update.date_added.timestamp())
+                if update.date_added
+                else UNSET,
             },
         )
         # update/set provider_mappings table
@@ -279,15 +289,46 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
 
     async def _set_playlog(self, db_id: int, media_item: Audiobook) -> None:
         """Update/set the playlog table for the given audiobook db item_id."""
+        # Get user(s)
+        user: User | None = None
+        if session_user := get_current_user():
+            # this is the active session user that triggered the action
+            user = session_user
+        elif provider_user := await self.mass.music._get_user_for_provider(
+            media_item.provider_mappings
+        ):
+            # based on configured provider filter we can try to find a user
+            user = provider_user
+        if user:
+            user_ids = [user.user_id]
+        else:
+            # NOTE: if no user was found, we will alter the playlog for all users
+            user_ids = [user.user_id for user in await self.mass.webserver.auth.list_users()]
+
         # cleanup provider specific entries for this item
         # we always prefer the library playlog entry
         for prov_mapping in media_item.provider_mappings:
-            await self.mass.music.database.delete(
+            for user_id in user_ids:
+                await self.mass.music.database.delete(
+                    DB_TABLE_PLAYLOG,
+                    {
+                        "media_type": self.media_type.value,
+                        "item_id": prov_mapping.item_id,
+                        "provider": prov_mapping.provider_instance,
+                        "userid": user_id,
+                    },
+                )
+        if media_item.fully_played is None and media_item.resume_position_ms is None:
+            return
+
+        for user_id in user_ids:
+            cur_entry = await self.mass.music.database.get_row(
                 DB_TABLE_PLAYLOG,
                 {
                     "media_type": self.media_type.value,
-                    "item_id": prov_mapping.item_id,
-                    "provider": prov_mapping.provider_instance,
+                    "item_id": db_id,
+                    "provider": "library",
+                    "userid": user_id,
                 },
             )
         if media_item.fully_played is None and media_item.resume_position_ms is None:

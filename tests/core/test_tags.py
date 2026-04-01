@@ -1,6 +1,7 @@
-"""Tests for parsing ID3 tags functions."""
+"""Tests for parsing audio file tags (ID3, MP4/AAC, Vorbis, APEv2, etc.)."""
 
 import pathlib
+from unittest.mock import MagicMock
 
 from music_assistant.constants import UNKNOWN_ARTIST
 from music_assistant.helpers import tags
@@ -8,7 +9,12 @@ from music_assistant.helpers.tags import split_artists
 
 RESOURCES_DIR = pathlib.Path(__file__).parent.parent.resolve().joinpath("fixtures")
 
-FILE_1 = str(RESOURCES_DIR.joinpath("MyArtist - MyTitle.mp3"))
+FILE_MP3 = str(RESOURCES_DIR.joinpath("MyArtist - MyTitle.mp3"))
+FILE_MP3_ID3V24_MULTIVALUE = str(RESOURCES_DIR.joinpath("MultiArtist-ID3v24-NullSeparated.mp3"))
+FILE_M4A = str(RESOURCES_DIR.joinpath("MyArtist - MyTitle.m4a"))
+FILE_FLAC = str(RESOURCES_DIR.joinpath("MultipleArtists.flac"))
+FILE_FLAC_SEMICOLON = str(RESOURCES_DIR.joinpath("ArtistWithSemicolon.flac"))
+FILE_WV = str(RESOURCES_DIR.joinpath("MyArtist - MyTitle.wv"))
 
 
 async def test_parse_metadata_from_id3tags() -> None:
@@ -43,6 +49,95 @@ async def test_parse_metadata_from_id3tags() -> None:
     assert _tags.year == 2022
     _tags.tags["date"] = ""
     assert _tags.year is None
+
+
+async def test_parse_id3v24_null_separated_artists() -> None:
+    """Test parsing ID3v2.4 tags with null-separated multi-value TPE1/TPE2."""
+    _tags = await tags.async_parse_tags(FILE_MP3_ID3V24_MULTIVALUE)
+    # Null-separated artists in TPE1 should be parsed as multiple artists
+    assert _tags.artists == ("Artist One", "Artist Two", "Artist Three")
+    # Null-separated album artists in TPE2 should be parsed as multiple album artists
+    assert _tags.album_artists == ("Album Artist A", "Album Artist B")
+    # MB IDs should match
+    assert _tags.musicbrainz_artistids == ("mb-artist-1", "mb-artist-2", "mb-artist-3")
+    assert _tags.musicbrainz_albumartistids == ("mb-albumartist-1", "mb-albumartist-2")
+
+
+async def test_parse_metadata_from_mp4tags() -> None:
+    """Test parsing of metadata from MP4/AAC tags."""
+    filename = FILE_M4A
+    _tags = await tags.async_parse_tags(filename)
+    assert _tags.album == "MyAlbum"
+    assert _tags.title == "MyTitle"
+    assert _tags.album_artists == ("MyArtist",)
+    assert _tags.artists == ("MyArtist", "MyArtist2")
+    assert _tags.genres == ("Genre1", "Genre2")
+    assert _tags.musicbrainz_albumartistids == ("abcdefg",)
+    assert _tags.musicbrainz_artistids == ("abcdefg",)
+    assert _tags.musicbrainz_releasegroupid == "abcdefg"
+    assert _tags.musicbrainz_recordingid == "abcdefg"
+    # test track/disc from MP4 tuples
+    assert _tags.track == 5
+    assert _tags.disc == 1
+    # test total track/disc
+    assert _tags.tags.get("tracktotal") == "12"
+    assert _tags.tags.get("disctotal") == "2"
+    # test year
+    assert _tags.year == 2022
+    # test sort tags (artistsort/albumartistsort returned as lists to match ID3 behavior)
+    assert _tags.tags.get("titlesort") == "MyTitle Sort"
+    assert _tags.tags.get("artistsort") == ["MyArtist Sort"]  # type: ignore[comparison-overlap]
+    assert _tags.tags.get("albumsort") == "MyAlbum Sort"
+    assert _tags.tags.get("albumartistsort") == ["MyAlbumArtist Sort"]  # type: ignore[comparison-overlap]
+
+
+def test_parse_metadata_from_apev2tags() -> None:
+    """Test parsing of metadata from APEv2 tags (WavPack).
+
+    Uses parse_tags_mutagen directly since the minimal WavPack fixture
+    does not contain valid audio data for ffprobe to parse.
+    """
+    result = parse_tags_mutagen(FILE_WV)
+    assert result.get("album") == "MyAlbum"
+    assert result.get("title") == "MyTitle"
+    assert result.get("albumartist") == "MyArtist"
+    assert result.get("artist") == "MyArtist"
+    assert result.get("artists") == ["MyArtist", "MyArtist2"]
+    assert result.get("genre") == ["Genre1", "Genre2"]
+    assert result.get("musicbrainzalbumartistid") == ["abcdefg"]
+    assert result.get("musicbrainzartistid") == ["abcdefg"]
+    assert result.get("musicbrainzreleasegroupid") == "abcdefg"
+    assert result.get("musicbrainzrecordingid") == "abcdefg"
+    # test track/disc (APEv2 uses "5/12" format like ID3)
+    assert result.get("track") == "5/12"
+    assert result.get("disc") == "1/2"
+    # test year
+    assert result.get("date") == "2022"
+    # test sort tags (artistsort/albumartistsort returned as lists to match ID3 behavior)
+    assert result.get("titlesort") == "MyTitle Sort"
+    assert result.get("artistsort") == ["MyArtist Sort"]
+    assert result.get("albumsort") == "MyAlbum Sort"
+    assert result.get("albumartistsort") == ["MyAlbumArtist Sort"]
+
+
+async def test_parse_metadata_from_flac_with_multiple_artist_fields() -> None:
+    """Test parsing of FLAC file with multiple ARTIST fields (per Vorbis spec)."""
+    _tags = await tags.async_parse_tags(FILE_FLAC)
+    assert _tags.album == "Test Album"
+    assert _tags.title == "Test Track"
+    # Multiple ARTIST fields should be treated as authoritative list
+    assert _tags.artists == ("Artist One", "Artist Two", "Artist Three")
+    # Multiple ALBUMARTIST fields should be treated as authoritative list
+    assert _tags.album_artists == ("Album Artist 1", "Album Artist 2")
+    assert _tags.genres == ("Rock", "Pop")
+    assert _tags.year == 2024
+    # MusicBrainz IDs
+    assert _tags.musicbrainz_artistids == ("mb-artist-id-1", "mb-artist-id-2", "mb-artist-id-3")
+    assert _tags.musicbrainz_albumartistids == ("mb-albumartist-id-1", "mb-albumartist-id-2")
+    assert _tags.musicbrainz_recordingid == "mb-track-id"
+    # Track/disc from Vorbis comments
+    assert _tags.track == 5
+    assert _tags.disc == 1
 
 
 async def test_parse_metadata_from_filename() -> None:

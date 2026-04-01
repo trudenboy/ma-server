@@ -23,6 +23,7 @@ from music_assistant.constants import (
 )
 from music_assistant.controllers.media.base import MediaControllerBase
 from music_assistant.helpers.compare import compare_artist, compare_strings, create_safe_string
+from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import serialize_to_json
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         order_by: str = "sort_name",
         provider: str | list[str] | None = None,
         album_artists_only: bool = False,
+        **kwargs: Any,
     ) -> list[Artist]:
         """Get in-database (album) artists.
 
@@ -82,6 +84,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         :param order_by: Order by field (e.g. 'sort_name', 'timestamp_added').
         :param provider: Filter by provider instance ID (single string or list).
         :param album_artists_only: Only return artists that have albums.
+        :param genre: Filter by genre id(s).
         """
         extra_query_params: dict[str, Any] = {}
         extra_query_parts: list[str] = []
@@ -93,6 +96,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         return await self.get_library_items_by_query(
             favorite=favorite,
             search=search,
+            genre_ids=genre,
             limit=limit,
             offset=offset,
             order_by=order_by,
@@ -324,6 +328,7 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "metadata": serialize_to_json(item.metadata),
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
+                "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
             },
         )
         # update/set provider_mappings table
@@ -367,6 +372,9 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "metadata": serialize_to_json(metadata),
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
+                "timestamp_added": int(update.date_added.timestamp())
+                if update.date_added
+                else UNSET,
             },
         )
         self.logger.debug("updated %s in database: %s", update.name, db_id)

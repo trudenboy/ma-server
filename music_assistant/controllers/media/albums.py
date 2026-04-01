@@ -28,6 +28,7 @@ from music_assistant.helpers.compare import (
     create_safe_string,
     loose_compare_strings,
 )
+from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import serialize_to_json
 from music_assistant.models.music_provider import MusicProvider
 
@@ -78,12 +79,14 @@ class AlbumsController(MediaControllerBase[Album]):
         self,
         item_id: str,
         provider_instance_id_or_domain: str,
+        allow_update_metadata: bool = True,
         recursive: bool = True,
     ) -> Album:
         """Return (full) details for a single media item."""
         album = await super().get(
             item_id,
             provider_instance_id_or_domain,
+            allow_update_metadata=allow_update_metadata,
         )
         if not recursive:
             return album
@@ -97,8 +100,7 @@ class AlbumsController(MediaControllerBase[Album]):
             with contextlib.suppress(MediaNotFoundError):
                 album_artists.append(
                     await self.mass.music.artists.get(
-                        artist.item_id,
-                        artist.provider,
+                        artist.item_id, artist.provider, allow_update_metadata=False
                     )
                 )
         album.artists = album_artists
@@ -113,6 +115,7 @@ class AlbumsController(MediaControllerBase[Album]):
         order_by: str = "sort_name",
         provider: str | list[str] | None = None,
         album_types: list[AlbumType] | None = None,
+        **kwargs: Any,
     ) -> list[Album]:
         """Get in-database albums.
 
@@ -123,6 +126,7 @@ class AlbumsController(MediaControllerBase[Album]):
         :param order_by: Order by field (e.g. 'sort_name', 'timestamp_added').
         :param provider: Filter by provider instance ID (single string or list).
         :param album_types: Filter by album types.
+        :param genre: Filter by genre id(s).
         """
         extra_query_params: dict[str, Any] = {}
         extra_query_parts: list[str] = []
@@ -160,6 +164,7 @@ class AlbumsController(MediaControllerBase[Album]):
         result = await self.get_library_items_by_query(
             favorite=favorite,
             search=search,
+            genre_ids=genre,
             limit=limit,
             offset=offset,
             order_by=order_by,
@@ -194,6 +199,7 @@ class AlbumsController(MediaControllerBase[Album]):
                 extra_query_parts=extra_query_parts,
                 extra_query_params=extra_query_params,
                 extra_join_parts=extra_join_parts,
+                in_library_only=True,
             ):
                 # prevent duplicates (when artist is also in the title)
                 if album.uri not in existing_uris:
@@ -390,6 +396,7 @@ class AlbumsController(MediaControllerBase[Album]):
                 "external_ids": serialize_to_json(item.external_ids),
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
+                "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
             },
         )
         # update/set provider_mappings table
@@ -428,6 +435,9 @@ class AlbumsController(MediaControllerBase[Album]):
                 ),
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
+                "timestamp_added": int(update.date_added.timestamp())
+                if update.date_added
+                else UNSET,
             },
         )
         # update/set provider_mappings table

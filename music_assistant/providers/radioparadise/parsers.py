@@ -70,7 +70,7 @@ def build_stream_metadata(current_song: dict[str, Any]) -> StreamMetadata:
 
     return StreamMetadata(
         title=title,
-        artist=artist,
+        artist=artist_display,
         album=album_display,
         image_url=image_url,
     )

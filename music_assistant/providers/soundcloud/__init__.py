@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import parse_qs, urlparse
 
 from aiohttp import ClientError
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
@@ -15,7 +16,7 @@ from music_assistant_models.enums import (
     ProviderFeature,
     StreamType,
 )
-from music_assistant_models.errors import InvalidDataError, LoginFailed
+from music_assistant_models.errors import InvalidDataError, LoginFailed, MediaNotFoundError
 from music_assistant_models.media_items import (
     Artist,
     AudioFormat,
@@ -306,10 +307,9 @@ class SoundcloudMusicProvider(MusicProvider):
             # Handle system playlists
             result = await self._soundcloud.get_system_playlist_details(prov_playlist_id)
             return cast("dict[str, Any]", result)
-        else:
-            # Handle regular playlists
-            result = await self._soundcloud.get_playlist_details(prov_playlist_id)
-            return cast("dict[str, Any]", result)
+        # Handle regular playlists
+        result = await self._soundcloud.get_playlist_details(prov_playlist_id)
+        return cast("dict[str, Any]", result)
 
     @use_cache(3600 * 3)  # Cache for 3 hours
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
@@ -410,7 +410,19 @@ class SoundcloudMusicProvider(MusicProvider):
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Return the content details for the given track when it will be streamed."""
-        url: str = await self._soundcloud.get_stream_url(track_id=item_id, presets=["mp3"])
+        url = await self._get_stream_url(item_id)
+        if not url:
+            msg = f"No stream URL available for Soundcloud track {item_id}"
+            raise MediaNotFoundError(msg)
+        # Parse CDN URL expiry to avoid seeking with an expired URL.
+        # SoundCloud CDN URLs are short-lived; seeking starts a new FFmpeg process
+        # that makes a fresh HTTP request to the stored URL, which may have expired.
+        expiration = 30  # conservative default if expiry cannot be determined
+        if parsed_qs := parse_qs(urlparse(url).query):
+            for param in ("Expires", "expire"):
+                if expire_ts := parsed_qs.get(param, [None])[0]:
+                    expiration = max(30, int(expire_ts) - int(time.time()) - 10)
+                    break
         return StreamDetails(
             provider=self.instance_id,
             item_id=item_id,
@@ -425,6 +437,7 @@ class SoundcloudMusicProvider(MusicProvider):
             path=url,
             can_seek=True,
             allow_seek=True,
+            expiration=expiration,
         )
 
     async def _parse_artist(self, artist_obj: dict[str, Any]) -> Artist:
@@ -499,7 +512,7 @@ class SoundcloudMusicProvider(MusicProvider):
                 ]
             )
         if playlist_obj.get("genre"):
-            playlist.metadata.genres = playlist_obj["genre"]
+            playlist.metadata.genres = {playlist_obj["genre"]}
         if playlist_obj.get("tag_list"):
             playlist.metadata.style = playlist_obj["tag_list"]
         return playlist

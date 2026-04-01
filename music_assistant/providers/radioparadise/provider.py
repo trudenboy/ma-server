@@ -14,10 +14,10 @@ from music_assistant_models.media_items import (
     ItemMapping,
     MediaItemType,
     Radio,
+    SearchResults,
 )
 from music_assistant_models.streamdetails import StreamDetails
 
-from music_assistant.controllers.cache import use_cache
 from music_assistant.models.music_provider import MusicProvider
 
 from . import parsers
@@ -32,18 +32,35 @@ class RadioParadiseProvider(MusicProvider):
         """Return True if the provider is a streaming provider."""
         return True
 
-    async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
-        """Retrieve library/subscribed radio stations from the provider."""
-        for channel_id in RADIO_PARADISE_CHANNELS:
-            yield self._parse_radio(channel_id)
-
-    @use_cache(3600 * 3)  # Cache for 3 hours
     async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
         if prov_radio_id not in RADIO_PARADISE_CHANNELS:
             raise MediaNotFoundError("Station not found")
 
         return self._parse_radio(prov_radio_id)
+
+    async def search(
+        self,
+        search_query: str,
+        media_types: list[MediaType],
+        limit: int = 5,
+    ) -> SearchResults:
+        """Perform search on Radio Paradise channels."""
+        results = SearchResults()
+        if MediaType.RADIO not in media_types:
+            return results
+        search_query_lower = search_query.lower().strip()
+        if not search_query_lower:
+            return results
+        radios: list[Radio] = []
+        for channel_id, channel_info in RADIO_PARADISE_CHANNELS.items():
+            channel_name = channel_info.get("name", "").lower()
+            if search_query_lower in channel_name:
+                radios.append(self._parse_radio(channel_id))
+                if len(radios) >= limit:
+                    break
+        results.radio = radios
+        return results
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Get streamdetails for a radio station."""
@@ -103,6 +120,20 @@ class RadioParadiseProvider(MusicProvider):
         if channel_id not in RADIO_PARADISE_CHANNELS:
             return None
 
+        # Try enriched play API first
+        result = await self._get_play_api_metadata(channel_id)
+        if result:
+            return result
+
+        # Fallback to simple now_playing API
+        self.logger.debug(f"Falling back to now_playing API for channel {channel_id}")
+        return await self._get_nowplaying_api_metadata(channel_id)
+
+    async def _get_play_api_metadata(self, channel_id: str) -> dict[str, Any] | None:
+        """Get metadata from the enriched play API with upcoming track info.
+
+        :param channel_id: Radio Paradise channel ID (0-5).
+        """
         try:
             # Use now_playing API
             channel_info = RADIO_PARADISE_CHANNELS[channel_id]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
@@ -80,7 +81,7 @@ async def get_config_entries(
     """
     # config flow auth action/step (authenticate button clicked)
     if action == CONF_ACTION_AUTH and values:
-        hass_url = values[CONF_URL]
+        hass_url = str(values[CONF_URL]).strip()
         async with AuthenticationHelper(mass, str(values["session_id"])) as auth_helper:
             client_id = base_url(auth_helper.callback_url)
             auth_url = get_auth_url(
@@ -167,7 +168,7 @@ async def get_config_entries(
                 "'authenticate' button to generate a token for you with logging in.",
                 depends_on=CONF_URL,
                 value=cast("str", values.get(CONF_AUTH_TOKEN)) if values else None,
-                category="advanced",
+                advanced=True,
             ),
             ConfigEntry(
                 key=CONF_VERIFY_SSL,
@@ -175,7 +176,7 @@ async def get_config_entries(
                 label="Verify SSL",
                 required=False,
                 description="Whether or not to verify the certificate of SSL/TLS connections.",
-                category="advanced",
+                advanced=True,
                 default_value=True,
             ),
         )
@@ -510,13 +511,10 @@ class HomeAssistantProvider(PluginProvider):
             if player_control.supports_volume and entity_platform != "media_player":
                 player_control.volume_level = try_parse_int(state["s"]) or 0
         if "a" in state and (attributes := state["a"]):
-            if player_control.supports_volume:
-                if entity_platform == "media_player":
-                    player_control.volume_level = int(attributes.get("volume_level", 0) * 100)
-                else:
-                    player_control.volume_level = try_parse_int(attributes.get("value")) or 0
-            if player_control.supports_mute and entity_platform == "media_player":
-                player_control.volume_muted = attributes.get("volume_muted")
+            if player_control.supports_volume and "volume_level" in attributes:
+                player_control.volume_level = int(attributes.get("volume_level", 0) * 100)
+            if player_control.supports_mute and "is_volume_muted" in attributes:
+                player_control.volume_muted = attributes.get("is_volume_muted")
         self.mass.players.update_player_control(entity_id)
 
     async def get_user_details(self, ha_user_id: str) -> tuple[str | None, str | None, str | None]:

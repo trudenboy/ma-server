@@ -16,6 +16,7 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import (
+    AudioError,
     LoginFailed,
     MediaNotFoundError,
     ProviderUnavailableError,
@@ -481,7 +482,7 @@ class SpotifyProvider(MusicProvider):
             position_ms = resume_point.get("resume_position_ms", 0)
             return fully_played, position_ms
 
-        elif media_type == MediaType.AUDIOBOOK:
+        if media_type == MediaType.AUDIOBOOK:
             if not self.audiobooks_supported:
                 raise NotImplementedError("Audiobook support is disabled")
             if not self.audiobook_progress_sync_enabled:
@@ -682,7 +683,7 @@ class SpotifyProvider(MusicProvider):
         """Add track(s) to playlist."""
         track_uris = [f"spotify:track:{track_id}" for track_id in prov_track_ids]
         data = {"uris": track_uris}
-        await self._post_data(f"playlists/{prov_playlist_id}/tracks", data=data)
+        await self._post_data(f"playlists/{prov_playlist_id}/items", data=data)
 
     async def remove_playlist_tracks(
         self, prov_playlist_id: str, positions_to_remove: tuple[int, ...]
@@ -690,16 +691,16 @@ class SpotifyProvider(MusicProvider):
         """Remove track(s) from playlist."""
         track_uris = []
         for pos in positions_to_remove:
-            uri = f"playlists/{prov_playlist_id}/tracks"
+            uri = f"playlists/{prov_playlist_id}/items"
             spotify_result = await self._get_data(uri, limit=1, offset=pos - 1)
             for item in spotify_result["items"]:
                 if not (item and item["track"] and item["track"]["id"]):
                     continue
                 track_uris.append({"uri": f"spotify:track:{item['track']['id']}"})
         data = {"tracks": track_uris}
-        await self._delete_data(f"playlists/{prov_playlist_id}/tracks", data=data)
+        await self._delete_data(f"playlists/{prov_playlist_id}/items", data=data)
 
-    async def create_playlist(self, name: str) -> Playlist:
+    async def create_playlist(self, name: str, media_types: set[MediaType]) -> Playlist:
         """Create a new playlist on provider with given name."""
         if self._sp_user is None:
             raise LoginFailed("User info not available - not logged in")
@@ -792,15 +793,23 @@ class SpotifyProvider(MusicProvider):
             current_seek_seconds = int(current_seek_ms // 1000)
 
             # Stream chapters starting from the calculated position
+            consecutive_failures = 0
             for i in range(start_chapter, len(chapter_uris)):
                 chapter_uri = chapter_uris[i]
                 chapter_seek = current_seek_seconds if i == start_chapter else 0
 
                 try:
+                    chunk_count = 0
                     async for chunk in self.streamer.stream_spotify_uri(chapter_uri, chapter_seek):
                         yield chunk
+                        chunk_count += 1
+                    if chunk_count > 0:
+                        consecutive_failures = 0
                 except Exception as e:
-                    self.logger.error(f"Chapter {i + 1} streaming failed: {e}")
+                    self.logger.warning("Chapter %s streaming failed", i + 1)
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        raise AudioError("Audiobook streaming failed") from e
                     continue
         else:
             # Handle normal tracks and podcast episodes
@@ -835,7 +844,7 @@ class SpotifyProvider(MusicProvider):
         except LoginFailed as err:
             if "revoked" in str(err):
                 # clear refresh token if it's invalid
-                self.update_config_value(CONF_REFRESH_TOKEN_GLOBAL, None)
+                self._update_config_value(CONF_REFRESH_TOKEN_GLOBAL, None)
                 if self.available:
                     self.unload_with_error(str(err))
             elif self.available:
@@ -846,7 +855,7 @@ class SpotifyProvider(MusicProvider):
 
         # make sure that our updated creds get stored in memory + config
         self._auth_info_global = auth_info
-        self.update_config_value(
+        self._update_config_value(
             CONF_REFRESH_TOKEN_GLOBAL, auth_info["refresh_token"], encrypted=True
         )
 
@@ -894,8 +903,8 @@ class SpotifyProvider(MusicProvider):
         except LoginFailed as err:
             if "revoked" in str(err):
                 # clear refresh token if it's invalid
-                self.update_config_value(CONF_REFRESH_TOKEN_DEV, None)
-                self.update_config_value(CONF_CLIENT_ID, None)
+                self._update_config_value(CONF_REFRESH_TOKEN_DEV, None)
+                self._update_config_value(CONF_CLIENT_ID, None)
             # Don't unload - we can still use the global session
             self.dev_session_active = False
             self.logger.warning(str(err))
@@ -903,7 +912,9 @@ class SpotifyProvider(MusicProvider):
 
         # make sure that our updated creds get stored in memory + config
         self._auth_info_dev = auth_info
-        self.update_config_value(CONF_REFRESH_TOKEN_DEV, auth_info["refresh_token"], encrypted=True)
+        self._update_config_value(
+            CONF_REFRESH_TOKEN_DEV, auth_info["refresh_token"], encrypted=True
+        )
 
         # Setup librespot with dev token (preferred over global token)
         await self._setup_librespot_auth(auth_info["access_token"])
