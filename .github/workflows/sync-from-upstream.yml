@@ -35,7 +35,8 @@ jobs:
 
           git merge upstream/dev --no-edit -X ours || {
             rm -f .git/index.lock
-            git diff --name-only --diff-filter=U | while read -r f; do
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            for f in $CONFLICTS; do
               git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
             done
             git add -A
@@ -53,7 +54,8 @@ jobs:
           fi
           git merge dev --no-edit -X theirs || {
             rm -f .git/index.lock
-            git diff --name-only --diff-filter=U | while read -r f; do
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            for f in $CONFLICTS; do
               git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
             done
             git add -A
@@ -100,6 +102,8 @@ jobs:
           printf "%b" "$SUMMARY" >> $GITHUB_STEP_SUMMARY
 
       - name: Rebuild integration/pending-upstream
+        env:
+          FORK_SYNC_PAT: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           DOMAINS="yandex_music kion_music zvuk_music msx_bridge"
 
@@ -122,6 +126,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "chore: rebuild integration/pending-upstream after upstream sync"
           fi
+          git remote set-url origin "https://x-access-token:${FORK_SYNC_PAT}@github.com/trudenboy/ma-server.git"
           git push origin integration/pending-upstream --force
 
   sync-stable:
@@ -150,7 +155,8 @@ jobs:
           git checkout --track origin/stable
           git merge upstream/stable --no-edit -X ours || {
             rm -f .git/index.lock
-            git diff --name-only --diff-filter=U | while read -r f; do
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            for f in $CONFLICTS; do
               git checkout --ours -- "$f" 2>/dev/null || git rm -f -- "$f"
             done
             git add -A
@@ -164,7 +170,8 @@ jobs:
             git checkout --track origin/integration/stable 2>/dev/null || git checkout integration/stable
             git merge stable --no-edit -X theirs || {
               rm -f .git/index.lock
-              git diff --name-only --diff-filter=U | while read -r f; do
+              CONFLICTS=$(git diff --name-only --diff-filter=U)
+              for f in $CONFLICTS; do
                 git checkout --theirs -- "$f" 2>/dev/null || git rm -f -- "$f"
               done
               git add -A
