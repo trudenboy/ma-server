@@ -55,18 +55,7 @@ def _get_image_url(image: ZvukImage | None, size: int = IMAGE_SIZE_LARGE) -> str
     if not image or not image.src:
         return None
     url = image.get_url(size, size)
-    if not url:
-        return None
-    # Ensure ?size=WxH is always set (get_url skips it when absent from the original URL)
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    if "size" not in qs:
-        qs["size"] = [f"{size}x{size}"]
-    # Zvuk CDN rejects subtype=secondImage (only "cover" and "cover_background" are valid).
-    # The second_image field carries this subtype in its src; remap it to cover_background.
-    if qs.get("subtype") == ["secondImage"]:
-        qs["subtype"] = ["cover_background"]
-    return urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+    return url or None
 
 
 def parse_artist(provider: ZvukMusicProvider, artist_obj: ZvukArtist | ZvukSimpleArtist) -> Artist:
