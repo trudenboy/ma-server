@@ -363,8 +363,18 @@ class AirPlayProvider(PlayerProvider):
                         self.mass.create_task(stream.session.remove_client(player))
             elif "device-prevent-playback=0" in path:
                 # device reports that its ready for playback again
-                if stream := player.stream:
-                    stream.prevent_playback = False
+                # use a debounced reset to avoid race conditions where a quick
+                # prevent-playback=0 between duplicate prevent-playback=1 messages
+                # would reset the flag and allow the second message to act
+                if (stream := player.stream) and stream.prevent_playback:
+                    self.mass.call_later(
+                        5,
+                        setattr,
+                        stream,
+                        "prevent_playback",
+                        False,
+                        task_id=f"reset_prevent_playback_{player_id}",
+                    )
 
             # send response
             date_str = utc().strftime("%a, %-d %b %Y %H:%M:%S")
