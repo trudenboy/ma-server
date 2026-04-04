@@ -92,6 +92,7 @@ from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
 from music_assistant.helpers.util import clean_stream_title, detect_charset, remove_file
 from music_assistant.models.smart_fades import SmartFadesMode
 from music_assistant.providers.sync_group.constants import SGP_PREFIX
+from music_assistant.providers.universal_group.constants import UGP_PREFIX
 
 if TYPE_CHECKING:
     from music_assistant_models.player_queue import PlayerQueue
@@ -882,22 +883,22 @@ class StreamsAudio:
         media_type = streamdetails.media_type
         pcm_format = audio_buffer.pcm_format
 
-        chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=10)
         chunks_received = 0
 
-        def _on_chunk(position_seconds: int, pcm_data: bytes) -> None:  # noqa: ARG001
+        async def _on_chunk(position_seconds: int, pcm_data: bytes, is_last_chunk: bool) -> None:  # noqa: ARG001
             nonlocal chunks_received
             if chunks_received >= max_duration_seconds:
                 return
-            if not pcm_data:
+            if is_last_chunk:
                 # EOF
-                chunk_queue.put_nowait(None)
+                await chunk_queue.put(None)
                 return
             chunks_received += 1
-            chunk_queue.put_nowait(pcm_data)
+            await chunk_queue.put(pcm_data)
             if chunks_received >= max_duration_seconds:
                 # signal we have enough data
-                chunk_queue.put_nowait(None)
+                await chunk_queue.put(None)
 
         async def _chunk_generator() -> AsyncGenerator[bytes, None]:
             """Yield chunks from the queue until None (EOF/done)."""
@@ -955,6 +956,13 @@ class StreamsAudio:
                 return
             self.logger.debug("Attached loudness analyzer to buffer for %s", streamdetails.uri)
             audio_buffer.register_chunk_callback(_on_chunk)
+
+            def _on_cancel() -> None:
+                if chunk_queue.full():
+                    chunk_queue.get_nowait()
+                chunk_queue.put_nowait(None)
+
+            audio_buffer.register_cancel_callback(_on_cancel)
             # start the FFmpeg analysis process
             await _run_analysis()
 
@@ -1005,12 +1013,23 @@ class StreamsAudio:
                 sgp_player = cast("SyncGroupPlayer", player)
                 if sync_leader := sgp_player.sync_leader:
                     output_format = sync_leader.extra_data.get("output_format", None)
+        elif player.player_id.startswith(UGP_PREFIX):
+            # UGP is a virtual group player - don't add it to DSP details,
+            # only its children (handled below)
+            pass
         else:
             details = self.get_player_dsp_details(player)
             dsp[player.player_id] = details
             if group_preventing_dsp:
                 output_format = player.extra_data.get("output_format", None)
-            is_external_group = player.state.type in (PlayerType.GROUP, PlayerType.STEREO_PAIR)
+            is_external_group = (
+                player.state.type
+                in (
+                    PlayerType.GROUP,
+                    PlayerType.STEREO_PAIR,
+                )
+                and PlayerFeature.MULTI_DEVICE_DSP not in player.state.supported_features
+            )
 
         if player and player.state.group_members and not is_external_group:
             for child_id in player.state.group_members:
@@ -1104,6 +1123,7 @@ class StreamsAudio:
         player: Player,
         content_sample_rate: int,
         content_bit_depth: int,
+        media_type: MediaType = MediaType.UNKNOWN,
     ) -> AudioFormat:
         """Parse (player specific) output format details for given format string."""
         content_type: ContentType = ContentType.try_parse(output_format_str)
@@ -1130,6 +1150,9 @@ class StreamsAudio:
             # no point in having a higher bit depth for lossy formats
             output_bit_depth = 16
             output_sample_rate = min(48000, output_sample_rate)
+        if media_type not in (MediaType.TRACK, MediaType.PLUGIN_SOURCE, MediaType.FLOW_STREAM):
+            # no point in having a higher bit depth for non-track media types (e.g. TTS, radio)
+            output_bit_depth = min(output_bit_depth, 16)
         if output_format_str == "pcm":
             content_type = ContentType.from_bit_depth(output_bit_depth)
         fmt = AudioFormat(
@@ -1341,6 +1364,7 @@ class StreamsAudio:
                     and streamdetails.duration
                     and (queue := self.mass.player_queues.get_active_queue(queue_item.queue_id))
                     and queue.next_item
+                    and queue.next_item.queue_item_id != queue_item.queue_item_id
                     and (bytes_received / pcm_format.pcm_sample_size + seek_position)
                     >= streamdetails.duration - 60
                 ):
