@@ -60,7 +60,7 @@ class AirPlay2Stream(AirPlayProtocol):
         cli_binary = await get_cli_binary(self.player.protocol)
         player_id = self.player.player_id
         sync_adjust = self.player.config.get_value(CONF_SYNC_ADJUST)
-        assert isinstance(sync_adjust, int)
+        assert isinstance(sync_adjust, int)  # for type checker
 
         txt_kv: str = ""
         for key, value in self.player.airplay_discovery_info.decoded_properties.items():

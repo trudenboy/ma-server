@@ -17,6 +17,7 @@ from music_assistant_models.enums import EventType
 
 from music_assistant.constants import CONF_CORE
 from music_assistant.controllers.webserver.remote_access.gateway import WebRTCGateway
+from music_assistant.helpers.util import format_ip_for_url
 from music_assistant.helpers.webrtc_certificate import (
     get_or_create_webrtc_certificate,
     get_remote_id_from_certificate,

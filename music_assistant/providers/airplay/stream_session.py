@@ -13,7 +13,6 @@ from music_assistant_models.errors import PlayerCommandFailed
 
 from music_assistant.constants import CONF_SYNC_ADJUST
 from music_assistant.helpers.ffmpeg import FFMpeg
-from music_assistant.providers.airplay.helpers import ntp_to_unix_time, unix_time_to_ntp
 
 from .constants import (
     AIRPLAY2_CONNECT_TIME_MS,
@@ -136,9 +135,10 @@ class AirPlayStreamSession:
         """Add a sync client to the session as a late joiner.
 
         The late joiner will:
-        1. Start with NTP timestamp accounting for buffered chunks we'll send
-        2. Receive buffered chunks immediately to prime the ffmpeg/CLI pipeline
-        3. Join the real-time stream in perfect sync with other players
+        1. Collect buffered chunks and calculate correct NTP start time
+        2. Start the stream and immediately feed buffered audio into the pipeline
+        3. Wait for device connection outside the lock (data buffers in the pipe)
+        4. Join the real-time stream in sync with other players
         """
         sync_leader = self.sync_clients[0]
         if not sync_leader.stream or not sync_leader.stream.running:
@@ -165,8 +165,6 @@ class AirPlayStreamSession:
                 self.sync_clients.append(airplay_player)
 
             await self._start_client(airplay_player, start_ntp)
-            if airplay_player.stream:
-                await airplay_player.stream.wait_for_connection()
 
     async def _audio_streamer(self, audio_source: AsyncGenerator[bytes, None]) -> None:
         """Stream audio to all players."""
@@ -174,12 +172,6 @@ class AirPlayStreamSession:
         watchdog_task = asyncio.create_task(self._silence_watchdog(pcm_sample_size))
         try:
             async for chunk in audio_source:
-                if not self._first_chunk_received.is_set():
-                    watchdog_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await watchdog_task
-                    self._first_chunk_received.set()
-
                 if not self.sync_clients:
                     break
 
@@ -312,11 +304,10 @@ class AirPlayStreamSession:
         # Start ffmpeg to feed audio to CLI stdin
         if ffmpeg := self._player_ffmpeg.pop(airplay_player.player_id, None):
             await ffmpeg.close()
-        filter_params = get_player_filter_params(
-            self.mass,
+        filter_params = self.mass.streams.audio.get_player_filter_params(
             airplay_player.player_id,
-            self.pcm_format,
-            airplay_player.stream.pcm_format,
+            input_format=self.pcm_format,
+            output_format=get_final_output_format(airplay_player.stream.pcm_format, airplay_player),
         )
         cli_proc = airplay_player.stream._cli_proc
         assert cli_proc

@@ -67,6 +67,21 @@ if TYPE_CHECKING:
     from .provider import MusicCastProvider
 
 
+def get_player_option_translation_key(mc_key: str) -> str:
+    """Get translation key for player option.
+
+    MC key has format like 'zone_ENHANCER' or 'zone_TONE_CONTROL_bass'
+    """
+    mc_key = mc_key.lower().replace("zone_", "")
+    if mc_key == "tone_control_bass":
+        return "player_options.bass"
+    if mc_key == "tone_control_treble":
+        return "player_options.treble"
+    if mc_key == "surr_decoder_type":
+        return "player_options.surround_decoder_type"
+    return f"player_options.{mc_key}"
+
+
 @dataclass
 class MusicCastMacAddresses(DataClassDictMixin):
     """MusicCastMacAddresses.
@@ -396,6 +411,7 @@ class MusicCastPlayer(Player):
                 self._attr_options.append(
                     PlayerOption(
                         key=capability.id,
+                        translation_key=get_player_option_translation_key(capability.id),
                         name=capability.name,
                         type=PlayerOptionType.BOOLEAN,
                         read_only=True,
@@ -406,6 +422,7 @@ class MusicCastPlayer(Player):
                 self._attr_options.append(
                     PlayerOption(
                         key=capability.id,
+                        translation_key=get_player_option_translation_key(capability.id),
                         name=capability.name,
                         type=PlayerOptionType.BOOLEAN,
                         value=capability.current,
@@ -416,6 +433,7 @@ class MusicCastPlayer(Player):
                 self._attr_options.append(
                     PlayerOption(
                         key=capability.id,
+                        translation_key=get_player_option_translation_key(capability.id),
                         name=capability.name,
                         type=PlayerOptionType.INTEGER,
                         value=capability.current,
@@ -426,6 +444,7 @@ class MusicCastPlayer(Player):
                 self._attr_options.append(
                     PlayerOption(
                         key=capability.id,
+                        translation_key=get_player_option_translation_key(capability.id),
                         name=capability.name,
                         type=PlayerOptionType.INTEGER,
                         value=capability.current,
@@ -439,6 +458,7 @@ class MusicCastPlayer(Player):
                 self._attr_options.append(
                     PlayerOption(
                         key=capability.id,
+                        translation_key=get_player_option_translation_key(capability.id),
                         name=capability.name,
                         type=PlayerOptionType.STRING,
                         value=capability.current,
@@ -459,6 +479,7 @@ class MusicCastPlayer(Player):
                 self._attr_options.append(
                     PlayerOption(
                         key=capability.id,
+                        translation_key=get_player_option_translation_key(capability.id),
                         name=capability.name,
                         type=PlayerOptionType.STRING,
                         value=str(capability.current),

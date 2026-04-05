@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 
 from music_assistant.models.player import DeviceInfo, Player
 
+from .constants import EXTERNAL_SOURCE_PROTOCOLS
+
 if TYPE_CHECKING:
     from .provider import UniversalPlayerProvider
 
@@ -59,7 +61,6 @@ class UniversalPlayer(Player):
     @property
     def available(self) -> bool:
         """Return if the player is currently available."""
-        # A universal player is available if any of its linked protocol players are available
         return any(
             (p := self.mass.players.get_player(pid)) and p.available
             for pid in self._protocol_player_ids

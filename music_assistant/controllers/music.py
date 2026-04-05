@@ -78,7 +78,11 @@ from music_assistant.controllers.webserver.helpers.auth_middleware import get_cu
 from music_assistant.helpers.api import api_command
 from music_assistant.helpers.compare import compare_strings, compare_version, create_safe_string
 from music_assistant.helpers.database import UNSET, DatabaseConnection
-from music_assistant.helpers.datetime import local_clock_time_to_utc, utc_timestamp
+from music_assistant.helpers.datetime import (
+    from_utc_timestamp,
+    local_clock_time_to_utc,
+    utc_timestamp,
+)
 from music_assistant.helpers.json import json_dumps, json_loads, serialize_to_json
 from music_assistant.helpers.tags import split_artists
 from music_assistant.helpers.uri import parse_uri
@@ -305,9 +309,12 @@ class MusicController(CoreController):
         # use cache to avoid repeated searches
         search_providers = sorted(self.get_unique_providers())
         cache_provider_key = "library" if library_only else ",".join(search_providers)
-        cache_key = f"{search_query}{'-'.join(sorted([mt.value for mt in media_types]))}-{limit}-{library_only}-{cache_provider_key}"  # noqa: E501
+        cache_key = f"{search_query}{'-'.join(sorted([mt.value for mt in media_types]))}-{limit}-{library_only}-{cache_provider_key}"
         if cache := await self.mass.cache.get(
-            key=cache_key, provider=self.domain, category=CACHE_CATEGORY_SEARCH_RESULTS
+            key=cache_key,
+            provider=self.domain,
+            category=CACHE_CATEGORY_SEARCH_RESULTS,
+            base_class=SearchResults,
         ):
             return cache
         if not media_types:
@@ -441,7 +448,7 @@ class MusicController(CoreController):
         result.podcasts = self._sort_search_result(search_query, result.podcasts)
         await self.mass.cache.set(
             key=cache_key,
-            data=result,
+            data=result.to_dict(),
             expiration=600,
             provider=self.domain,
             category=CACHE_CATEGORY_SEARCH_RESULTS,
@@ -1483,6 +1490,7 @@ class MusicController(CoreController):
         """
         provider_fully_played = False
         provider_position_ms = 0
+        provider_timestamp: datetime | None = None
 
         user: User | None = None
         if userid:
@@ -1521,12 +1529,14 @@ class MusicController(CoreController):
                 (
                     provider_fully_played,
                     provider_position_ms,
+                    provider_timestamp,
                 ) = await provider.get_resume_position(prov_mapping.item_id, media_item.media_type)
                 break  # Use first provider that returns data
 
         # Get MA's internal position from playlog
         ma_fully_played = False
         ma_position_ms = 0
+        ma_timestamp = from_utc_timestamp(0)
         params = {
             "media_type": media_item.media_type.value,
             "item_id": media_item.item_id,
@@ -1539,7 +1549,10 @@ class MusicController(CoreController):
         if db_entry := await self.database.get_row(DB_TABLE_PLAYLOG, params):
             ma_position_ms = db_entry["seconds_played"] * 1000 if db_entry["seconds_played"] else 0
             ma_fully_played = parse_optional_bool(db_entry["fully_played"])
+            ma_timestamp = from_utc_timestamp(db_entry["timestamp"])
 
+        if provider_timestamp is not None and provider_timestamp > ma_timestamp:
+            return provider_fully_played, provider_position_ms
         # Return the higher position to ensure users never lose progress
         if ma_position_ms >= provider_position_ms:
             return ma_fully_played, ma_position_ms
@@ -1712,17 +1725,24 @@ class MusicController(CoreController):
         """Schedule Library sync for given provider."""
         if not (provider := self.mass.get_provider(provider_instance_id)):
             return
-        self.unschedule_provider_sync(provider.instance_id)
+        self.unschedule_provider_sync(provider.instance_id, clear_persisted_state=False)
         for media_type in MediaType:
             if not provider.library_supported(media_type):
                 continue
             await self._schedule_provider_mediatype_sync(provider, media_type, True)
 
-    def unschedule_provider_sync(self, provider_instance_id: str) -> None:
-        """Unschedule Library sync for given provider."""
+    def unschedule_provider_sync(
+        self, provider_instance_id: str, clear_persisted_state: bool = True
+    ) -> None:
+        """Unschedule Library sync for given provider.
+
+        :param provider_instance_id: The provider instance id to unschedule.
+        :param clear_persisted_state: Whether to remove persisted schedule state from config.
+        """
         for media_type in MediaType:
             self.mass.tasks.unregister_scheduled_task(
-                self._get_sync_task_id(provider_instance_id, media_type)
+                self._get_sync_task_id(provider_instance_id, media_type),
+                clear_persisted_state=clear_persisted_state,
             )
 
     def get_provider_sync_schedule(
@@ -2497,7 +2517,8 @@ class MusicController(CoreController):
             [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
             [search_name] TEXT NOT NULL,
             [search_sort_name] TEXT NOT NULL,
-            [supported_mediatypes] json NOT NULL DEFAULT '[\"track\"]'
+            [supported_mediatypes] json NOT NULL DEFAULT '[\"track\"]',
+            [is_dynamic] BOOLEAN NOT NULL DEFAULT 0
             );"""
         )
         await self.database.execute(

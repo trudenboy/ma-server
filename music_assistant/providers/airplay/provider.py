@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from contextlib import suppress
+from ipaddress import ip_address
 from typing import cast
 
 from music_assistant_models.enums import PlaybackState
@@ -20,6 +22,7 @@ from music_assistant.models.player_provider import PlayerProvider
 
 from .constants import (
     AIRPLAY_DISCOVERY_TYPE,
+    AIRPLAY_VOLUME_MUTE,
     CONF_IGNORE_VOLUME,
     CONF_STORED_VOLUME,
     DACP_DISCOVERY_TYPE,
@@ -84,7 +87,7 @@ class AirPlayProvider(PlayerProvider):
         if not info:
             if state_change == ServiceStateChange.Removed and "@" in name:
                 # Service name is enough to mark the player as unavailable on 'Removed' notification
-                raw_id, display_name = name.split(".")[0].split("@", 1)
+                raw_id, display_name = name.split(".", maxsplit=1)[0].split("@", 1)
             else:
                 # If we are not in a 'Removed' state, we need info to be filled to update the player
                 return
@@ -138,33 +141,19 @@ class AirPlayProvider(PlayerProvider):
         raop_discovery_info: AsyncServiceInfo | None = None
         airplay_discovery_info: AsyncServiceInfo | None = None
         if discovery_info.type == RAOP_DISCOVERY_TYPE:
-            # RAOP service discovered
+            # RAOP service discovered - try to also find the AirPlay service
             raop_discovery_info = discovery_info
             self.logger.debug("Discovered RAOP service for %s", display_name)
-            # always prefer airplay mdns info as it has more details
-            # fallback to raop info if airplay info is not available,
-            # (old device only announcing raop)
-            airplay_discovery_info = AsyncServiceInfo(
-                AIRPLAY_DISCOVERY_TYPE,
-                discovery_info.name.split("@")[-1].replace("_raop", "_airplay"),
+            airplay_discovery_info = await self.mass.discovery.async_find_mdns_service(
+                AIRPLAY_DISCOVERY_TYPE, display_name, timeout=10.0
             )
-            if not await airplay_discovery_info.async_request(
-                self.mass.discovery.aiozc.zeroconf, 3000
-            ):
-                airplay_discovery_info = None
         else:
-            # AirPlay service discovered
+            # AirPlay service discovered - try to also find the RAOP service
             self.logger.debug("Discovered AirPlay service for %s", display_name)
             airplay_discovery_info = discovery_info
-            # also try to get the raop info if available
-            raop_discovery_info = AsyncServiceInfo(
-                RAOP_DISCOVERY_TYPE,
-                discovery_info.name.split("@")[-1].replace("_airplay", "_raop"),
+            raop_discovery_info = await self.mass.discovery.async_find_mdns_service(
+                RAOP_DISCOVERY_TYPE, display_name, timeout=10.0
             )
-            if not await raop_discovery_info.async_request(
-                self.mass.discovery.aiozc.zeroconf, 3000
-            ):
-                raop_discovery_info = None
 
         if airplay_discovery_info:
             manufacturer, model = get_model_info(airplay_discovery_info)
@@ -183,8 +172,8 @@ class AirPlayProvider(PlayerProvider):
         # We check both model name AND that it's a local address to avoid filtering
         # shairport-sync instances running on other machines
         if model == "ShairportSync":
-            # Check if this is a local address (127.x.x.x or matches our server's IP)
-            if address.startswith("127.") or address == self.mass.streams.publish_ip:
+            # Check if this is a local address (loopback or matches our server's IP)
+            if ip_address(address).is_loopback or address == self.mass.streams.publish_ip:
                 # Only filter if the port matches one of MA's own AirPlay Receiver instances.
                 # This allows user-configured shairport-sync instances on the same machine
                 # to be used as AirPlay players (e.g., multiple audio outputs via shairport-sync).
@@ -346,8 +335,20 @@ class AirPlayProvider(PlayerProvider):
                 # In case of a small rounding difference, we ignore this,
                 # to prevent an endless pingpong of volume changes
                 airplay_volume = float(path.split("dmcp.device-volume=", 1)[-1])
-                volume = convert_airplay_volume(airplay_volume)
-                player.update_volume_from_device(volume)
+                if airplay_volume <= AIRPLAY_VOLUME_MUTE:
+                    player._attr_volume_muted = True
+                    if player.stream and player.stream.running:
+                        self.mass.create_task(player.stream.send_cli_command("VOLUME=0"))
+                    player.update_state()
+                else:
+                    if player.volume_muted:
+                        player._attr_volume_muted = False
+                        if player.stream and player.stream.running:
+                            self.mass.create_task(
+                                player.stream.send_cli_command(f"VOLUME={player.volume_level or 0}")
+                            )
+                    volume = convert_airplay_volume(airplay_volume)
+                    player.update_volume_from_device(volume)
             elif "dmcp.volume=" in path:
                 # volume change request from device (e.g. volume buttons)
                 volume = int(path.split("dmcp.volume=", 1)[-1])

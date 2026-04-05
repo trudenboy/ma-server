@@ -28,6 +28,7 @@ IMPORTANT:
 - Suggest improvements where appropriate
 - Only provide review feedback in the CONSOLE. DO NOT ACT ON GITHUB.
 - No need to run tests or linters, just review the code changes.
+- Always check if existing helper functions exist. These should be used in favour of new code in providers. Example: if a music provider does pls parsing, the author should rewrite this to use `parse_pls` from `music_assistant.helpers.playlists` instead of writing their own parsing code.
 
 Output format:
 - List specific comments per file/line that need attention
@@ -41,10 +42,13 @@ Output format:
     - [SUGGESTION] Improve variable naming in music_assistant/helpers/config_validation.py
     ```
 
-Output Comment Format
-1. State the problem (1 sentence)
-2. Why it matters (1 sentence, if needed)
-3. Suggested fix (snippet or specific action)
+List specific comments per file/line that need attention. Do not list things that are already correct.
+
+Each comment:
+1. State the severity ([CRITICAL], [PROBLEM], [SUGGESTION])
+2. State the problem (1 sentence)
+3. Why it matters (1 sentence, if needed)
+4. Suggested fix (snippet or specific action)
 
 Example:
 This could generate a `KeyError` if `"name"` does not exist in the `dict`. Consider using `.get("name")` or adding a check.

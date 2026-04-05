@@ -21,9 +21,6 @@ from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.streamdetails import MultiPartPath
 
 from music_assistant.constants import (
-    CONF_ENTRY_OUTPUT_LIMITER,
-    CONF_ENTRY_VOLUME_NORMALIZATION_TARGET,
-    CONF_OUTPUT_CHANNELS,
     CONF_VOLUME_NORMALIZATION,
     CONF_VOLUME_NORMALIZATION_RADIO,
     CONF_VOLUME_NORMALIZATION_TRACKS,
@@ -68,6 +65,20 @@ def get_mime_type(format_str: str) -> str:
     if override := _MIME_TYPE_OVERRIDES.get(base_format):
         return override
     return f"audio/{format_str}"
+
+
+def parse_pcm_info(content_type: str) -> tuple[int, int, int]:
+    """Parse PCM info from a codec/content_type string.
+
+    :param content_type: Content type string like "pcm;codec=pcm;rate=44100;bitrate=16;channels=2".
+    """
+    params = (
+        dict(urllib.parse.parse_qsl(content_type.replace(";", "&"))) if ";" in content_type else {}
+    )
+    sample_rate = int(params.get("rate", 44100))
+    sample_size = int(params.get("bitrate", 16))
+    channels = int(params.get("channels", 2))
+    return (sample_rate, sample_size, channels)
 
 
 CACHE_CATEGORY_RESOLVED_RADIO_URL: Final[int] = 100

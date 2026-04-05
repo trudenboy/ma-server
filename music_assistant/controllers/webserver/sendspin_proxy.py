@@ -20,6 +20,7 @@ from music_assistant.controllers.webserver.helpers.auth_middleware import (
     get_authenticated_user,
     is_request_from_ingress,
 )
+from music_assistant.helpers.util import format_ip_for_url
 
 if TYPE_CHECKING:
     import aiohttp
