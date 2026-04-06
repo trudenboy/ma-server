@@ -1875,6 +1875,11 @@ class StreamsAudio:
             )
             play_log_entry.seconds_streamed = seconds_streamed
             play_log_entry.duration = queue_track.streamdetails.duration
+            if last_play_log_entry is play_log_entry and last_fadeout_part:
+                # Pre-count the crossfade tail so the queue index calculation
+                # doesn't undercount while waiting for the next track's crossfade mix.
+                # This will be corrected to the actual proportional share once the mix completes.
+                play_log_entry.seconds_streamed += len(last_fadeout_part) / pcm_sample_size
             total_bytes_sent += bytes_written
             self.logger.debug(
                 "Finished Streaming queue track: %s (%s) on queue %s",
