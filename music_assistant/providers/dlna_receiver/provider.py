@@ -240,7 +240,7 @@ class DLNAReceiverProvider(PluginProvider):
     def _get_all_players(self) -> list[tuple[str, str]]:
         """Get all MA players as (player_id, display_name) pairs."""
         try:
-            players = self.mass.players.all
+            players = self.mass.players.all_players(return_unavailable=False)
             return [(p.player_id, p.display_name or p.name or p.player_id) for p in players]
         except Exception:
             LOGGER.warning("Could not enumerate MA players", exc_info=True)
@@ -249,8 +249,10 @@ class DLNAReceiverProvider(PluginProvider):
     def _get_player_name(self, player_id: str) -> str:
         """Get the display name for a player, falling back to the id."""
         try:
-            player = self.mass.players.get(player_id)
-            return player.display_name or player.name or player_id
+            player = self.mass.players.get_player(player_id)
+            if player:
+                return player.display_name or player.name or player_id
+            return player_id
         except Exception:
             return player_id
 
