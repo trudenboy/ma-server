@@ -1,0 +1,358 @@
+"""DLNA Receiver — Main provider implementation.
+
+Registers as a PluginProvider with AUDIO_SOURCE feature so that audio
+received from external DLNA control points is routed through the MA
+streaming pipeline to any configured player.
+
+Supports multi-player mode: one virtual DLNA renderer per MA player,
+each with a unique UDN, HTTP port, and SSDP advertisement.
+"""
+
+from __future__ import annotations
+
+import logging
+import socket
+import uuid
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from music_assistant_models.config_entries import ConfigValueType
+from music_assistant_models.enums import ContentType
+from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.plugin import PluginSource
+
+from music_assistant.models import PluginProvider, ProviderFeature
+
+from .constants import (
+    CONF_BIND_IP,
+    CONF_FRIENDLY_NAME,
+    CONF_HTTP_PORT,
+    CONF_TARGET_PLAYER,
+    CONF_TARGET_PLAYERS,
+    DEFAULT_FRIENDLY_NAME,
+    DEFAULT_HTTP_PORT,
+    UDN_NAMESPACE,
+)
+from .renderer import UPnPRenderer
+from .ssdp import SSDPAdvertiser
+
+if TYPE_CHECKING:
+    from music_assistant.mass import MusicAssistant
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class RendererInstance:
+    """Per-player renderer state: UPnP renderer + SSDP + streaming context."""
+
+    player_id: str
+    player_name: str
+    renderer: UPnPRenderer
+    ssdp: SSDPAdvertiser
+    current_stream_url: str | None = None
+    plugin_source: PluginSource | None = None
+
+
+class DLNAReceiverProvider(PluginProvider):
+    """DLNA Receiver plugin provider for Music Assistant.
+
+    Exposes MA as one or more UPnP MediaRenderers on the local network
+    so that external apps can send audio streams which are then played
+    on the corresponding MA player.
+    """
+
+    def __init__(
+        self,
+        mass: MusicAssistant,
+        config: dict[str, ConfigValueType],
+    ) -> None:
+        super().__init__()
+        self.mass = mass
+        self._config = config
+        self._instances: dict[str, RendererInstance] = {}
+
+    @property
+    def supported_features(self) -> tuple[ProviderFeature, ...]:
+        """Return supported features."""
+        return (ProviderFeature.AUDIO_SOURCE,)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def loaded_in_mass(self) -> None:
+        """Initialize renderer instances when loaded in Music Assistant."""
+        friendly_prefix = str(
+            self._config.get(CONF_FRIENDLY_NAME, DEFAULT_FRIENDLY_NAME),
+        )
+        bind_ip = str(self._config.get(CONF_BIND_IP, "")) or self._detect_ip()
+        base_port = int(self._config.get(CONF_HTTP_PORT, DEFAULT_HTTP_PORT))
+
+        player_specs = self._resolve_player_specs()
+
+        if not player_specs:
+            # Fallback: single renderer with no fixed target (backward compat)
+            await self._create_instance(
+                player_id="",
+                player_name="",
+                friendly_prefix=friendly_prefix,
+                bind_ip=bind_ip,
+                http_port=base_port,
+            )
+        else:
+            for idx, (pid, pname) in enumerate(player_specs):
+                await self._create_instance(
+                    player_id=pid,
+                    player_name=pname,
+                    friendly_prefix=friendly_prefix,
+                    bind_ip=bind_ip,
+                    http_port=base_port + idx,
+                )
+
+        count = len(self._instances)
+        LOGGER.info(
+            "DLNA Receiver started: %d renderer(s) on %s (base port %s)",
+            count,
+            bind_ip,
+            base_port,
+        )
+
+    async def unload(self) -> None:
+        """Unload the provider — stop all renderer instances."""
+        for inst in self._instances.values():
+            await inst.ssdp.stop()
+            await inst.renderer.stop()
+        self._instances.clear()
+        LOGGER.info("DLNA Receiver provider unloaded")
+
+    # ------------------------------------------------------------------
+    # Instance management
+    # ------------------------------------------------------------------
+
+    async def _create_instance(
+        self,
+        player_id: str,
+        player_name: str,
+        friendly_prefix: str,
+        bind_ip: str,
+        http_port: int,
+    ) -> RendererInstance:
+        """Create and start a single renderer instance for a player."""
+        if player_name:
+            friendly_name = f"{friendly_prefix} — {player_name}"
+        else:
+            friendly_name = friendly_prefix
+
+        udn = self._deterministic_udn(player_id)
+
+        renderer = UPnPRenderer(
+            friendly_name=friendly_name,
+            bind_ip=bind_ip,
+            http_port=http_port,
+            udn=udn,
+        )
+
+        inst = RendererInstance(
+            player_id=player_id,
+            player_name=player_name,
+            renderer=renderer,
+            ssdp=SSDPAdvertiser(
+                udn=udn,
+                description_url=renderer.description_url,
+                bind_ip=bind_ip,
+            ),
+        )
+
+        # Wire SOAP callbacks bound to this instance
+        renderer.on_set_av_transport_uri = lambda uri, meta: self._on_set_transport_uri(
+            inst, uri, meta
+        )
+        renderer.on_play = lambda: self._on_play(inst)
+        renderer.on_pause = lambda: self._on_pause(inst)
+        renderer.on_stop = lambda: self._on_stop(inst)
+        renderer.on_set_volume = lambda vol: self._on_set_volume(inst, vol)
+        renderer.on_set_mute = lambda m: self._on_set_mute(inst, m)
+
+        await renderer.start()
+        await inst.ssdp.start()
+
+        key = player_id or "__default__"
+        self._instances[key] = inst
+
+        LOGGER.info(
+            "Renderer '%s' → player '%s' on port %d (UDN: %s)",
+            friendly_name,
+            player_id or "(none)",
+            http_port,
+            udn,
+        )
+        return inst
+
+    def _resolve_player_specs(self) -> list[tuple[str, str]]:
+        """Resolve configured player targets to (player_id, display_name) pairs.
+
+        Supports:
+        - Empty / not set → empty list (single unbound renderer)
+        - "*" → all currently known MA players
+        - Comma-separated player_ids
+        - Legacy CONF_TARGET_PLAYER (single player_id, backward compat)
+        """
+        raw = str(self._config.get(CONF_TARGET_PLAYERS, "")).strip()
+
+        # Backward compat: check old single-player key
+        if not raw:
+            raw = str(self._config.get(CONF_TARGET_PLAYER, "")).strip()
+
+        if not raw:
+            return []
+
+        if raw == "*":
+            return self._get_all_players()
+
+        # Comma-separated list
+        specs: list[tuple[str, str]] = []
+        for pid in raw.split(","):
+            pid = pid.strip()
+            if pid:
+                name = self._get_player_name(pid)
+                specs.append((pid, name))
+        return specs
+
+    def _get_all_players(self) -> list[tuple[str, str]]:
+        """Get all MA players as (player_id, display_name) pairs."""
+        try:
+            players = self.mass.players.all
+            return [(p.player_id, p.display_name or p.name or p.player_id) for p in players]
+        except Exception:
+            LOGGER.warning("Could not enumerate MA players")
+            return []
+
+    def _get_player_name(self, player_id: str) -> str:
+        """Get the display name for a player, falling back to the id."""
+        try:
+            player = self.mass.players.get(player_id)
+            return player.display_name or player.name or player_id
+        except Exception:
+            return player_id
+
+    # ------------------------------------------------------------------
+    # PluginProvider audio source interface
+    # ------------------------------------------------------------------
+
+    async def get_audio_stream(
+        self,
+        player_id: str,
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield audio bytes from the received DLNA stream.
+
+        MA calls this when the plugin source is activated on a player.
+        We proxy the external URL through aiohttp and yield raw bytes.
+        """
+        import aiohttp
+
+        inst = self._instances.get(player_id) or self._instances.get("__default__")
+        stream_url = inst.current_stream_url if inst else None
+
+        if not stream_url:
+            LOGGER.warning(
+                "get_audio_stream(%s) called but no stream URL set",
+                player_id,
+            )
+            return
+
+        LOGGER.info("Proxying DLNA stream for %s: %s", player_id, stream_url)
+        async with aiohttp.ClientSession() as session, session.get(stream_url) as resp:
+            async for chunk in resp.content.iter_any():
+                yield chunk
+        LOGGER.info("DLNA stream ended for %s", player_id)
+
+    # ------------------------------------------------------------------
+    # Renderer callbacks (per-instance)
+    # ------------------------------------------------------------------
+
+    async def _on_set_transport_uri(
+        self,
+        inst: RendererInstance,
+        uri: str,
+        metadata: str | None,
+    ) -> None:
+        """Handle SetAVTransportURI for a specific renderer instance."""
+        LOGGER.info(
+            "Received transport URI for '%s': %s",
+            inst.player_name or "(default)",
+            uri,
+        )
+        inst.current_stream_url = uri
+
+    async def _on_play(self, inst: RendererInstance) -> None:
+        """Handle Play — start streaming to this instance's player."""
+        target = inst.player_id
+        if not target:
+            LOGGER.warning("No target player bound — ignoring Play")
+            return
+
+        if not inst.current_stream_url:
+            LOGGER.warning("Play received but no stream URL for %s", target)
+            return
+
+        audio_format = AudioFormat(content_type=ContentType.UNKNOWN)
+        inst.plugin_source = PluginSource(
+            id=f"dlna_receiver_{target}",
+            name=f"DLNA Receiver ({inst.player_name})",
+            audio_format=audio_format,
+        )
+
+        LOGGER.info("Starting playback on player %s", target)
+        await self.mass.streams.play_plugin_source(
+            player_id=target,
+            plugin_source=inst.plugin_source,
+        )
+
+    async def _on_pause(self, inst: RendererInstance) -> None:
+        """Handle Pause for this instance's player."""
+        if inst.player_id:
+            await self.mass.players.cmd_pause(inst.player_id)
+
+    async def _on_stop(self, inst: RendererInstance) -> None:
+        """Handle Stop for this instance's player."""
+        if inst.player_id:
+            await self.mass.players.cmd_stop(inst.player_id)
+        inst.current_stream_url = None
+
+    async def _on_set_volume(self, inst: RendererInstance, volume: int) -> None:
+        """Handle volume change for this instance's player."""
+        if inst.player_id:
+            await self.mass.players.cmd_volume_set(inst.player_id, volume)
+
+    async def _on_set_mute(self, inst: RendererInstance, mute: bool) -> None:
+        """Handle mute change for this instance's player."""
+        if inst.player_id:
+            await self.mass.players.cmd_volume_mute(inst.player_id, mute)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deterministic_udn(player_id: str) -> str:
+        """Generate a deterministic UDN from the player_id.
+
+        Uses UUID5 so the same player always gets the same UDN,
+        keeping DLNA control point bookmarks stable across restarts.
+        """
+        namespace = uuid.uuid5(uuid.NAMESPACE_URL, UDN_NAMESPACE)
+        return f"uuid:{uuid.uuid5(namespace, player_id or '__default__')}"
+
+    @staticmethod
+    def _detect_ip() -> str:
+        """Detect the primary LAN IP address."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            sock.close()
+            return ip
+        except Exception:
+            return "0.0.0.0"
