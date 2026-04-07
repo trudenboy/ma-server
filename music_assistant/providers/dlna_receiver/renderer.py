@@ -262,6 +262,7 @@ class UPnPRenderer:
         if action_name == "SetAVTransportURI":
             uri = self._extract_xml_value(body, "CurrentURI")
             metadata = self._extract_xml_value(body, "CurrentURIMetaData")
+            LOGGER.info("SetAVTransportURI raw metadata (first 500): %s", (metadata or "")[:500])
             self.current_uri = uri or ""
             self.current_uri_metadata = metadata or ""
             self.transport_state = TRANSPORT_STATE_STOPPED
