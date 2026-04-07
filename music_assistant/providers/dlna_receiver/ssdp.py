@@ -33,7 +33,7 @@ class SSDPAdvertiser:
         self.bind_ip = bind_ip
         self._transport: asyncio.DatagramTransport | None = None
         self._recv_transport: asyncio.DatagramTransport | None = None
-        self._advertise_task: asyncio.Task | None = None
+        self._advertise_task: asyncio.Task[None] | None = None
         self._running = False
 
     async def start(self) -> None:

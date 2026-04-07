@@ -17,6 +17,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from html import unescape
 from typing import TYPE_CHECKING
 
 import defusedxml.ElementTree as DefusedET
@@ -24,9 +25,8 @@ from music_assistant_models.config_entries import ConfigValueType  # noqa: F401
 from music_assistant_models.enums import MediaType, ProviderFeature
 from music_assistant_models.streamdetails import StreamMetadata
 
-from music_assistant.models import PluginProvider
 from music_assistant.models.player import PlayerMedia
-from music_assistant.models.plugin import PluginSource
+from music_assistant.models.plugin import PluginProvider, PluginSource
 
 from .constants import (
     CONF_BIND_IP,
@@ -86,12 +86,12 @@ class DLNAReceiverProvider(PluginProvider):
         self._active_player_id: str | None = None
         self._play_start_time: float | None = None
         self._elapsed_offset: int = 0
-        self._metadata_task: asyncio.Task | None = None
+        self._metadata_task: asyncio.Task[None] | None = None
 
     @property
-    def supported_features(self) -> tuple[ProviderFeature, ...]:
+    def supported_features(self) -> set[ProviderFeature]:
         """Return supported features."""
-        return (ProviderFeature.AUDIO_SOURCE,)
+        return {ProviderFeature.AUDIO_SOURCE}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -103,7 +103,9 @@ class DLNAReceiverProvider(PluginProvider):
             self.config.get_value(CONF_FRIENDLY_NAME) or DEFAULT_FRIENDLY_NAME,
         )
         self._bind_ip = str(self.config.get_value(CONF_BIND_IP) or "") or self._detect_ip()
-        self._base_port = int(self.config.get_value(CONF_HTTP_PORT) or DEFAULT_HTTP_PORT)
+        self._base_port = int(
+            self.config.get_value(CONF_HTTP_PORT) or DEFAULT_HTTP_PORT  # type: ignore[arg-type]
+        )
 
         raw_target = str(self.config.get_value(CONF_TARGET_PLAYERS) or "").strip()
 
@@ -358,11 +360,11 @@ class DLNAReceiverProvider(PluginProvider):
             )
             return
 
-        LOGGER.info("Proxying DLNA stream for %s: %s", player_id, stream_url)
+        LOGGER.debug("Proxying DLNA stream for %s: %s", player_id, stream_url)
         async with aiohttp.ClientSession() as session, session.get(stream_url) as resp:
             async for chunk in resp.content.iter_any():
                 yield chunk
-        LOGGER.info("DLNA stream ended for %s", player_id)
+        LOGGER.debug("DLNA stream ended for %s", player_id)
 
     # ------------------------------------------------------------------
     # DIDL-Lite metadata parsing
@@ -382,8 +384,6 @@ class DLNAReceiverProvider(PluginProvider):
             return result
 
         # SOAP bodies may contain XML-escaped DIDL-Lite content
-        from html import unescape
-
         metadata = unescape(metadata)
 
         try:
@@ -461,7 +461,7 @@ class DLNAReceiverProvider(PluginProvider):
 
         LOGGER.info("Starting playback on player %s", target)
         meta = inst.current_metadata or {}
-        LOGGER.info("DIDL metadata for %s: %s", target, meta)
+        LOGGER.debug("DIDL metadata for %s: %s", target, meta)
         duration = self._parse_duration(meta.get("duration"))
 
         # Update plugin source metadata for MA UI display
@@ -581,7 +581,7 @@ class DLNAReceiverProvider(PluginProvider):
                 if self._active_player_id:
                     player = self.mass.players.get_player(self._active_player_id)
                     if not player:
-                        LOGGER.info("Metadata loop: player %s gone", self._active_player_id)
+                        LOGGER.debug("Metadata loop: player %s gone", self._active_player_id)
                         self._clear_playback_state()
                         break
 
@@ -591,7 +591,7 @@ class DLNAReceiverProvider(PluginProvider):
         except asyncio.CancelledError:
             pass
         except Exception:
-            LOGGER.info("Metadata update loop error", exc_info=True)
+            LOGGER.debug("Metadata update loop error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -630,7 +630,7 @@ class DLNAReceiverProvider(PluginProvider):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.connect(("8.8.8.8", 80))
-            ip = sock.getsockname()[0]
+            ip: str = sock.getsockname()[0]
             sock.close()
             return ip
         except Exception:
