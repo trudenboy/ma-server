@@ -269,23 +269,38 @@ class DLNAReceiverProvider(PluginProvider):
         """Get all MA players as (player_id, display_name) pairs.
 
         Includes unavailable players (they may come online later).
-        Filters out protocol players and our own DLNA Receiver renderers.
+        Filters out protocol players and our own DLNA Receiver renderers
+        (which the UPnP player provider discovers as "up<udn_hex>" players).
         """
         try:
             players = self.mass.players.all_players(
                 return_unavailable=True,
                 return_protocol_players=False,
             )
-            own_player_ids = {inst.player_id for inst in self._instances.values()}
+            all_pids = {p.player_id for p in players}
+
+            # For every player_id, compute the UPnP player_id that would
+            # result from discovering our deterministic-UDN renderer.
+            # This catches ALL recursion levels without needing _instances.
+            own_renderer_pids: set[str] = set()
+            for pid in all_pids:
+                udn = self._deterministic_udn(pid)
+                upnp_pid = "up" + udn.replace("uuid:", "").replace("-", "")
+                own_renderer_pids.add(upnp_pid)
+
+            # Also filter already-created instances (belt-and-suspenders)
+            own_renderer_pids.update(
+                inst.player_id for inst in self._instances.values() if inst.player_id
+            )
+
             result = []
             for p in players:
-                # Skip our own renderer players (avoid recursion)
-                if p.player_id in own_player_ids:
-                    continue
-                if p.player_id.startswith("up") and any(
-                    p.player_id.endswith(inst.renderer.udn.replace("uuid:", "").replace("-", ""))
-                    for inst in self._instances.values()
-                ):
+                if p.player_id in own_renderer_pids:
+                    LOGGER.debug(
+                        "Filtering out own renderer player: %s (%s)",
+                        p.player_id,
+                        p.display_name or p.name,
+                    )
                     continue
                 result.append((p.player_id, p.display_name or p.name or p.player_id))
             return result
