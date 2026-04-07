@@ -71,6 +71,7 @@ class UPnPRenderer:
         self.on_play: Any = None
         self.on_pause: Any = None
         self.on_stop: Any = None
+        self.on_seek: Any = None
         self.on_set_volume: Any = None
         self.on_set_mute: Any = None
 
@@ -291,10 +292,11 @@ class UPnPRenderer:
             return self._soap_response(action_name, UPNP_SERVICE_AV_TRANSPORT)
 
         if action_name == "Seek":
-            # Accept Seek but log as no-op (streaming proxy has no seek support)
-            unit = self._extract_xml_value(body, "Unit")
-            target = self._extract_xml_value(body, "Target")
-            LOGGER.info("Seek requested (no-op): Unit=%s, Target=%s", unit, target)
+            unit = self._extract_xml_value(body, "Unit") or ""
+            target = self._extract_xml_value(body, "Target") or ""
+            LOGGER.info("Seek requested: Unit=%s, Target=%s", unit, target)
+            if self.on_seek:
+                await self.on_seek(unit, target)
             return self._soap_response(action_name, UPNP_SERVICE_AV_TRANSPORT)
 
         if action_name == "GetTransportInfo":
