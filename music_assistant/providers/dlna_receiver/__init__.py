@@ -41,8 +41,11 @@ from .constants import (
 )
 
 if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ProviderConfig
+    from music_assistant_models.provider import ProviderManifest
+
     from music_assistant.mass import MusicAssistant
-    from music_assistant.models import ProviderModuleType
+    from music_assistant.models import ProviderInstanceType
 
 
 async def get_config_entries(
@@ -101,10 +104,10 @@ async def get_config_entries(
 
 async def setup(
     mass: MusicAssistant,
-    manifest: dict,  # noqa: ARG001
-    config: dict[str, ConfigValueType],
-) -> ProviderModuleType:
+    manifest: ProviderManifest,
+    config: ProviderConfig,
+) -> ProviderInstanceType:
     """Set up the DLNA Receiver provider."""
     from .provider import DLNAReceiverProvider
 
-    return DLNAReceiverProvider(mass, config)
+    return DLNAReceiverProvider(mass, manifest, config)

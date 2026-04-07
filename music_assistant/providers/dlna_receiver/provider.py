@@ -17,11 +17,11 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from music_assistant_models.config_entries import ConfigValueType
-from music_assistant_models.enums import ContentType
+from music_assistant_models.config_entries import ConfigValueType  # noqa: F401
+from music_assistant_models.enums import ContentType, ProviderFeature
 from music_assistant_models.media_items import AudioFormat
 
-from music_assistant.models import PluginProvider, ProviderFeature
+from music_assistant.models import PluginProvider
 from music_assistant.models.plugin import PluginSource
 
 from .constants import (
@@ -38,6 +38,9 @@ from .renderer import UPnPRenderer
 from .ssdp import SSDPAdvertiser
 
 if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ProviderConfig
+    from music_assistant_models.provider import ProviderManifest
+
     from music_assistant.mass import MusicAssistant
 
 LOGGER = logging.getLogger(__name__)
@@ -63,14 +66,15 @@ class DLNAReceiverProvider(PluginProvider):
     on the corresponding MA player.
     """
 
+    SUPPORTED_FEATURES = {ProviderFeature.AUDIO_SOURCE}
+
     def __init__(
         self,
         mass: MusicAssistant,
-        config: dict[str, ConfigValueType],
+        manifest: ProviderManifest,
+        config: ProviderConfig,
     ) -> None:
-        super().__init__()
-        self.mass = mass
-        self._config = config
+        super().__init__(mass, manifest, config, self.SUPPORTED_FEATURES)
         self._instances: dict[str, RendererInstance] = {}
 
     @property
@@ -85,10 +89,10 @@ class DLNAReceiverProvider(PluginProvider):
     async def loaded_in_mass(self) -> None:
         """Initialize renderer instances when loaded in Music Assistant."""
         friendly_prefix = str(
-            self._config.get(CONF_FRIENDLY_NAME, DEFAULT_FRIENDLY_NAME),
+            self.config.get_value(CONF_FRIENDLY_NAME) or DEFAULT_FRIENDLY_NAME,
         )
-        bind_ip = str(self._config.get(CONF_BIND_IP, "")) or self._detect_ip()
-        base_port = int(self._config.get(CONF_HTTP_PORT, DEFAULT_HTTP_PORT))
+        bind_ip = str(self.config.get_value(CONF_BIND_IP) or "") or self._detect_ip()
+        base_port = int(self.config.get_value(CONF_HTTP_PORT) or DEFAULT_HTTP_PORT)
 
         player_specs = self._resolve_player_specs()
 
@@ -119,7 +123,7 @@ class DLNAReceiverProvider(PluginProvider):
             base_port,
         )
 
-    async def unload(self) -> None:
+    async def unload(self, is_removed: bool = False) -> None:
         """Unload the provider — stop all renderer instances."""
         for inst in self._instances.values():
             await inst.ssdp.stop()
@@ -199,11 +203,11 @@ class DLNAReceiverProvider(PluginProvider):
         - Comma-separated player_ids
         - Legacy CONF_TARGET_PLAYER (single player_id, backward compat)
         """
-        raw = str(self._config.get(CONF_TARGET_PLAYERS, "")).strip()
+        raw = str(self.config.get_value(CONF_TARGET_PLAYERS) or "").strip()
 
         # Backward compat: check old single-player key
         if not raw:
-            raw = str(self._config.get(CONF_TARGET_PLAYER, "")).strip()
+            raw = str(self.config.get_value(CONF_TARGET_PLAYER) or "").strip()
 
         if not raw:
             return []
@@ -240,6 +244,14 @@ class DLNAReceiverProvider(PluginProvider):
     # ------------------------------------------------------------------
     # PluginProvider audio source interface
     # ------------------------------------------------------------------
+
+    def get_source(self) -> PluginSource:
+        """Return the plugin source descriptor for this DLNA receiver."""
+        return PluginSource(
+            id=self.instance_id,
+            name=self.name or "DLNA Receiver",
+            passive=True,
+        )
 
     async def get_audio_stream(
         self,
