@@ -20,9 +20,9 @@ from typing import TYPE_CHECKING
 from music_assistant_models.config_entries import ConfigValueType
 from music_assistant_models.enums import ContentType
 from music_assistant_models.media_items import AudioFormat
-from music_assistant_models.plugin import PluginSource
 
 from music_assistant.models import PluginProvider, ProviderFeature
+from music_assistant.models.plugin import PluginSource
 
 from .constants import (
     CONF_BIND_IP,
