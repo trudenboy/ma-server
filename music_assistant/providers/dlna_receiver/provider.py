@@ -456,7 +456,7 @@ class DLNAReceiverProvider(PluginProvider):
 
         LOGGER.info("Starting playback on player %s", target)
         meta = inst.current_metadata or {}
-        LOGGER.debug(
+        LOGGER.info(
             "DIDL metadata for %s: %s",
             target,
             meta,
@@ -494,7 +494,7 @@ class DLNAReceiverProvider(PluginProvider):
             source_id=self.instance_id,
         )
         await self.mass.players.play_media(target, media)
-        LOGGER.debug(
+        LOGGER.info(
             "PluginSource state after play_media: id=%s, in_use_by=%s, "
             "metadata.title=%s, instance_id=%s",
             source.id,
@@ -588,11 +588,11 @@ class DLNAReceiverProvider(PluginProvider):
                 if self._active_player_id:
                     player = self.mass.players.get_player(self._active_player_id)
                     if not player:
-                        LOGGER.debug("Metadata loop: player %s gone", self._active_player_id)
+                        LOGGER.info("Metadata loop: player %s gone", self._active_player_id)
                         self._clear_playback_state()
                         break
                     active_src = getattr(player.state, "active_source", None)
-                    LOGGER.debug(
+                    LOGGER.info(
                         "Metadata loop: player=%s active_source=%s our_id=%s elapsed=%s",
                         self._active_player_id,
                         active_src,
@@ -600,7 +600,7 @@ class DLNAReceiverProvider(PluginProvider):
                         source.metadata.elapsed_time if source.metadata else None,
                     )
                     if active_src and active_src != self.instance_id:
-                        LOGGER.debug("Metadata loop: active_source mismatch, clearing")
+                        LOGGER.info("Metadata loop: active_source mismatch, clearing")
                         self._clear_playback_state()
                         break
                     ps = getattr(player.state, "playback_state", None)
@@ -622,7 +622,7 @@ class DLNAReceiverProvider(PluginProvider):
         except asyncio.CancelledError:
             pass
         except Exception:
-            LOGGER.debug("Metadata update loop error", exc_info=True)
+            LOGGER.info("Metadata update loop error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers
