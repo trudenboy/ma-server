@@ -32,26 +32,43 @@ class SSDPAdvertiser:
         self.description_url = description_url
         self.bind_ip = bind_ip
         self._transport: asyncio.DatagramTransport | None = None
+        self._recv_transport: asyncio.DatagramTransport | None = None
         self._advertise_task: asyncio.Task | None = None
         self._running = False
 
     async def start(self) -> None:
         """Start SSDP advertisement."""
         self._running = True
-        # Create UDP socket for sending SSDP messages
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(
+        loop = asyncio.get_running_loop()
+
+        # Sending socket — for NOTIFY alive/byebye to multicast group
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        send_sock.setsockopt(
             socket.IPPROTO_IP,
             socket.IP_MULTICAST_IF,
             socket.inet_aton(self.bind_ip),
         )
-        sock.setblocking(False)
-
-        loop = asyncio.get_running_loop()
+        send_sock.setblocking(False)
         self._transport, _ = await loop.create_datagram_endpoint(
-            lambda: _SSDPProtocol(self),
-            sock=sock,
+            lambda: _SSDPSendProtocol(),
+            sock=send_sock,
+        )
+
+        # Receiving socket — join multicast group on port 1900 for M-SEARCH
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        recv_sock.bind(("", SSDP_PORT))
+        mreq = socket.inet_aton(SSDP_MULTICAST_ADDR) + socket.inet_aton(self.bind_ip)
+        recv_sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        recv_sock.setblocking(False)
+        self._recv_transport, _ = await loop.create_datagram_endpoint(
+            lambda: _SSDPRecvProtocol(self),
+            sock=recv_sock,
         )
 
         # Send initial alive notifications
@@ -68,6 +85,9 @@ class SSDPAdvertiser:
             self._advertise_task.cancel()
             self._advertise_task = None
         await self._send_byebye()
+        if self._recv_transport:
+            self._recv_transport.close()
+            self._recv_transport = None
         if self._transport:
             self._transport.close()
             self._transport = None
@@ -169,12 +189,20 @@ class SSDPAdvertiser:
             f"SERVER: Music Assistant DLNA Receiver/1.0 UPnP/1.0\r\n"
             "\r\n"
         )
-        if self._transport and not self._transport.is_closing():
-            self._transport.sendto(response.encode("utf-8"), addr)
+        if self._recv_transport and not self._recv_transport.is_closing():
+            self._recv_transport.sendto(response.encode("utf-8"), addr)
             LOGGER.debug("Responded to M-SEARCH from %s for %s", addr, st)
 
 
-class _SSDPProtocol(asyncio.DatagramProtocol):
+class _SSDPSendProtocol(asyncio.DatagramProtocol):
+    """Asyncio UDP protocol for the SSDP sending socket (NOTIFY)."""
+
+    def error_received(self, exc: Exception) -> None:
+        """Handle transport errors."""
+        LOGGER.warning("SSDP send transport error: %s", exc)
+
+
+class _SSDPRecvProtocol(asyncio.DatagramProtocol):
     """Asyncio UDP protocol for receiving SSDP M-SEARCH requests."""
 
     def __init__(self, advertiser: SSDPAdvertiser) -> None:
@@ -186,4 +214,4 @@ class _SSDPProtocol(asyncio.DatagramProtocol):
 
     def error_received(self, exc: Exception) -> None:
         """Handle transport errors."""
-        LOGGER.warning("SSDP transport error: %s", exc)
+        LOGGER.warning("SSDP recv transport error: %s", exc)
