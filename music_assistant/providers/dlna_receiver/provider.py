@@ -381,10 +381,15 @@ class DLNAReceiverProvider(PluginProvider):
         if not metadata:
             return result
 
+        # SOAP bodies may contain XML-escaped DIDL-Lite content
+        from html import unescape
+
+        metadata = unescape(metadata)
+
         try:
             root = DefusedET.fromstring(metadata)
         except Exception:
-            LOGGER.debug("Failed to parse DIDL-Lite metadata")
+            LOGGER.info("Failed to parse DIDL-Lite metadata: %s", metadata[:300])
             return result
 
         ns = {
@@ -456,11 +461,7 @@ class DLNAReceiverProvider(PluginProvider):
 
         LOGGER.info("Starting playback on player %s", target)
         meta = inst.current_metadata or {}
-        LOGGER.info(
-            "DIDL metadata for %s: %s",
-            target,
-            meta,
-        )
+        LOGGER.info("DIDL metadata for %s: %s", target, meta)
         duration = self._parse_duration(meta.get("duration"))
 
         # Update plugin source metadata for MA UI display
@@ -494,14 +495,6 @@ class DLNAReceiverProvider(PluginProvider):
             source_id=self.instance_id,
         )
         await self.mass.players.play_media(target, media)
-        LOGGER.info(
-            "PluginSource state after play_media: id=%s, in_use_by=%s, "
-            "metadata.title=%s, instance_id=%s",
-            source.id,
-            source.in_use_by,
-            source.metadata.title if source.metadata else None,
-            self.instance_id,
-        )
 
     async def _on_pause(self, inst: RendererInstance) -> None:
         """Handle Pause for this instance's player."""
@@ -565,7 +558,7 @@ class DLNAReceiverProvider(PluginProvider):
         self._metadata_task = asyncio.create_task(self._metadata_update_loop())
 
     async def _metadata_update_loop(self) -> None:
-        """Periodically update elapsed time and detect external pause/resume."""
+        """Periodically update elapsed time and trigger UI refresh."""
         try:
             while True:
                 await asyncio.sleep(2)
@@ -584,37 +577,13 @@ class DLNAReceiverProvider(PluginProvider):
                     source.metadata.elapsed_time = self._elapsed_offset
                     source.metadata.elapsed_time_last_updated = now
 
-                # Detect external state changes (pause/resume from MA UI)
+                # Check if player still exists and source is still active
                 if self._active_player_id:
                     player = self.mass.players.get_player(self._active_player_id)
                     if not player:
                         LOGGER.info("Metadata loop: player %s gone", self._active_player_id)
                         self._clear_playback_state()
                         break
-                    active_src = getattr(player.state, "active_source", None)
-                    LOGGER.info(
-                        "Metadata loop: player=%s active_source=%s our_id=%s elapsed=%s",
-                        self._active_player_id,
-                        active_src,
-                        self.instance_id,
-                        source.metadata.elapsed_time if source.metadata else None,
-                    )
-                    if active_src and active_src != self.instance_id:
-                        LOGGER.info("Metadata loop: active_source mismatch, clearing")
-                        self._clear_playback_state()
-                        break
-                    ps = getattr(player.state, "playback_state", None)
-                    if ps:
-                        try:
-                            is_playing = ps.value == "playing"
-                        except AttributeError:
-                            is_playing = "playing" in str(ps).lower()
-                        if is_playing and not self._play_start_time:
-                            # Resumed externally — restart timer
-                            self._play_start_time = time.time()
-                        elif not is_playing and self._play_start_time:
-                            # Paused externally — freeze timer
-                            self._freeze_elapsed()
 
                 # Trigger player update so UI reflects metadata changes
                 if self._active_player_id:
