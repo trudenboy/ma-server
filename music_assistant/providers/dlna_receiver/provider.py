@@ -10,6 +10,7 @@ each with a unique UDN, HTTP port, and SSDP advertisement.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 import uuid
@@ -88,39 +89,51 @@ class DLNAReceiverProvider(PluginProvider):
 
     async def loaded_in_mass(self) -> None:
         """Initialize renderer instances when loaded in Music Assistant."""
-        friendly_prefix = str(
+        self._friendly_prefix = str(
             self.config.get_value(CONF_FRIENDLY_NAME) or DEFAULT_FRIENDLY_NAME,
         )
-        bind_ip = str(self.config.get_value(CONF_BIND_IP) or "") or self._detect_ip()
-        base_port = int(self.config.get_value(CONF_HTTP_PORT) or DEFAULT_HTTP_PORT)
+        self._bind_ip = str(self.config.get_value(CONF_BIND_IP) or "") or self._detect_ip()
+        self._base_port = int(self.config.get_value(CONF_HTTP_PORT) or DEFAULT_HTTP_PORT)
+
+        raw_target = str(self.config.get_value(CONF_TARGET_PLAYERS) or "").strip()
 
         player_specs = self._resolve_player_specs()
 
+        # When target_players=* but no players registered yet, retry after delay
+        if raw_target == "*" and not player_specs:
+            LOGGER.info("target_players=* but no players yet, waiting for registration...")
+            for attempt in range(6):
+                await asyncio.sleep(5)
+                player_specs = self._resolve_player_specs()
+                if player_specs:
+                    LOGGER.info("Found %d players on attempt %d", len(player_specs), attempt + 1)
+                    break
+
         if not player_specs:
-            # Fallback: single renderer with no fixed target (backward compat)
+            # Fallback: single renderer with no fixed target
             await self._create_instance(
                 player_id="",
                 player_name="",
-                friendly_prefix=friendly_prefix,
-                bind_ip=bind_ip,
-                http_port=base_port,
+                friendly_prefix=self._friendly_prefix,
+                bind_ip=self._bind_ip,
+                http_port=self._base_port,
             )
         else:
             for idx, (pid, pname) in enumerate(player_specs):
                 await self._create_instance(
                     player_id=pid,
                     player_name=pname,
-                    friendly_prefix=friendly_prefix,
-                    bind_ip=bind_ip,
-                    http_port=base_port + idx,
+                    friendly_prefix=self._friendly_prefix,
+                    bind_ip=self._bind_ip,
+                    http_port=self._base_port + idx,
                 )
 
         count = len(self._instances)
         LOGGER.info(
             "DLNA Receiver started: %d renderer(s) on %s (base port %s)",
             count,
-            bind_ip,
-            base_port,
+            self._bind_ip,
+            self._base_port,
         )
 
     async def unload(self, is_removed: bool = False) -> None:
@@ -230,7 +243,7 @@ class DLNAReceiverProvider(PluginProvider):
             players = self.mass.players.all
             return [(p.player_id, p.display_name or p.name or p.player_id) for p in players]
         except Exception:
-            LOGGER.warning("Could not enumerate MA players")
+            LOGGER.warning("Could not enumerate MA players", exc_info=True)
             return []
 
     def _get_player_name(self, player_id: str) -> str:
