@@ -13,6 +13,7 @@ on:
           - zvuk_music
           - msx_bridge
           - yandex_station
+          - dlna_receiver
       version:
         description: "Provider release version (e.g. 1.2.0)"
         required: true
@@ -40,7 +41,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Resolve domain and clone provider release
         env:
@@ -52,6 +52,7 @@ jobs:
             zvuk_music) PROVIDER_REPO="trudenboy/ma-provider-zvuk-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Zvuk Music" ;;
             msx_bridge) PROVIDER_REPO="trudenboy/ma-provider-msx-bridge"; PROVIDER_PATH="provider/"; DISPLAY_NAME="MSX Bridge" ;;
             yandex_station) PROVIDER_REPO="trudenboy/ma-provider-yandex-station"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Station" ;;
+            dlna_receiver) PROVIDER_REPO="trudenboy/ma-provider-dlna-receiver"; PROVIDER_PATH="provider/"; DISPLAY_NAME="DLNA Receiver" ;;
             *) echo "Unknown domain: ${{ inputs.domain }}"; exit 1 ;;
           esac
           echo "PROVIDER_REPO=$PROVIDER_REPO" >> $GITHUB_ENV
