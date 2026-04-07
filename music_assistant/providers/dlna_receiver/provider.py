@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from music_assistant_models.config_entries import ConfigValueType  # noqa: F401
-from music_assistant_models.enums import ContentType, ProviderFeature
-from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.enums import ProviderFeature
 
 from music_assistant.models import PluginProvider
+from music_assistant.models.player import PlayerMedia
 from music_assistant.models.plugin import PluginSource
 
 from .constants import (
@@ -324,18 +324,9 @@ class DLNAReceiverProvider(PluginProvider):
             LOGGER.warning("Play received but no stream URL for %s", target)
             return
 
-        audio_format = AudioFormat(content_type=ContentType.UNKNOWN)
-        inst.plugin_source = PluginSource(
-            id=f"dlna_receiver_{target}",
-            name=f"DLNA Receiver ({inst.player_name})",
-            audio_format=audio_format,
-        )
-
         LOGGER.info("Starting playback on player %s", target)
-        await self.mass.streams.play_plugin_source(
-            player_id=target,
-            plugin_source=inst.plugin_source,
-        )
+        media = PlayerMedia(uri=inst.current_stream_url)
+        await self.mass.players.play_media(target, media)
 
     async def _on_pause(self, inst: RendererInstance) -> None:
         """Handle Pause for this instance's player."""
