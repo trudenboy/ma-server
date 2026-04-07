@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING
 import defusedxml.ElementTree as DefusedET
 from music_assistant_models.config_entries import ConfigValueType  # noqa: F401
 from music_assistant_models.enums import MediaType, ProviderFeature
+from music_assistant_models.streamdetails import StreamMetadata
 
 from music_assistant.models import PluginProvider
 from music_assistant.models.player import PlayerMedia
@@ -79,6 +81,12 @@ class DLNAReceiverProvider(PluginProvider):
     ) -> None:
         super().__init__(mass, manifest, config, self.SUPPORTED_FEATURES)
         self._instances: dict[str, RendererInstance] = {}
+        self._plugin_source: PluginSource | None = None
+        # Playback state for elapsed time tracking
+        self._active_player_id: str | None = None
+        self._play_start_time: float | None = None
+        self._elapsed_offset: int = 0
+        self._metadata_task: asyncio.Task | None = None
 
     @property
     def supported_features(self) -> tuple[ProviderFeature, ...]:
@@ -104,12 +112,27 @@ class DLNAReceiverProvider(PluginProvider):
         # When target_players=* but no players registered yet, retry after delay
         if raw_target == "*" and not player_specs:
             LOGGER.info("target_players=* but no players yet, waiting for registration...")
-            for attempt in range(6):
+            for attempt in range(12):
                 await asyncio.sleep(5)
                 player_specs = self._resolve_player_specs()
                 if player_specs:
                     LOGGER.info("Found %d players on attempt %d", len(player_specs), attempt + 1)
                     break
+
+        # When target_players=*, wait a bit more for late-registering players
+        if raw_target == "*" and player_specs:
+            prev_count = len(player_specs)
+            for _ in range(4):
+                await asyncio.sleep(3)
+                player_specs = self._resolve_player_specs()
+                if len(player_specs) == prev_count:
+                    break
+                LOGGER.info(
+                    "Player count changed %d → %d, waiting for more...",
+                    prev_count,
+                    len(player_specs),
+                )
+                prev_count = len(player_specs)
 
         if not player_specs:
             # Fallback: single renderer with no fixed target
@@ -140,6 +163,8 @@ class DLNAReceiverProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Unload the provider — stop all renderer instances."""
+        if self._metadata_task and not self._metadata_task.done():
+            self._metadata_task.cancel()
         for inst in self._instances.values():
             await inst.ssdp.stop()
             await inst.renderer.stop()
@@ -241,10 +266,29 @@ class DLNAReceiverProvider(PluginProvider):
         return specs
 
     def _get_all_players(self) -> list[tuple[str, str]]:
-        """Get all MA players as (player_id, display_name) pairs."""
+        """Get all MA players as (player_id, display_name) pairs.
+
+        Includes unavailable players (they may come online later).
+        Filters out protocol players and our own DLNA Receiver renderers.
+        """
         try:
-            players = self.mass.players.all_players(return_unavailable=False)
-            return [(p.player_id, p.display_name or p.name or p.player_id) for p in players]
+            players = self.mass.players.all_players(
+                return_unavailable=True,
+                return_protocol_players=False,
+            )
+            own_player_ids = {inst.player_id for inst in self._instances.values()}
+            result = []
+            for p in players:
+                # Skip our own renderer players (avoid recursion)
+                if p.player_id in own_player_ids:
+                    continue
+                if p.player_id.startswith("up") and any(
+                    p.player_id.endswith(inst.renderer.udn.replace("uuid:", "").replace("-", ""))
+                    for inst in self._instances.values()
+                ):
+                    continue
+                result.append((p.player_id, p.display_name or p.name or p.player_id))
+            return result
         except Exception:
             LOGGER.warning("Could not enumerate MA players", exc_info=True)
             return []
@@ -264,12 +308,19 @@ class DLNAReceiverProvider(PluginProvider):
     # ------------------------------------------------------------------
 
     def get_source(self) -> PluginSource:
-        """Return the plugin source descriptor for this DLNA receiver."""
-        return PluginSource(
-            id=self.instance_id,
-            name=self.name or "DLNA Receiver",
-            passive=True,
-        )
+        """Return the plugin source descriptor for this DLNA receiver.
+
+        Returns a persistent instance so metadata updates are visible
+        to the MA controller between calls.
+        """
+        if self._plugin_source is None:
+            self._plugin_source = PluginSource(
+                id=self.instance_id,
+                name=self.name or "DLNA Receiver",
+                passive=True,
+                can_play_pause=True,
+            )
+        return self._plugin_source
 
     async def get_audio_stream(
         self,
@@ -391,6 +442,26 @@ class DLNAReceiverProvider(PluginProvider):
         LOGGER.info("Starting playback on player %s", target)
         meta = inst.current_metadata or {}
         duration = self._parse_duration(meta.get("duration"))
+
+        # Update plugin source metadata for MA UI display
+        source = self.get_source()
+        source.metadata = StreamMetadata(
+            title=meta.get("title") or "DLNA Stream",
+            artist=meta.get("artist"),
+            album=meta.get("album"),
+            image_url=meta.get("image_url"),
+            duration=duration,
+            uri=inst.current_stream_url,
+            elapsed_time=0,
+            elapsed_time_last_updated=time.time(),
+        )
+
+        # Track playback state for elapsed time
+        self._active_player_id = target
+        self._play_start_time = time.time()
+        self._elapsed_offset = 0
+        self._ensure_metadata_task()
+
         media = PlayerMedia(
             uri=inst.current_stream_url,
             media_type=MediaType.FLOW_STREAM,
@@ -406,6 +477,7 @@ class DLNAReceiverProvider(PluginProvider):
     async def _on_pause(self, inst: RendererInstance) -> None:
         """Handle Pause for this instance's player."""
         if inst.player_id:
+            self._freeze_elapsed()
             await self.mass.players.cmd_pause(inst.player_id)
 
     async def _on_stop(self, inst: RendererInstance) -> None:
@@ -413,6 +485,7 @@ class DLNAReceiverProvider(PluginProvider):
         if inst.player_id:
             await self.mass.players.cmd_stop(inst.player_id)
         inst.current_stream_url = None
+        self._clear_playback_state()
 
     async def _on_seek(self, inst: RendererInstance, unit: str, target: str) -> None:
         """Handle Seek for this instance's player."""
@@ -434,6 +507,83 @@ class DLNAReceiverProvider(PluginProvider):
         """Handle mute change for this instance's player."""
         if inst.player_id:
             await self.mass.players.cmd_volume_mute(inst.player_id, mute)
+
+    # ------------------------------------------------------------------
+    # Playback state & metadata helpers
+    # ------------------------------------------------------------------
+
+    def _freeze_elapsed(self) -> None:
+        """Freeze elapsed time at the current playback position."""
+        if self._play_start_time:
+            self._elapsed_offset += int(time.time() - self._play_start_time)
+            self._play_start_time = None
+
+    def _clear_playback_state(self) -> None:
+        """Clear all playback state and metadata."""
+        self._play_start_time = None
+        self._elapsed_offset = 0
+        self._active_player_id = None
+        if self._plugin_source:
+            self._plugin_source.metadata = None
+        if self._metadata_task and not self._metadata_task.done():
+            self._metadata_task.cancel()
+
+    def _ensure_metadata_task(self) -> None:
+        """Start the metadata update loop if not already running."""
+        if self._metadata_task and not self._metadata_task.done():
+            return
+        self._metadata_task = asyncio.create_task(self._metadata_update_loop())
+
+    async def _metadata_update_loop(self) -> None:
+        """Periodically update elapsed time and detect external pause/resume."""
+        try:
+            while True:
+                await asyncio.sleep(2)
+                source = self._plugin_source
+                if not source or not source.metadata:
+                    break
+
+                now = time.time()
+
+                if self._play_start_time:
+                    elapsed = self._elapsed_offset + int(now - self._play_start_time)
+                    source.metadata.elapsed_time = elapsed
+                    source.metadata.elapsed_time_last_updated = now
+                else:
+                    # Paused — keep last_updated fresh to freeze UI display
+                    source.metadata.elapsed_time = self._elapsed_offset
+                    source.metadata.elapsed_time_last_updated = now
+
+                # Detect external state changes (pause/resume from MA UI)
+                if self._active_player_id:
+                    player = self.mass.players.get_player(self._active_player_id)
+                    if not player:
+                        self._clear_playback_state()
+                        break
+                    active_src = getattr(player.state, "active_source", None)
+                    if active_src != self.instance_id:
+                        self._clear_playback_state()
+                        break
+                    ps = getattr(player.state, "playback_state", None)
+                    if ps:
+                        try:
+                            is_playing = ps.value == "playing"
+                        except AttributeError:
+                            is_playing = "playing" in str(ps).lower()
+                        if is_playing and not self._play_start_time:
+                            # Resumed externally — restart timer
+                            self._play_start_time = time.time()
+                        elif not is_playing and self._play_start_time:
+                            # Paused externally — freeze timer
+                            self._freeze_elapsed()
+
+                # Trigger player update so UI reflects metadata changes
+                if self._active_player_id:
+                    self.mass.players.trigger_player_update(self._active_player_id)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            LOGGER.debug("Metadata update loop error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers
