@@ -465,6 +465,7 @@ class DLNAReceiverProvider(PluginProvider):
 
         # Update plugin source metadata for MA UI display
         source = self.get_source()
+        source.in_use_by = target
         source.metadata = StreamMetadata(
             title=meta.get("title") or "DLNA Stream",
             artist=meta.get("artist"),
@@ -553,6 +554,7 @@ class DLNAReceiverProvider(PluginProvider):
         self._active_player_id = None
         if self._plugin_source:
             self._plugin_source.metadata = None
+            self._plugin_source.in_use_by = None
         if self._metadata_task and not self._metadata_task.done():
             self._metadata_task.cancel()
 
