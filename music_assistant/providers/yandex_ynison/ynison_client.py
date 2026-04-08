@@ -1,0 +1,480 @@
+"""Ynison WebSocket client for Yandex Music device synchronization."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+import string
+import uuid
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+import aiohttp
+from music_assistant_models.errors import LoginFailed
+
+from .constants import (
+    DEFAULT_APP_NAME,
+    DEFAULT_APP_VERSION,
+    DEVICE_TYPE_WEB,
+    MAX_RECONNECT_ATTEMPTS,
+    RECONNECT_DELAYS,
+    WS_CONNECT_TIMEOUT,
+    YNISON_ORIGIN,
+    YNISON_REDIRECT_URL,
+    YNISON_STATE_PATH,
+)
+
+
+@dataclass
+class YnisonDeviceInfo:
+    """Device identification for Ynison registration."""
+
+    device_id: str
+    title: str
+    type: str = DEVICE_TYPE_WEB
+    app_name: str = DEFAULT_APP_NAME
+    app_version: str = DEFAULT_APP_VERSION
+
+
+@dataclass
+class YnisonState:
+    """Parsed Ynison state from the server."""
+
+    player_state: dict[str, Any] = field(default_factory=dict)
+    active_device_id: str | None = None
+    devices: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def current_track_id(self) -> str | None:
+        """Extract current track_id from player queue."""
+        queue = self.player_state.get("player_queue", {})
+        playable_list = queue.get("playable_list", [])
+        index = queue.get("current_playable_index", 0)
+        if playable_list and 0 <= index < len(playable_list):
+            return str(playable_list[index].get("playable_id"))
+        return None
+
+    @property
+    def is_paused(self) -> bool:
+        """Return True if playback is paused."""
+        return bool(self.player_state.get("status", {}).get("paused", True))
+
+    @property
+    def progress_ms(self) -> int:
+        """Return current playback progress in milliseconds."""
+        return int(self.player_state.get("status", {}).get("progress_ms", 0))
+
+    @property
+    def duration_ms(self) -> int:
+        """Return current track duration in milliseconds."""
+        return int(self.player_state.get("status", {}).get("duration_ms", 0))
+
+
+# Type alias for the state update callback
+StateUpdateCallback = Callable[[YnisonState], Awaitable[None]]
+DisconnectCallback = Callable[[], Awaitable[None]]
+
+
+class YnisonClient:
+    """WebSocket client for the Yandex Ynison protocol.
+
+    Manages the two-step connection (redirector → state service) and
+    provides methods to send state updates back to Ynison.
+    """
+
+    def __init__(
+        self,
+        token: str,
+        device_info: YnisonDeviceInfo,
+        on_state_update: StateUpdateCallback,
+        on_disconnect: DisconnectCallback,
+        logger: logging.Logger,
+        http_session: aiohttp.ClientSession | None = None,
+    ) -> None:
+        """Initialize Ynison client.
+
+        :param token: Yandex Music OAuth token.
+        :param device_info: Device identification for Ynison.
+        :param on_state_update: Callback for state updates from Ynison.
+        :param on_disconnect: Callback when connection is permanently lost.
+        :param logger: Logger instance.
+        :param http_session: Optional shared aiohttp session.
+        """
+        self._token = token
+        self._device_info = device_info
+        self._on_state_update = on_state_update
+        self._on_disconnect = on_disconnect
+        self._logger = logger
+        self._external_session = http_session
+
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._session: aiohttp.ClientSession | None = None
+        self._send_lock = asyncio.Lock()
+        self._message_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._stop_event = asyncio.Event()
+        self._connected = False
+
+        # Latest state from server
+        self.state = YnisonState()
+
+    @property
+    def connected(self) -> bool:
+        """Return True if connected to Ynison state service."""
+        return self._connected
+
+    async def connect(self) -> None:
+        """Connect to Ynison (redirector → state service).
+
+        Raises on auth failure; auto-reconnects on transient errors.
+        """
+        self._stop_event.clear()
+        self._session = self._external_session or aiohttp.ClientSession()
+
+        # Step 1: Get redirect ticket
+        host, ticket, session_id = await self._get_redirect_ticket()
+
+        # Step 2: Connect to state service
+        await self._connect_state(host, ticket, session_id)
+
+    async def disconnect(self) -> None:
+        """Gracefully disconnect from Ynison."""
+        self._stop_event.set()
+        self._connected = False
+
+        if self._message_task and not self._message_task.done():
+            self._message_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._message_task
+
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._reconnect_task
+
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        self._ws = None
+
+        if self._session and not self._external_session:
+            await self._session.close()
+        self._session = None
+
+    # ------------------------------------------------------------------
+    # Send methods
+    # ------------------------------------------------------------------
+
+    async def update_playing_status(self, progress_ms: int, duration_ms: int, paused: bool) -> None:
+        """Send playback status update to Ynison."""
+        msg = {
+            "update_playing_status": {
+                "playing_status": {
+                    "progress_ms": progress_ms,
+                    "duration_ms": duration_ms,
+                    "paused": paused,
+                    "playback_speed": 1.0,
+                },
+            },
+        }
+        await self._send(msg)
+
+    async def update_volume(self, volume: float) -> None:
+        """Send volume update to Ynison (0.0 - 1.0)."""
+        msg = {
+            "update_volume_info": {
+                "volume_info": {
+                    "volume": max(0.0, min(1.0, volume)),
+                },
+            },
+        }
+        await self._send(msg)
+
+    async def update_active_device(self, device_id: str) -> None:
+        """Request playback transfer to this device."""
+        msg = {
+            "update_active_device": {
+                "device_id_optional": device_id,
+            },
+        }
+        await self._send(msg)
+
+    async def send_full_state(
+        self,
+        player_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Send full state update (used for queue changes, track skip)."""
+        state = player_state or self._build_initial_state()
+        msg = {
+            "update_full_state": {
+                "player_state": state,
+                "device": self._build_device_dict(),
+                "is_currently_active": False,
+            },
+            "rid": str(uuid.uuid4()),
+            "player_action_timestamp_ms": 0,
+            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+        }
+        self._logger.debug("Sending full state: %s", json.dumps(msg)[:500])
+        await self._send(msg)
+
+    # ------------------------------------------------------------------
+    # Connection internals
+    # ------------------------------------------------------------------
+
+    def _build_ws_protocol_header(
+        self,
+        redirect_ticket: str | None = None,
+        session_id: int | None = None,
+    ) -> str:
+        """Build Sec-WebSocket-Protocol header value."""
+        proto: dict[str, Any] = {
+            "Ynison-Device-Id": self._device_info.device_id,
+            "Ynison-Device-Info": json.dumps({"app_name": self._device_info.app_name, "type": 1}),
+        }
+        if redirect_ticket is not None:
+            proto["Ynison-Redirect-Ticket"] = redirect_ticket
+        if session_id is not None:
+            proto["Ynison-Session-Id"] = str(session_id)
+        return f"Bearer, v2, {json.dumps(proto)}"
+
+    def _build_headers(
+        self,
+        redirect_ticket: str | None = None,
+        session_id: int | None = None,
+    ) -> dict[str, str]:
+        """Build common WebSocket headers."""
+        return {
+            "Authorization": f"OAuth {self._token}",
+            "Origin": YNISON_ORIGIN,
+            "Sec-WebSocket-Protocol": self._build_ws_protocol_header(redirect_ticket, session_id),
+        }
+
+    def _build_device_dict(self) -> dict[str, Any]:
+        """Build device info dict for Ynison messages."""
+        info = asdict(self._device_info)
+        return {
+            "info": info,
+            "capabilities": {
+                "can_be_player": True,
+                "can_be_remote_controller": False,
+                "volume_granularity": 16,
+            },
+            "volume_info": {"volume": 0},
+            "is_shadow": False,
+        }
+
+    def _build_initial_state(self) -> dict[str, Any]:
+        """Build initial player state (paused, empty queue)."""
+        device_id = self._device_info.device_id
+        return {
+            "status": {
+                "paused": True,
+                "duration_ms": 0,
+                "progress_ms": 0,
+                "playback_speed": 1,
+                "version": {
+                    "device_id": device_id,
+                    "version": int(uuid.uuid4().int % (10**18)),
+                    "timestamp_ms": 0,
+                },
+            },
+            "player_queue": {
+                "current_playable_index": -1,
+                "entity_id": "",
+                "entity_type": "VARIOUS",
+                "playable_list": [],
+                "options": {"repeat_mode": "NONE"},
+                "entity_context": "BASED_ON_ENTITY_BY_DEFAULT",
+                "version": {
+                    "device_id": device_id,
+                    "version": int(uuid.uuid4().int % (10**18)),
+                    "timestamp_ms": 0,
+                },
+                "from_optional": "",
+            },
+        }
+
+    async def _get_redirect_ticket(self) -> tuple[str, str, int]:
+        """Connect to redirector and obtain redirect ticket.
+
+        :return: (host, redirect_ticket, session_id)
+        :raises LoginFailed: If authentication fails.
+        """
+        assert self._session is not None
+        headers = self._build_headers()
+
+        ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
+        try:
+            ws = await self._session.ws_connect(
+                YNISON_REDIRECT_URL,
+                headers=headers,
+                timeout=ws_timeout,
+            )
+        except aiohttp.WSServerHandshakeError as err:
+            if err.status in (401, 403):
+                raise LoginFailed("Ynison authentication failed — invalid token") from err
+            raise
+
+        try:
+            msg = await ws.receive(timeout=WS_CONNECT_TIMEOUT)
+            if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                data = json.loads(msg.data)
+            else:
+                raise ConnectionError(f"Unexpected message type from redirector: {msg.type}")
+        finally:
+            await ws.close()
+
+        host = data.get("host", "")
+        ticket = data.get("redirect_ticket", "")
+        session_id = int(data.get("session_id", 0))
+
+        if not host or not ticket:
+            raise ConnectionError("Redirector response missing host or ticket")
+
+        self._logger.debug("Ynison redirect: host=%s, session_id=%d", host, session_id)
+        return host, ticket, session_id
+
+    async def _connect_state(self, host: str, ticket: str, session_id: int) -> None:
+        """Connect to Ynison state service and start message loop."""
+        assert self._session is not None
+        url = f"wss://{host}{YNISON_STATE_PATH}"
+        headers = self._build_headers(redirect_ticket=ticket, session_id=session_id)
+
+        ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
+        self._ws = await self._session.ws_connect(url, headers=headers, timeout=ws_timeout)
+        self._connected = True
+        self._logger.info("Connected to Ynison state service at %s", host)
+
+        # Send initial state
+        await self.send_full_state()
+
+        # Start message loop
+        self._message_task = asyncio.ensure_future(self._message_loop())
+
+    async def _message_loop(self) -> None:
+        """Read messages from state service and dispatch callbacks."""
+        assert self._ws is not None
+        try:
+            async for msg in self._ws:
+                if self._stop_event.is_set():
+                    break
+
+                self._logger.debug(
+                    "Ynison msg type=%s, data=%s",
+                    msg.type,
+                    (msg.data[:500] if msg.data else "<empty>")
+                    if msg.type != aiohttp.WSMsgType.ERROR
+                    else str(self._ws.exception()),
+                )
+
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                        self._parse_state(data)
+                        await self._on_state_update(self.state)
+                    except (json.JSONDecodeError, KeyError):
+                        self._logger.warning(
+                            "Failed to parse Ynison message: %s",
+                            msg.data[:200] if msg.data else "<empty>",
+                        )
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    self._logger.debug(
+                        "Ynison binary message (%d bytes)", len(msg.data) if msg.data else 0
+                    )
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    self._logger.warning("Ynison WebSocket error: %s", self._ws.exception())
+                    break
+                elif msg.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                ):
+                    self._logger.debug(
+                        "Ynison WS close: type=%s, close_code=%s, extra=%s",
+                        msg.type,
+                        self._ws.close_code,
+                        msg.extra,
+                    )
+                    break
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            self._logger.exception("Unexpected error in Ynison message loop")
+        self._logger.debug("Ynison message loop exited")
+
+        self._connected = False
+
+        if not self._stop_event.is_set():
+            self._logger.warning("Ynison connection lost, scheduling reconnect")
+            self._reconnect_task = asyncio.ensure_future(self._reconnect())
+
+    def _parse_state(self, data: dict[str, Any]) -> None:
+        """Parse PutYnisonStateResponse into YnisonState."""
+        self.state.player_state = data.get("player_state", self.state.player_state)
+        self.state.active_device_id = data.get(
+            "active_device_id_optional", self.state.active_device_id
+        )
+        self.state.devices = data.get("devices", self.state.devices)
+
+    async def _reconnect(self) -> None:
+        """Reconnect with exponential backoff."""
+        for attempt in range(MAX_RECONNECT_ATTEMPTS):
+            if self._stop_event.is_set():
+                return
+
+            delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
+            self._logger.info(
+                "Ynison reconnect attempt %d/%d in %.0fs",
+                attempt + 1,
+                MAX_RECONNECT_ATTEMPTS,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+            if self._stop_event.is_set():
+                return
+
+            try:
+                # Close stale WebSocket
+                if self._ws and not self._ws.closed:
+                    await self._ws.close()
+                self._ws = None
+
+                # Re-create session if needed
+                if self._session is None or self._session.closed:
+                    self._session = aiohttp.ClientSession()
+
+                host, ticket, session_id = await self._get_redirect_ticket()
+                await self._connect_state(host, ticket, session_id)
+                self._logger.info("Ynison reconnected successfully")
+                return
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                self._logger.warning(
+                    "Ynison reconnect attempt %d failed", attempt + 1, exc_info=True
+                )
+
+        self._logger.error("Ynison: all %d reconnect attempts failed", MAX_RECONNECT_ATTEMPTS)
+        await self._on_disconnect()
+
+    async def _send(self, msg: dict[str, Any]) -> None:
+        """Send a JSON message to the state service (thread-safe)."""
+        async with self._send_lock:
+            if self._ws is None or self._ws.closed:
+                self._logger.debug("Cannot send to Ynison — not connected")
+                return
+            try:
+                await self._ws.send_str(json.dumps(msg))
+            except (ConnectionError, aiohttp.ClientError):
+                self._logger.warning("Failed to send message to Ynison")
+
+
+def generate_device_id() -> str:
+    """Generate a 16-character alphanumeric device ID for Ynison registration."""
+    chars = string.ascii_lowercase + string.digits
+    return "".join(random.choice(chars) for _ in range(16))
