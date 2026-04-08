@@ -158,21 +158,21 @@ class TestPlayerSelection:
         player2.display_name = "Player 2"
         player2.state.playback_state = PlaybackState.PLAYING
 
-        provider.mass.players.all_players.return_value = [player1, player2]
+        provider.mass.players.all_players.return_value = [player1, player2]  # type: ignore[attr-defined]
 
         assert provider._get_target_player_id() == "player2"
 
     def test_specific_player_exists(self) -> None:
         """Returns configured player when it exists."""
         provider = _make_provider("my-player")
-        provider.mass.players.get_player.return_value = MagicMock()
+        provider.mass.players.get_player.return_value = MagicMock()  # type: ignore[attr-defined]
 
         assert provider._get_target_player_id() == "my-player"
 
     def test_specific_player_missing(self) -> None:
         """Returns None when configured player no longer exists."""
         provider = _make_provider("gone-player")
-        provider.mass.players.get_player.return_value = None
+        provider.mass.players.get_player.return_value = None  # type: ignore[attr-defined]
 
         assert provider._get_target_player_id() is None
 
@@ -180,7 +180,7 @@ class TestPlayerSelection:
         """Active player takes priority over auto selection."""
         provider = _make_provider()
         provider._active_player_id = "active-one"
-        provider.mass.players.get_player.return_value = MagicMock()
+        provider.mass.players.get_player.return_value = MagicMock()  # type: ignore[attr-defined]
 
         assert provider._get_target_player_id() == "active-one"
 
@@ -237,7 +237,7 @@ class TestClearActivePlayer:
         provider._clear_active_player()
 
         assert provider._active_player_id is None
-        assert provider._source_details.in_use_by is None
+        assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
         provider.mass.players.trigger_player_update.assert_called_with("some-player")
 
 
@@ -256,7 +256,7 @@ class TestProviderMatching:
         mock_ym = MagicMock()
         mock_ym.domain = "yandex_music"
         mock_ym.type = ProviderType.MUSIC
-        provider.mass.get_providers.return_value = [mock_ym]
+        provider.mass.get_providers.return_value = [mock_ym]  # type: ignore[attr-defined]
 
         await provider._check_yandex_provider_match()
 
@@ -268,7 +268,7 @@ class TestProviderMatching:
         """No linked provider disables playback control."""
         provider = _make_provider()
 
-        provider.mass.get_providers.return_value = []
+        provider.mass.get_providers.return_value = []  # type: ignore[attr-defined]
         await provider._check_yandex_provider_match()
 
         assert provider._yandex_provider is None
@@ -291,8 +291,8 @@ class TestYnisonStateHandling:
         player = MagicMock()
         player.player_id = "player1"
         player.display_name = "Player 1"
-        provider.mass.players.all_players.return_value = [player]
-        provider.mass.players.get_player.return_value = player
+        provider.mass.players.all_players.return_value = [player]  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
 
         state = YnisonState(
             active_device_id=provider._device_id,
@@ -320,4 +320,4 @@ class TestYnisonStateHandling:
         await provider._handle_ynison_state(state)
 
         assert provider._active_player_id is None
-        assert provider._source_details.in_use_by is None
+        assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
