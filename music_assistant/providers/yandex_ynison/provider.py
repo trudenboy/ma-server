@@ -188,6 +188,10 @@ class YandexYnisonProvider(PluginProvider):
                 self.logger.warning(
                     "No linked Yandex Music provider — cannot stream track %s", track_id
                 )
+                self._current_streaming_track_id = None
+                self._stream_stop_event.set()
+                if self._source_details.in_use_by == player_id:
+                    self._source_details.in_use_by = None
                 return
 
             # Stream the current track

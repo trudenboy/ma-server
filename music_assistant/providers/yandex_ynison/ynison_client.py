@@ -55,7 +55,9 @@ class YnisonState:
         playable_list = queue.get("playable_list", [])
         index = queue.get("current_playable_index", 0)
         if playable_list and 0 <= index < len(playable_list):
-            return str(playable_list[index].get("playable_id"))
+            playable_id = playable_list[index].get("playable_id")
+            if playable_id:
+                return str(playable_id)
         return None
 
     @property
@@ -363,12 +365,21 @@ class YnisonClient:
                 if self._stop_event.is_set():
                     break
 
+                if msg.type == aiohttp.WSMsgType.ERROR:
+                    msg_data_preview = str(self._ws.exception())
+                elif not msg.data:
+                    msg_data_preview = "<empty>"
+                elif isinstance(msg.data, str):
+                    msg_data_preview = msg.data[:500]
+                elif isinstance(msg.data, bytes):
+                    msg_data_preview = msg.data[:500].decode(errors="replace")
+                else:
+                    msg_data_preview = str(msg.data)
+
                 self._logger.debug(
                     "Ynison msg type=%s, data=%s",
                     msg.type,
-                    (msg.data[:500] if msg.data else "<empty>")
-                    if msg.type != aiohttp.WSMsgType.ERROR
-                    else str(self._ws.exception()),
+                    msg_data_preview,
                 )
 
                 if msg.type == aiohttp.WSMsgType.TEXT:
