@@ -6,6 +6,14 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from music_assistant_models.enums import (
+    ContentType,
+    PlaybackState,
+    ProviderFeature,
+    ProviderType,
+    StreamType,
+)
+
 from provider.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -16,6 +24,7 @@ from provider.constants import (
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
 )
+from provider.provider import YandexYnisonProvider
 from provider.ynison_client import YnisonState
 
 
@@ -70,6 +79,14 @@ def _make_mock_manifest() -> MagicMock:
     return manifest
 
 
+def _make_provider(player_id: str = PLAYER_ID_AUTO) -> YandexYnisonProvider:
+    """Create a YandexYnisonProvider with mock dependencies."""
+    mass = _make_mock_mass()
+    config = _make_mock_config({CONF_PLAYER: player_id})
+    manifest = _make_mock_manifest()
+    return YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+
+
 # ------------------------------------------------------------------
 # Provider init
 # ------------------------------------------------------------------
@@ -80,15 +97,7 @@ class TestProviderInit:
 
     def test_source_details(self) -> None:
         """PluginSource should be configured correctly."""
-        from music_assistant_models.enums import ContentType, ProviderFeature, StreamType
-
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config()
-        manifest = _make_mock_manifest()
-
-        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        provider = _make_provider()
 
         source = provider.get_source()
         assert source.stream_type == StreamType.CUSTOM
@@ -101,10 +110,6 @@ class TestProviderInit:
 
     def test_device_id_persisted(self) -> None:
         """When no device_id in config, should generate and persist."""
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
         mass = _make_mock_mass()
         config = _make_mock_config({CONF_DEVICE_ID: None})
         manifest = _make_mock_manifest()
@@ -117,10 +122,6 @@ class TestProviderInit:
 
     def test_existing_device_id_used(self) -> None:
         """When device_id exists in config, should use it."""
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
         mass = _make_mock_mass()
         config = _make_mock_config({CONF_DEVICE_ID: "existing-uuid"})
         manifest = _make_mock_manifest()
@@ -138,24 +139,14 @@ class TestProviderInit:
 class TestPlayerSelection:
     """Tests for _get_target_player_id."""
 
-    def _make_provider(self, player_id: str = PLAYER_ID_AUTO) -> Any:
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config({CONF_PLAYER: player_id})
-        manifest = _make_mock_manifest()
-        return YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
-
     def test_auto_no_players(self) -> None:
-        provider = self._make_provider()
+        """Auto mode returns None when no players available."""
+        provider = _make_provider()
         assert provider._get_target_player_id() is None
 
     def test_auto_with_playing_player(self) -> None:
-        from music_assistant_models.enums import PlaybackState
-
-        provider = self._make_provider()
+        """Auto mode selects the currently playing player."""
+        provider = _make_provider()
 
         player1 = MagicMock()
         player1.player_id = "player1"
@@ -172,19 +163,22 @@ class TestPlayerSelection:
         assert provider._get_target_player_id() == "player2"
 
     def test_specific_player_exists(self) -> None:
-        provider = self._make_provider("my-player")
+        """Returns configured player when it exists."""
+        provider = _make_provider("my-player")
         provider.mass.players.get_player.return_value = MagicMock()
 
         assert provider._get_target_player_id() == "my-player"
 
     def test_specific_player_missing(self) -> None:
-        provider = self._make_provider("gone-player")
+        """Returns None when configured player no longer exists."""
+        provider = _make_provider("gone-player")
         provider.mass.players.get_player.return_value = None
 
         assert provider._get_target_player_id() is None
 
     def test_active_player_takes_priority(self) -> None:
-        provider = self._make_provider()
+        """Active player takes priority over auto selection."""
+        provider = _make_provider()
         provider._active_player_id = "active-one"
         provider.mass.players.get_player.return_value = MagicMock()
 
@@ -200,24 +194,15 @@ class TestSourceSelection:
     """Tests for _on_source_selected."""
 
     async def test_on_source_selected_sets_active(self) -> None:
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config()
-        manifest = _make_mock_manifest()
-        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        """Selecting source sets the active player."""
+        provider = _make_provider()
 
         provider._source_details.in_use_by = "new-player"
         await provider._on_source_selected()
         assert provider._active_player_id == "new-player"
 
     async def test_on_source_selected_switching_disabled(self) -> None:
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
+        """Rejects source selection when player switching is disabled."""
         mass = _make_mock_mass()
         config = _make_mock_config({CONF_ALLOW_PLAYER_SWITCH: False})
         manifest = _make_mock_manifest()
@@ -243,14 +228,8 @@ class TestClearActivePlayer:
     """Tests for _clear_active_player."""
 
     def test_clears_state(self) -> None:
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config()
-        manifest = _make_mock_manifest()
-        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        """Clearing active player resets state and triggers update."""
+        provider = _make_provider()
 
         provider._active_player_id = "some-player"
         provider._source_details.in_use_by = "some-player"
@@ -259,7 +238,7 @@ class TestClearActivePlayer:
 
         assert provider._active_player_id is None
         assert provider._source_details.in_use_by is None
-        mass.players.trigger_player_update.assert_called_with("some-player")
+        provider.mass.players.trigger_player_update.assert_called_with("some-player")
 
 
 # ------------------------------------------------------------------
@@ -271,19 +250,13 @@ class TestProviderMatching:
     """Tests for _check_yandex_provider_match."""
 
     async def test_finds_yandex_music_provider(self) -> None:
-        from music_assistant_models.enums import ProviderFeature, ProviderType
-
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config()
-        manifest = _make_mock_manifest()
-        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        """Links to Yandex Music provider and enables playback control."""
+        provider = _make_provider()
 
         mock_ym = MagicMock()
         mock_ym.domain = "yandex_music"
         mock_ym.type = ProviderType.MUSIC
-        mass.get_providers.return_value = [mock_ym]
+        provider.mass.get_providers.return_value = [mock_ym]
 
         await provider._check_yandex_provider_match()
 
@@ -292,16 +265,10 @@ class TestProviderMatching:
         assert provider._source_details.on_play is not None
 
     async def test_no_matching_provider(self) -> None:
-        from music_assistant_models.enums import ProviderFeature
+        """No linked provider disables playback control."""
+        provider = _make_provider()
 
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config()
-        manifest = _make_mock_manifest()
-        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
-
-        mass.get_providers.return_value = []
+        provider.mass.get_providers.return_value = []
         await provider._check_yandex_provider_match()
 
         assert provider._yandex_provider is None
@@ -317,21 +284,15 @@ class TestYnisonStateHandling:
     """Tests for _handle_ynison_state."""
 
     async def test_activates_on_our_device(self) -> None:
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config()
-        manifest = _make_mock_manifest()
-        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        """Activates playback when Ynison reports our device as active."""
+        provider = _make_provider()
 
         # Setup a target player
         player = MagicMock()
         player.player_id = "player1"
         player.display_name = "Player 1"
-        mass.players.all_players.return_value = [player]
-        mass.players.get_player.return_value = player
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
 
         state = YnisonState(
             active_device_id=provider._device_id,
@@ -349,14 +310,8 @@ class TestYnisonStateHandling:
         assert provider._source_details.in_use_by == "player1"
 
     async def test_clears_on_device_switch(self) -> None:
-        from music_assistant_models.enums import ProviderFeature
-
-        from provider.provider import YandexYnisonProvider
-
-        mass = _make_mock_mass()
-        config = _make_mock_config()
-        manifest = _make_mock_manifest()
-        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        """Clears active player when device switches away."""
+        provider = _make_provider()
 
         provider._active_player_id = "player1"
         provider._source_details.in_use_by = "player1"
