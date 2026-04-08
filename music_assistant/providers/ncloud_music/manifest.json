@@ -1,0 +1,12 @@
+{
+  "type": "music",
+  "domain": "ncloud_music",
+  "stage": "alpha",
+  "name": "NetEase Cloud Music",
+  "description": "Stream music, personalized recommendations, and playlists from NetEase Cloud Music (网易云音乐).",
+  "codeowners": ["@TrudenBoy"],
+  "credits": ["[NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi)"],
+  "documentation": "https://music-assistant.io/music-providers/ncloud-music/",
+  "requirements": [],
+  "multi_instance": true
+}
