@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from provider.constants import (
+from music_assistant.providers.yandex_ynison.constants import (
     DEFAULT_APP_NAME,
     DEVICE_TYPE_WEB,
     YNISON_ORIGIN,
 )
-from provider.ynison_client import (
+from music_assistant.providers.yandex_ynison.ynison_client import (
     YnisonClient,
     YnisonDeviceInfo,
     YnisonState,

@@ -14,7 +14,7 @@ from music_assistant_models.enums import (
     StreamType,
 )
 
-from provider.constants import (
+from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
@@ -24,8 +24,8 @@ from provider.constants import (
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
 )
-from provider.provider import YandexYnisonProvider
-from provider.ynison_client import YnisonState
+from music_assistant.providers.yandex_ynison.provider import YandexYnisonProvider
+from music_assistant.providers.yandex_ynison.ynison_client import YnisonState
 
 
 def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
