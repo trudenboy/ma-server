@@ -13,6 +13,8 @@ on:
           - zvuk_music
           - msx_bridge
           - yandex_station
+          - yandex_smarthome
+          - yandex_ynison
           - dlna_receiver
       version:
         description: "Provider release version (e.g. 1.2.0)"
@@ -52,6 +54,8 @@ jobs:
             zvuk_music) PROVIDER_REPO="trudenboy/ma-provider-zvuk-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Zvuk Music" ;;
             msx_bridge) PROVIDER_REPO="trudenboy/ma-provider-msx-bridge"; PROVIDER_PATH="provider/"; DISPLAY_NAME="MSX Bridge" ;;
             yandex_station) PROVIDER_REPO="trudenboy/ma-provider-yandex-station"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Station" ;;
+            yandex_smarthome) PROVIDER_REPO="trudenboy/ma-provider-yandex-smarthome"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Smart Home" ;;
+            yandex_ynison) PROVIDER_REPO="trudenboy/ma-provider-yandex-ynison"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music Connect (Ynison)" ;;
             dlna_receiver) PROVIDER_REPO="trudenboy/ma-provider-dlna-receiver"; PROVIDER_PATH="provider/"; DISPLAY_NAME="DLNA Receiver" ;;
             *) echo "Unknown domain: ${{ inputs.domain }}"; exit 1 ;;
           esac
