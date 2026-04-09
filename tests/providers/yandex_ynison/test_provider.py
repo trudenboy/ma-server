@@ -53,7 +53,7 @@ def _make_mock_mass() -> MagicMock:
 
     def _create_task(coro: object) -> MagicMock:
         if asyncio.iscoroutine(coro):
-            return asyncio.ensure_future(coro)  # type: ignore[return-value]
+            coro.close()  # prevent RuntimeWarning for unawaited coroutine
         return MagicMock()
 
     mass.create_task = MagicMock(side_effect=_create_task)
