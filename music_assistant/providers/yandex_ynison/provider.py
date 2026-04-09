@@ -21,7 +21,6 @@ from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedExcept
 from music_assistant_models.media_items import AudioFormat
 from music_assistant_models.streamdetails import StreamMetadata
 
-from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
 from .constants import (
@@ -220,7 +219,11 @@ class YandexYnisonProvider(PluginProvider):
                     break
 
     async def _stream_track(self, track_id: str) -> AsyncGenerator[bytes, None]:
-        """Stream a single track by ID, yielding PCM chunks."""
+        """Stream a single track by ID, yielding raw audio bytes.
+
+        Updates the source audio_format to match the track so MA's stream
+        controller handles transcoding — no double ffmpeg conversion.
+        """
         try:
             stream_details = await self._yandex_provider.get_stream_details(
                 track_id, MediaType.TRACK
@@ -229,27 +232,34 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.exception("Failed to get stream details for track %s", track_id)
             return
 
-        if stream_details.stream_type != StreamType.HTTP or not stream_details.path:
+        # Update source format to match track — MA will transcode as needed
+        self._source_details.audio_format = stream_details.audio_format
+
+        if stream_details.stream_type == StreamType.CUSTOM:
+            # CUSTOM = raw/encrypted transport via provider's get_audio_stream
+            self.logger.info(
+                "Streaming track %s (custom): format=%s", track_id, stream_details.audio_format
+            )
+            async for chunk in self._yandex_provider.get_audio_stream(stream_details):
+                yield chunk
+        elif stream_details.stream_type == StreamType.HTTP and stream_details.path:
+            # HTTP = direct URL — update source path for MA to fetch directly
+            self.logger.info(
+                "Streaming track %s (http): format=%s", track_id, stream_details.audio_format
+            )
+            self._source_details.path = stream_details.path
+            # For HTTP, MA can fetch the URL itself — yield nothing,
+            # but we need to provide data since stream_type is CUSTOM
+            async with self.mass.http_session.get(stream_details.path) as resp:
+                async for chunk in resp.content.iter_any():
+                    yield chunk
+        else:
             self.logger.warning(
-                "Unsupported stream type %s for track %s (only HTTP supported)",
+                "Unsupported stream type %s for track %s",
                 stream_details.stream_type,
                 track_id,
             )
             return
-
-        self.logger.info(
-            "Streaming track %s: format=%s, url=%s",
-            track_id,
-            stream_details.audio_format,
-            stream_details.path[:80],
-        )
-
-        async for chunk in get_ffmpeg_stream(
-            audio_input=stream_details.path,
-            input_format=stream_details.audio_format,
-            output_format=self._source_details.audio_format,
-        ):
-            yield chunk
 
     # ------------------------------------------------------------------
     # Token handling
