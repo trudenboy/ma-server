@@ -447,6 +447,7 @@ class YandexYnisonProvider(PluginProvider):
     def _clear_active_player(self) -> None:
         """Clear the active player and reset plugin state."""
         prev_player_id = self._active_player_id
+        was_in_use = self._source_details.in_use_by == prev_player_id
         self._active_player_id = None
         self._source_details.in_use_by = None
         self._stream_stop_event.set()
@@ -456,7 +457,8 @@ class YandexYnisonProvider(PluginProvider):
                 "Playback ended on player %s, clearing active player",
                 prev_player_id,
             )
-            self.mass.create_task(self.mass.players.cmd_stop(prev_player_id))
+            if was_in_use:
+                self.mass.create_task(self.mass.players.cmd_stop(prev_player_id))
             self.mass.players.trigger_player_update(prev_player_id)
 
     # ------------------------------------------------------------------
