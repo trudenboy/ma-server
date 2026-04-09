@@ -390,12 +390,16 @@ class YnisonClient:
                     try:
                         data = json.loads(msg.data)
                         self._parse_state(data)
-                        await self._on_state_update(self.state)
                     except (json.JSONDecodeError, KeyError):
                         self._logger.warning(
                             "Failed to parse Ynison message: %s",
                             msg.data[:200] if msg.data else "<empty>",
                         )
+                    else:
+                        try:
+                            await self._on_state_update(self.state)
+                        except Exception:
+                            self._logger.exception("Error in Ynison state update callback")
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     self._logger.debug(
                         "Ynison binary message (%d bytes)", len(msg.data) if msg.data else 0
@@ -462,6 +466,7 @@ class YnisonClient:
                 # Re-create session if needed
                 if self._session is None or self._session.closed:
                     self._session = aiohttp.ClientSession()
+                    self._external_session = None
 
                 host, ticket, session_id = await self._get_redirect_ticket()
                 await self._connect_state(host, ticket, session_id)

@@ -180,9 +180,9 @@ class YandexYnisonProvider(PluginProvider):
                     continue
                 continue
 
+            self._track_changed_event.clear()
             track_id = self._ynison.state.current_track_id
             self._current_streaming_track_id = track_id
-            self._track_changed_event.clear()
 
             if not self._yandex_provider:
                 self.logger.warning(
