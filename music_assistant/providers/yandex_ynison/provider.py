@@ -170,7 +170,7 @@ class YandexYnisonProvider(PluginProvider):
         """
         self._stream_stop_event.clear()
 
-        while not self._stream_stop_event.is_set():
+        while not self._stream_stop_event.is_set() and self._source_details.in_use_by == player_id:
             if not self._ynison or not self._ynison.state.current_track_id:
                 # Wait for a track to appear
                 self._track_changed_event.clear()
@@ -198,8 +198,12 @@ class YandexYnisonProvider(PluginProvider):
             # Stream the current track
             async for chunk in self._stream_track(track_id):
                 yield chunk
-                # Check if track changed mid-stream
-                if self._track_changed_event.is_set() or self._stream_stop_event.is_set():
+                # Check if track changed, stopped, or source deselected
+                if (
+                    self._track_changed_event.is_set()
+                    or self._stream_stop_event.is_set()
+                    or self._source_details.in_use_by != player_id
+                ):
                     break
 
             self._current_streaming_track_id = None
@@ -483,7 +487,7 @@ class YandexYnisonProvider(PluginProvider):
         """Update source capabilities based on linked provider availability."""
         has_provider = self._yandex_provider is not None
         self._source_details.can_play_pause = has_provider
-        self._source_details.can_seek = has_provider
+        self._source_details.can_seek = False  # seek not implemented yet
         self._source_details.can_next_previous = has_provider
 
         if has_provider:
@@ -491,7 +495,7 @@ class YandexYnisonProvider(PluginProvider):
             self._source_details.on_pause = self._on_pause
             self._source_details.on_next = self._on_next
             self._source_details.on_previous = self._on_previous
-            self._source_details.on_seek = self._on_seek
+            self._source_details.on_seek = None  # seek not implemented yet
             self._source_details.on_volume = self._on_volume
         else:
             self._source_details.on_play = None
