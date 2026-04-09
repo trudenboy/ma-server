@@ -143,9 +143,26 @@ class YnisonClient:
 
             # Step 2: Connect to state service
             await self._connect_state(host, ticket, session_id)
-        except Exception:
+        except LoginFailed:
             await self.disconnect()
             raise
+        except asyncio.CancelledError:
+            await self.disconnect()
+            raise
+        except Exception:
+            # Transient error — schedule reconnect instead of dying
+            self._logger.warning("Initial connection failed, scheduling reconnect", exc_info=True)
+            self._connected = False
+            if self._ws and not self._ws.closed:
+                await self._ws.close()
+            self._ws = None
+            if self._session and not self._external_session:
+                await self._session.close()
+            self._session = None
+            if not self._stop_event.is_set() and (
+                self._reconnect_task is None or self._reconnect_task.done()
+            ):
+                self._reconnect_task = asyncio.ensure_future(self._reconnect())
 
     async def disconnect(self) -> None:
         """Gracefully disconnect from Ynison."""
