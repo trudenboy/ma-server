@@ -137,11 +137,15 @@ class YnisonClient:
         self._stop_event.clear()
         self._session = self._external_session or aiohttp.ClientSession()
 
-        # Step 1: Get redirect ticket
-        host, ticket, session_id = await self._get_redirect_ticket()
+        try:
+            # Step 1: Get redirect ticket
+            host, ticket, session_id = await self._get_redirect_ticket()
 
-        # Step 2: Connect to state service
-        await self._connect_state(host, ticket, session_id)
+            # Step 2: Connect to state service
+            await self._connect_state(host, ticket, session_id)
+        except Exception:
+            await self.disconnect()
+            raise
 
     async def disconnect(self) -> None:
         """Gracefully disconnect from Ynison."""
@@ -471,6 +475,16 @@ class YnisonClient:
                 )
 
         self._logger.error("Ynison: all %d reconnect attempts failed", MAX_RECONNECT_ATTEMPTS)
+        self._stop_event.set()
+        self._connected = False
+        if self._ws and not self._ws.closed:
+            with suppress(Exception):
+                await self._ws.close()
+        self._ws = None
+        if self._session and not self._external_session:
+            with suppress(Exception):
+                await self._session.close()
+        self._session = None
         await self._on_disconnect()
 
     async def _send(self, msg: dict[str, Any]) -> None:

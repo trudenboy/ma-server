@@ -192,6 +192,7 @@ class YandexYnisonProvider(PluginProvider):
                 self._stream_stop_event.set()
                 if self._source_details.in_use_by == player_id:
                     self._source_details.in_use_by = None
+                    await self.mass.players.cmd_stop(player_id)
                 return
 
             # Stream the current track
@@ -351,14 +352,16 @@ class YandexYnisonProvider(PluginProvider):
             meta.image_url = cover
 
     async def _pause_playback(self) -> None:
-        """Handle pause — stop player but keep source association."""
+        """Handle pause — stop player and release source so resume re-selects it."""
         self._stream_stop_event.set()
         player_id = self._source_details.in_use_by
+        self._source_details.in_use_by = None
         if player_id:
             try:
                 await self.mass.players.cmd_stop(player_id)
             except Exception:
                 self.logger.debug("Failed to stop player %s on pause", player_id)
+            self.mass.players.trigger_player_update(player_id)
 
     async def _handle_ynison_disconnect(self) -> None:
         """Handle permanent disconnect from Ynison."""
@@ -449,6 +452,7 @@ class YandexYnisonProvider(PluginProvider):
                 "Playback ended on player %s, clearing active player",
                 prev_player_id,
             )
+            self.mass.create_task(self.mass.players.cmd_stop(prev_player_id))
             self.mass.players.trigger_player_update(prev_player_id)
 
     # ------------------------------------------------------------------
