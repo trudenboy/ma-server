@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType, ProviderFeature
-from music_assistant_models.errors import InvalidDataError
+from music_assistant_models.errors import LoginFailed
 
 from .constants import (
     CONF_ACTION_AUTH_QR,
@@ -55,7 +55,7 @@ async def get_config_entries(
     if action == CONF_ACTION_AUTH_QR:
         session_id = values.get("session_id")
         if not session_id:
-            raise InvalidDataError("Missing session_id for QR authentication")
+            raise LoginFailed("Missing session_id for QR authentication")
         x_token, music_token = await perform_qr_auth(mass, str(session_id))
         values[CONF_TOKEN] = music_token
         if values.get(CONF_REMEMBER_SESSION, True):

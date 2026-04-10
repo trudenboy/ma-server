@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from ya_passport_auth import SecretStr
 
 from music_assistant.providers.yandex_ynison.constants import (
     DEFAULT_APP_NAME,
@@ -45,7 +46,7 @@ def client(
     """Create a YnisonClient instance for testing."""
     on_state_update, on_disconnect = mock_callbacks
     return YnisonClient(
-        token="test-token",
+        token=SecretStr("test-token"),
         device_info=device_info,
         on_state_update=on_state_update,
         on_disconnect=on_disconnect,

@@ -20,6 +20,7 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
 from music_assistant_models.media_items import AudioFormat
 from music_assistant_models.streamdetails import StreamMetadata
+from ya_passport_auth import SecretStr
 
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.models.plugin import PluginProvider, PluginSource
@@ -280,20 +281,22 @@ class YandexYnisonProvider(PluginProvider):
     # Token handling
     # ------------------------------------------------------------------
 
-    async def _resolve_token(self) -> str:
+    async def _resolve_token(self) -> SecretStr:
         """Resolve the Yandex Music token, refreshing from x_token if needed."""
         token = cast("str | None", self.config.get_value(CONF_TOKEN))
         x_token = cast("str | None", self.config.get_value(CONF_X_TOKEN))
 
         if token:
-            return token
+            return SecretStr(token)
 
         if x_token:
             self.logger.info("Refreshing music token from x_token")
             try:
-                token = await refresh_music_token(x_token)
-                self._update_config_value(CONF_TOKEN, token, encrypted=True)
-                return token
+                new_token = await refresh_music_token(SecretStr(x_token))
+                self._update_config_value(CONF_TOKEN, new_token.get_secret(), encrypted=True)
+                return new_token
+            except LoginFailed:
+                raise
             except Exception as err:
                 raise LoginFailed("Failed to refresh Yandex music token from x_token") from err
 

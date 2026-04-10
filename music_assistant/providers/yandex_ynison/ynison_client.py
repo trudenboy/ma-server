@@ -11,10 +11,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from music_assistant_models.errors import LoginFailed
+
+if TYPE_CHECKING:
+    from ya_passport_auth import SecretStr
 
 from .constants import (
     DEFAULT_APP_NAME,
@@ -90,7 +93,7 @@ class YnisonClient:
 
     def __init__(
         self,
-        token: str,
+        token: SecretStr,
         device_info: YnisonDeviceInfo,
         on_state_update: StateUpdateCallback,
         on_disconnect: DisconnectCallback,
@@ -99,7 +102,7 @@ class YnisonClient:
     ) -> None:
         """Initialize Ynison client.
 
-        :param token: Yandex Music OAuth token.
+        :param token: Yandex Music OAuth token (wrapped in SecretStr).
         :param device_info: Device identification for Ynison.
         :param on_state_update: Callback for state updates from Ynison.
         :param on_disconnect: Callback when connection is permanently lost.
@@ -271,7 +274,7 @@ class YnisonClient:
     ) -> dict[str, str]:
         """Build common WebSocket headers."""
         return {
-            "Authorization": f"OAuth {self._token}",
+            "Authorization": f"OAuth {self._token.get_secret()}",
             "Origin": YNISON_ORIGIN,
             "Sec-WebSocket-Protocol": self._build_ws_protocol_header(redirect_ticket, session_id),
         }
