@@ -219,9 +219,12 @@ class YandexYnisonProvider(PluginProvider):
                 ):
                     break
 
-            self._current_streaming_track_id = None
+            # Don't clear _current_streaming_track_id yet — keep it set
+            # during advance/wait so Ynison echo of the same track doesn't
+            # trigger a false track-change detection in _activate_playback.
 
             if self._stream_stop_event.is_set():
+                self._current_streaming_track_id = None
                 break
 
             # Track finished naturally — advance queue in Ynison
@@ -234,6 +237,7 @@ class YandexYnisonProvider(PluginProvider):
                         await asyncio.wait_for(self._track_changed_event.wait(), timeout=10.0)
                     except TimeoutError:
                         self.logger.info("No track change after advance, stopping stream")
+                        self._current_streaming_track_id = None
                         break
                 else:
                     # Queue exhausted — completion signal sent (paused=False
@@ -244,7 +248,12 @@ class YandexYnisonProvider(PluginProvider):
                     except TimeoutError:
                         self.logger.info("No new tracks after queue exhaustion, stopping stream")
                         self._stream_stop_event.set()
+                        self._current_streaming_track_id = None
                         break
+
+            # Clear before next iteration — the new track ID will be set at
+            # the top of the loop from the latest Ynison state.
+            self._current_streaming_track_id = None
 
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
         """Stream a single track by ID, yielding PCM chunks.
