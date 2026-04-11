@@ -688,8 +688,12 @@ class YandexYnisonProvider(PluginProvider):
 
         MA is a passive player — Yandex controls the queue. We never
         manipulate playable_index ourselves. Instead, we signal
-        progress=duration so the YM app / Ynison backend advances the
-        queue and pushes the next track via the WebSocket.
+        progress=duration and request EOV sync so the Ynison backend
+        advances the queue and pushes the next track via the WebSocket.
+
+        The actual entity_id is passed to sync_state_from_eov so EOV
+        knows which queue to advance (empty string would force a full
+        queue reset that breaks Yandex's queue ownership).
         """
         if not self._ynison:
             return
@@ -713,6 +717,9 @@ class YandexYnisonProvider(PluginProvider):
         await self._ynison.update_playing_status(
             progress_ms=duration, duration_ms=duration, paused=False
         )
+        # Ask EOV backend to advance the queue. Pass the actual entity_id
+        # so EOV syncs within the current queue instead of replacing it.
+        await self._ynison.sync_state_from_eov(actual_queue_id=entity_id)
 
     async def _on_next(self) -> None:
         """Handle next track command — signal track end so Yandex advances."""
