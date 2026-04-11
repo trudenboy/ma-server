@@ -234,10 +234,7 @@ class YandexYnisonProvider(PluginProvider):
             if not self._track_changed_event.is_set() and self._ynison:
                 self.logger.info("Track %s finished, advancing to next", track_id)
                 await self._signal_track_completion()
-                try:
-                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
-                except TimeoutError:
-                    self.logger.info("No new track from Ynison after completion, stopping stream")
+                if not await self._wait_for_track_change(track_id):
                     self._stream_stop_event.set()
                     self._current_streaming_track_id = None
                     break
@@ -245,6 +242,28 @@ class YandexYnisonProvider(PluginProvider):
             # Clear before next iteration — the new track ID will be set at
             # the top of the loop from the latest Ynison state.
             self._current_streaming_track_id = None
+
+    async def _wait_for_track_change(self, old_track_id: str, timeout: float = 30.0) -> bool:
+        """Wait for Ynison to report a different track, ignoring echoes.
+
+        After _signal_track_completion sends update_playing_status, Ynison
+        echoes back the same track with updated progress.  Only return True
+        once current_track_id actually differs from old_track_id.
+        """
+        deadline = time.monotonic() + timeout
+        while not self._stream_stop_event.is_set():
+            self._track_changed_event.clear()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(self._track_changed_event.wait(), timeout=remaining)
+            except TimeoutError:
+                break
+            if self._ynison and self._ynison.state.current_track_id != old_track_id:
+                return True
+        self.logger.info("No new track from Ynison after completion, stopping stream")
+        return False
 
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
         """Stream a single track by ID, yielding PCM chunks.
@@ -755,7 +774,11 @@ class YandexYnisonProvider(PluginProvider):
         )
         self._actual_duration_ms = 0
 
-        # 1. Report that playback reached the end
+        # 1. Report that playback reached the end.
+        # Update progress tracking so the Ynison echo of this message
+        # doesn't trigger false seek detection in _activate_playback.
+        self._last_progress_ms = duration
+        self._last_progress_time = time.monotonic()
         await self._ynison.update_playing_status(
             progress_ms=duration, duration_ms=duration, paused=False
         )

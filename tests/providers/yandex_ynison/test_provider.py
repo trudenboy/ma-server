@@ -754,6 +754,69 @@ class TestYnisonStateHandling:
         provider._actual_duration_ms = 0
         assert provider._best_duration_ms() == 0
 
+    async def test_wait_for_track_change_ignores_echo(self) -> None:
+        """_wait_for_track_change should ignore echoes and wait for actual change."""
+        provider = _make_provider()
+        mock_ynison = MagicMock()
+        mock_ynison.state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"progress_ms": 248000, "duration_ms": 248000},
+                "player_queue": {
+                    "current_playable_index": 5,
+                    "playable_list": [{"playable_id": "old_track"}],
+                    "entity_id": "user:onyourwave",
+                    "entity_type": "RADIO",
+                },
+            },
+        )
+        provider._ynison = mock_ynison
+
+        async def simulate_echo_then_change() -> None:
+            await asyncio.sleep(0.01)
+            # First event: echo with same track (should be ignored)
+            provider._track_changed_event.set()
+            await asyncio.sleep(0.01)
+            # Second event: actual track change
+            mock_ynison.state = YnisonState(
+                active_device_id=provider._device_id,
+                player_state={
+                    "status": {"progress_ms": 0, "duration_ms": 0},
+                    "player_queue": {
+                        "current_playable_index": 6,
+                        "playable_list": [{"playable_id": "new_track"}],
+                        "entity_id": "user:onyourwave",
+                        "entity_type": "RADIO",
+                    },
+                },
+            )
+            provider._track_changed_event.set()
+
+        asyncio.create_task(simulate_echo_then_change())
+        result = await provider._wait_for_track_change("old_track", timeout=5.0)
+        assert result is True
+
+    async def test_wait_for_track_change_timeout(self) -> None:
+        """_wait_for_track_change returns False on timeout."""
+        provider = _make_provider()
+        mock_ynison = MagicMock()
+        mock_ynison.state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"progress_ms": 248000},
+                "player_queue": {
+                    "current_playable_index": 5,
+                    "playable_list": [{"playable_id": "old_track"}],
+                    "entity_id": "user:onyourwave",
+                    "entity_type": "RADIO",
+                },
+            },
+        )
+        provider._ynison = mock_ynison
+
+        result = await provider._wait_for_track_change("old_track", timeout=0.1)
+        assert result is False
+
 
 # ------------------------------------------------------------------
 # Token resolution
