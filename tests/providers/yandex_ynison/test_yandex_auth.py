@@ -61,10 +61,10 @@ async def test_perform_qr_auth_success() -> None:
 
     with (
         mock.patch(
-            "provider.yandex_auth.PassportClient.create",
+            "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
         ) as mock_create,
         mock.patch(
-            "provider.yandex_auth.AuthenticationHelper",
+            "music_assistant.providers.yandex_ynison.yandex_auth.AuthenticationHelper",
             return_value=mock_auth_helper,
         ),
     ):
@@ -92,10 +92,10 @@ async def test_perform_qr_auth_sends_qr_url() -> None:
 
     with (
         mock.patch(
-            "provider.yandex_auth.PassportClient.create",
+            "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
         ) as mock_create,
         mock.patch(
-            "provider.yandex_auth.AuthenticationHelper",
+            "music_assistant.providers.yandex_ynison.yandex_auth.AuthenticationHelper",
             return_value=mock_auth_helper,
         ),
     ):
@@ -119,10 +119,10 @@ async def test_perform_qr_auth_timeout_raises_login_failed() -> None:
 
     with (
         mock.patch(
-            "provider.yandex_auth.PassportClient.create",
+            "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
         ) as mock_create,
         mock.patch(
-            "provider.yandex_auth.AuthenticationHelper",
+            "music_assistant.providers.yandex_ynison.yandex_auth.AuthenticationHelper",
             return_value=mock_auth_helper,
         ),
     ):
@@ -143,10 +143,10 @@ async def test_perform_qr_auth_passport_error_raises_login_failed() -> None:
 
     with (
         mock.patch(
-            "provider.yandex_auth.PassportClient.create",
+            "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
         ) as mock_create,
         mock.patch(
-            "provider.yandex_auth.AuthenticationHelper",
+            "music_assistant.providers.yandex_ynison.yandex_auth.AuthenticationHelper",
             return_value=mock_auth_helper,
         ),
     ):
@@ -170,10 +170,10 @@ async def test_perform_qr_auth_no_music_token_raises() -> None:
 
     with (
         mock.patch(
-            "provider.yandex_auth.PassportClient.create",
+            "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
         ) as mock_create,
         mock.patch(
-            "provider.yandex_auth.AuthenticationHelper",
+            "music_assistant.providers.yandex_ynison.yandex_auth.AuthenticationHelper",
             return_value=mock_auth_helper,
         ),
     ):
@@ -193,7 +193,7 @@ async def test_refresh_music_token_success() -> None:
     mock_client.refresh_music_token.return_value = SecretStr("new_music_token")
 
     with mock.patch(
-        "provider.yandex_auth.PassportClient.create",
+        "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
     ) as mock_create:
         mock_create.return_value.__aenter__ = mock.AsyncMock(return_value=mock_client)
         mock_create.return_value.__aexit__ = mock.AsyncMock(return_value=False)
@@ -210,7 +210,7 @@ async def test_refresh_music_token_auth_error_raises_login_failed() -> None:
     mock_client.refresh_music_token.side_effect = InvalidCredentialsError("bad token")
 
     with mock.patch(
-        "provider.yandex_auth.PassportClient.create",
+        "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
     ) as mock_create:
         mock_create.return_value.__aenter__ = mock.AsyncMock(return_value=mock_client)
         mock_create.return_value.__aexit__ = mock.AsyncMock(return_value=False)
@@ -228,7 +228,7 @@ async def test_validate_x_token_valid() -> None:
     mock_client.validate_x_token.return_value = True
 
     with mock.patch(
-        "provider.yandex_auth.PassportClient.create",
+        "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
     ) as mock_create:
         mock_create.return_value.__aenter__ = mock.AsyncMock(return_value=mock_client)
         mock_create.return_value.__aexit__ = mock.AsyncMock(return_value=False)
@@ -244,7 +244,7 @@ async def test_validate_x_token_error_returns_false() -> None:
     mock_client.validate_x_token.side_effect = RateLimitedError("429")
 
     with mock.patch(
-        "provider.yandex_auth.PassportClient.create",
+        "music_assistant.providers.yandex_ynison.yandex_auth.PassportClient.create",
     ) as mock_create:
         mock_create.return_value.__aenter__ = mock.AsyncMock(return_value=mock_client)
         mock_create.return_value.__aexit__ = mock.AsyncMock(return_value=False)
