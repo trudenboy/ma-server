@@ -439,6 +439,7 @@ class TestYnisonStateHandling:
         provider._source_details.in_use_by = "player1"
         mock_ynison = MagicMock()
         mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
         stream_details = MagicMock()

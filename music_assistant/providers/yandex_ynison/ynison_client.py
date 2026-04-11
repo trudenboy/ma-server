@@ -510,7 +510,16 @@ class YnisonClient:
             "current_playable_index", -1
         )
 
-        self.state.player_state = data.get("player_state", self.state.player_state)
+        # Deep-merge player_state so incremental updates (e.g. progress-only)
+        # don't drop previously-known player_queue data.
+        incoming_ps = data.get("player_state")
+        if incoming_ps is not None:
+            existing_ps = self.state.player_state
+            for key, value in incoming_ps.items():
+                if isinstance(value, dict) and isinstance(existing_ps.get(key), dict):
+                    existing_ps[key] = {**existing_ps[key], **value}
+                else:
+                    existing_ps[key] = value
         self.state.active_device_id = data.get(
             "active_device_id_optional", self.state.active_device_id
         )

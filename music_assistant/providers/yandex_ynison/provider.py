@@ -158,6 +158,11 @@ class YandexYnisonProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        if self._prefetch_task and not self._prefetch_task.done():
+            self._prefetch_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._prefetch_task
+
         if self._ynison:
             await self._ynison.disconnect()
 
@@ -196,6 +201,10 @@ class YandexYnisonProvider(PluginProvider):
             self._track_changed_event.clear()
             track_id = self._ynison.state.current_track_id
             self._current_streaming_track_id = track_id
+
+            # Don't start streaming if Ynison reports paused — wait for resume
+            if self._ynison.state.is_paused:
+                continue
 
             if not self._yandex_provider:
                 self.logger.warning(
@@ -505,7 +514,7 @@ class YandexYnisonProvider(PluginProvider):
                 await self._ynison.update_playing_status(
                     progress_ms=seek_ms,
                     duration_ms=self._actual_duration_ms,
-                    paused=False,
+                    paused=self._ynison.state.is_paused,
                 )
         meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
         meta.elapsed_time_last_updated = time.time()
@@ -616,6 +625,8 @@ class YandexYnisonProvider(PluginProvider):
         self._source_details.in_use_by = None
         self._stream_stop_event.set()
         self._prefetched_list = None
+        if self._prefetch_task and not self._prefetch_task.done():
+            self._prefetch_task.cancel()
 
         if prev_player_id:
             self.logger.debug(
@@ -707,6 +718,8 @@ class YandexYnisonProvider(PluginProvider):
             paused=True,
         )
 
+    _RADIO_ENTITY_TYPES = {"RADIO"}
+
     def _maybe_prefetch(
         self,
         current_index: int,
@@ -715,6 +728,8 @@ class YandexYnisonProvider(PluginProvider):
         entity_type: str,
     ) -> None:
         """Kick off background prefetch when playing the second-to-last track."""
+        if entity_type not in self._RADIO_ENTITY_TYPES:
+            return
         if not self._yandex_provider or not playable_list:
             return
         # second-to-last = index == len - 2
@@ -786,8 +801,8 @@ class YandexYnisonProvider(PluginProvider):
         if next_index < len(playable_list):
             # 2a. Queue has room — advance immediately
             await self._advance_queue_index(next_index)
-        else:
-            # 2b. At end of queue — use prefetched data or fetch now
+        elif entity_type in self._RADIO_ENTITY_TYPES:
+            # 2b. At end of RADIO queue — use prefetched data or fetch now
             expanded: list[dict[str, Any]] | None = None
             if self._prefetched_list:
                 self.logger.info("Using pre-fetched queue (%d items)", len(self._prefetched_list))
@@ -808,6 +823,12 @@ class YandexYnisonProvider(PluginProvider):
                     entity_id,
                     entity_type,
                 )
+        else:
+            self.logger.info(
+                "End of non-radio queue (entity=%s type=%s), playback complete",
+                entity_id[:40] if entity_id else "<none>",
+                entity_type,
+            )
 
     async def _replenish_radio_queue(
         self,
@@ -938,9 +959,14 @@ class YandexYnisonProvider(PluginProvider):
         """
         if not self._ynison:
             raise UnsupportedFeaturedException("Not connected to Ynison")
+        seek_ms = position * 1000
         state = self._ynison.state
         await self._ynison.update_playing_status(
-            progress_ms=position * 1000,
+            progress_ms=seek_ms,
             duration_ms=self._best_duration_ms(),
             paused=state.is_paused,
         )
+        # Also trigger local stream restart so seek takes effect
+        # immediately without waiting for the Ynison echo.
+        self._seek_position_ms = seek_ms
+        self._track_changed_event.set()
