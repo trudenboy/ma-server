@@ -41,15 +41,40 @@ async def setup(
     return YandexYnisonProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
+def _find_sibling_token(
+    mass: MusicAssistant,
+    instance_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Find token and x_token from an existing sibling ynison instance."""
+    raw_providers = mass.config.get("providers", {})
+    for prov_conf in raw_providers.values():
+        if prov_conf.get("domain") != "yandex_ynison":
+            continue
+        if instance_id and prov_conf.get("instance_id") == instance_id:
+            continue
+        prov_values = prov_conf.get("values", {})
+        token = prov_values.get(CONF_TOKEN)
+        if token:
+            return str(token), str(prov_values.get(CONF_X_TOKEN) or "")
+    return None, None
+
+
 async def get_config_entries(
     mass: MusicAssistant,
-    instance_id: str | None = None,  # noqa: ARG001
+    instance_id: str | None = None,
     action: str | None = None,
     values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
     """Return Config entries to setup this provider."""
     if values is None:
         values = {}
+
+    # Pre-fill token from sibling instance if this instance has no token yet
+    sibling_token, sibling_x_token = _find_sibling_token(mass, instance_id)
+    if not values.get(CONF_TOKEN) and sibling_token:
+        values[CONF_TOKEN] = sibling_token
+        if sibling_x_token:
+            values[CONF_X_TOKEN] = sibling_x_token
 
     # Handle QR auth action
     if action == CONF_ACTION_AUTH_QR:
@@ -70,6 +95,7 @@ async def get_config_entries(
 
     # Check if user is authenticated
     is_authenticated = bool(values.get(CONF_TOKEN))
+    token_from_sibling = is_authenticated and sibling_token == values.get(CONF_TOKEN)
 
     # Dynamic label text
     if not is_authenticated:
@@ -79,6 +105,11 @@ async def get_config_entries(
         )
     elif action == CONF_ACTION_AUTH_QR:
         label_text = "Authenticated to Yandex Music. Don't forget to save to complete setup."
+    elif token_from_sibling:
+        label_text = (
+            "Authenticated to Yandex Music (token reused from existing instance).\n"
+            "Re-authenticate if you need a different account."
+        )
     else:
         label_text = "Authenticated to Yandex Music."
 

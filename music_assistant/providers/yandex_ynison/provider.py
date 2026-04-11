@@ -49,6 +49,12 @@ if TYPE_CHECKING:
 class YandexYnisonProvider(PluginProvider):
     """Implementation of the Yandex Music Connect (Ynison) Plugin."""
 
+    @property
+    def instance_name_postfix(self) -> str | None:
+        """Return display name as instance postfix for multi-instance setups."""
+        name = self._display_name
+        return name if name != DEFAULT_DISPLAY_NAME else None
+
     def __init__(
         self,
         mass: MusicAssistant,

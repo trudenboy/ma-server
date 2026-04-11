@@ -17,6 +17,7 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import LoginFailed
 from ya_passport_auth import SecretStr
 
+from provider import _find_sibling_token
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -533,3 +534,90 @@ class TestResolveToken:
 
         with pytest.raises(LoginFailed, match="No Yandex Music token"):
             await provider._resolve_token()
+
+
+# ------------------------------------------------------------------
+# Instance name postfix
+# ------------------------------------------------------------------
+
+
+class TestInstanceNamePostfix:
+    """Tests for instance_name_postfix property."""
+
+    def test_returns_custom_display_name(self) -> None:
+        """Returns display_name when it differs from the default."""
+        config = _make_mock_config({CONF_DISPLAY_NAME: "Living Room"})
+        mass = _make_mock_mass()
+        manifest = _make_mock_manifest()
+        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        assert provider.instance_name_postfix == "Living Room"
+
+    def test_returns_none_for_default_name(self) -> None:
+        """Returns None when display_name is the default (falls back to index)."""
+        provider = _make_provider()
+        assert provider.instance_name_postfix is None
+
+
+# ------------------------------------------------------------------
+# Sibling token detection
+# ------------------------------------------------------------------
+
+
+class TestSiblingTokenDetection:
+    """Tests for _find_sibling_token."""
+
+    def test_finds_sibling_token(self) -> None:
+        """Detects token from an existing sibling ynison instance."""
+        mass = _make_mock_mass()
+        mass.config.get = MagicMock(
+            return_value={
+                "inst1": {
+                    "domain": "yandex_ynison",
+                    "instance_id": "inst1",
+                    "values": {CONF_TOKEN: "sibling-token", CONF_X_TOKEN: "sibling-x-token"},
+                }
+            }
+        )
+        token, x_token = _find_sibling_token(mass, instance_id="inst2")
+        assert token == "sibling-token"
+        assert x_token == "sibling-x-token"
+
+    def test_skips_own_instance(self) -> None:
+        """Does not reuse its own token."""
+        mass = _make_mock_mass()
+        mass.config.get = MagicMock(
+            return_value={
+                "inst1": {
+                    "domain": "yandex_ynison",
+                    "instance_id": "inst1",
+                    "values": {CONF_TOKEN: "my-token"},
+                }
+            }
+        )
+        token, x_token = _find_sibling_token(mass, instance_id="inst1")
+        assert token is None
+        assert x_token is None
+
+    def test_returns_none_when_no_siblings(self) -> None:
+        """Returns None when no sibling instances exist."""
+        mass = _make_mock_mass()
+        mass.config.get = MagicMock(return_value={})
+        token, x_token = _find_sibling_token(mass, instance_id=None)
+        assert token is None
+        assert x_token is None
+
+    def test_skips_other_domains(self) -> None:
+        """Ignores instances from other provider domains."""
+        mass = _make_mock_mass()
+        mass.config.get = MagicMock(
+            return_value={
+                "inst1": {
+                    "domain": "yandex_music",
+                    "instance_id": "inst1",
+                    "values": {CONF_TOKEN: "other-token"},
+                }
+            }
+        )
+        token, x_token = _find_sibling_token(mass, instance_id=None)
+        assert token is None
+        assert x_token is None
