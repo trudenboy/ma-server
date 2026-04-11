@@ -362,6 +362,10 @@ class TestYnisonStateHandling:
         assert provider._seek_position_ms == 60000
         assert provider._track_changed_event.is_set()
 
+        # Verify force_update=True was used so the server sends a full
+        # PLAYER_UPDATED event (not just a lightweight elapsed-time one)
+        provider.mass.players.trigger_player_update.assert_called_with("player1", force_update=True)
+
     async def test_progress_throttled_update(self) -> None:
         """Regular progress updates trigger player update with throttling."""
         provider = _make_provider()
@@ -422,6 +426,11 @@ class TestYnisonStateHandling:
         assert call_count_1 >= 1
         assert call_count_2 == call_count_1
         assert call_count_3 > call_count_2
+
+        # Regular (non-seek) updates should NOT use force_update
+        provider.mass.players.trigger_player_update.assert_called_with(
+            "player1", force_update=False
+        )
 
 
 # ------------------------------------------------------------------

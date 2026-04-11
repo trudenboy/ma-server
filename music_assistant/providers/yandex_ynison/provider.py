@@ -380,10 +380,15 @@ class YandexYnisonProvider(PluginProvider):
         self._update_metadata(state)
 
         # Always trigger player update on significant changes;
-        # throttle regular updates to avoid UI churn (every 5 seconds)
+        # throttle regular updates to avoid UI churn (every 5 seconds).
+        # Use force_update on seek/track change so the server broadcasts a full
+        # PLAYER_UPDATED event instead of a lightweight elapsed-time-only one
+        # that the frontend may not handle for PluginSource players.
         now_mono = time.monotonic()
         if significant_change or needs_reselect or now_mono - self._last_player_update_time >= 5.0:
-            self.mass.players.trigger_player_update(target_player_id)
+            self.mass.players.trigger_player_update(
+                target_player_id, force_update=significant_change
+            )
             self._last_player_update_time = now_mono
 
     def _update_metadata(self, state: YnisonState) -> None:
