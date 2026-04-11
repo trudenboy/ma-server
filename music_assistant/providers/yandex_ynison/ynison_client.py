@@ -212,6 +212,7 @@ class YnisonClient:
         """Send volume update to Ynison (0.0 - 1.0)."""
         msg = {
             "update_volume_info": {
+                "device_id_optional": self._device_info.device_id,
                 "volume_info": {
                     "volume": max(0.0, min(1.0, volume)),
                 },
@@ -414,17 +415,25 @@ class YnisonClient:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         data = json.loads(msg.data)
-                        self._parse_state(data)
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError:
                         self._logger.warning(
                             "Failed to parse Ynison message: %s",
                             msg.data[:200] if msg.data else "<empty>",
                         )
-                    else:
-                        try:
-                            await self._on_state_update(self.state)
-                        except Exception:
-                            self._logger.exception("Error in Ynison state update callback")
+                        continue
+
+                    if "error" in data:
+                        self._logger.warning(
+                            "Ynison error response: %s",
+                            json.dumps(data["error"])[:300],
+                        )
+                        continue
+
+                    self._parse_state(data)
+                    try:
+                        await self._on_state_update(self.state)
+                    except Exception:
+                        self._logger.exception("Error in Ynison state update callback")
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     self._logger.debug(
                         "Ynison binary message (%d bytes)", len(msg.data) if msg.data else 0
