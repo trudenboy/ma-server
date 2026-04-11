@@ -98,6 +98,8 @@ class YandexYnisonProvider(PluginProvider):
         self._last_progress_time: float = 0.0
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
+        self._pending_advance_index: int | None = None
+        self._queue_replenished: asyncio.Event | None = None
 
         # PluginSource
         self._source_details = PluginSource(
@@ -355,6 +357,14 @@ class YandexYnisonProvider(PluginProvider):
             state.is_paused,
             state.progress_ms,
         )
+
+        # Signal pending EOV advance if queue grew enough
+        if (
+            self._pending_advance_index is not None
+            and self._queue_replenished is not None
+            and self._pending_advance_index < len(playable_list)
+        ):
+            self._queue_replenished.set()
 
         if is_our_device and not state.is_paused:
             await self._activate_playback(state)
@@ -687,9 +697,12 @@ class YandexYnisonProvider(PluginProvider):
         """Signal that the current track finished playing.
 
         Ynison is a state-sync protocol — the active device must advance
-        current_playable_index itself.  We increment the index, send the
-        updated player state, then request EOV sync so radio/wave queues
-        get replenished with new tracks.
+        current_playable_index itself.
+
+        If the next index is within the playable list, we advance immediately.
+        If we're at the end (typical for RADIO/wave with short queues),
+        we request EOV replenishment first, wait for the queue to grow,
+        and then advance.
         """
         if not self._ynison:
             return
@@ -719,7 +732,37 @@ class YandexYnisonProvider(PluginProvider):
             progress_ms=duration, duration_ms=duration, paused=False
         )
 
-        # 2. Advance queue index — active device must do this in Ynison
+        if next_index < len(playable_list):
+            # 2a. Queue has room — advance immediately
+            await self._advance_queue_index(next_index)
+            # EOV sync for future replenishment (radio/wave)
+            await self._ynison.sync_state_from_eov(actual_queue_id=entity_id)
+        else:
+            # 2b. At end of queue — request EOV replenishment first
+            self.logger.info(
+                "At end of queue (index %d, len %d), requesting EOV replenishment before advancing",
+                current_index,
+                len(playable_list),
+            )
+            self._pending_advance_index = next_index
+            self._queue_replenished = asyncio.Event()
+            await self._ynison.sync_state_from_eov(actual_queue_id=entity_id)
+            try:
+                await asyncio.wait_for(self._queue_replenished.wait(), timeout=5.0)
+                # Queue grew — advance now with fresh state
+                await self._advance_queue_index(next_index)
+            except TimeoutError:
+                self.logger.warning("EOV replenishment timed out after 5s, cannot advance")
+            finally:
+                self._pending_advance_index = None
+                self._queue_replenished = None
+
+    async def _advance_queue_index(self, next_index: int) -> None:
+        """Send update_player_state to advance the queue to next_index."""
+        if not self._ynison:
+            return
+        state = self._ynison.state
+        queue = state.player_state.get("player_queue", {})
         new_state = dict(state.player_state)
         new_state["player_queue"] = dict(queue)
         new_state["player_queue"]["current_playable_index"] = next_index
@@ -728,9 +771,6 @@ class YandexYnisonProvider(PluginProvider):
         new_state["status"]["duration_ms"] = 0
         new_state["status"]["paused"] = False
         await self._ynison.update_player_state(player_state=new_state)
-
-        # 3. Request EOV sync for queue replenishment (radio/wave)
-        await self._ynison.sync_state_from_eov(actual_queue_id=entity_id)
 
     async def _on_next(self) -> None:
         """Handle next track command — signal track end so Yandex advances."""
