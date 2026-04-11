@@ -280,14 +280,14 @@ async def test_devices_success(handler: DirectConnectionHandler) -> None:
     mock_result = MagicMock()
     resp_payload = {"request_id": "req-1", "payload": {"devices": []}}
     mock_hdl = patch(
-        "provider.direct.handle_device_list",
+        "music_assistant.providers.yandex_smarthome.direct.handle_device_list",
         new_callable=AsyncMock,
         return_value=mock_result,
     )
     with (
         mock_hdl,
-        patch("provider.direct.asdict", return_value={"devices": []}),
-        patch("provider.direct.build_response", return_value=resp_payload),
+        patch("music_assistant.providers.yandex_smarthome.direct.asdict", return_value={"devices": []}),
+        patch("music_assistant.providers.yandex_smarthome.direct.build_response", return_value=resp_payload),
     ):
         resp = await handler._handle_devices(req)
         assert resp.status == 200
@@ -306,14 +306,14 @@ async def test_query_success(handler: DirectConnectionHandler) -> None:
     mock_result = MagicMock()
     resp_payload = {"request_id": "req-2", "payload": {"devices": []}}
     mock_query = patch(
-        "provider.direct.handle_devices_query",
+        "music_assistant.providers.yandex_smarthome.direct.handle_devices_query",
         new_callable=AsyncMock,
         return_value=mock_result,
     )
     with (
         mock_query,
-        patch("provider.direct.asdict", return_value={"devices": []}),
-        patch("provider.direct.build_response", return_value=resp_payload),
+        patch("music_assistant.providers.yandex_smarthome.direct.asdict", return_value={"devices": []}),
+        patch("music_assistant.providers.yandex_smarthome.direct.build_response", return_value=resp_payload),
     ):
         resp = await handler._handle_query(req)
         assert resp.status == 200
@@ -329,15 +329,15 @@ async def test_action_success(handler: DirectConnectionHandler) -> None:
     )
     resp_payload = {"request_id": "req-3", "payload": {"devices": []}}
     mock_action = patch(
-        "provider.direct.handle_devices_action",
+        "music_assistant.providers.yandex_smarthome.direct.handle_devices_action",
         new_callable=AsyncMock,
         return_value=MagicMock(),
     )
     with (
-        patch("provider.direct.parse_action_payload", return_value=MagicMock()),
+        patch("music_assistant.providers.yandex_smarthome.direct.parse_action_payload", return_value=MagicMock()),
         mock_action,
-        patch("provider.direct.asdict", return_value={"devices": []}),
-        patch("provider.direct.build_response", return_value=resp_payload),
+        patch("music_assistant.providers.yandex_smarthome.direct.asdict", return_value={"devices": []}),
+        patch("music_assistant.providers.yandex_smarthome.direct.build_response", return_value=resp_payload),
     ):
         resp = await handler._handle_action(req)
         assert resp.status == 200
@@ -352,8 +352,8 @@ async def test_unlink_success(handler: DirectConnectionHandler) -> None:
     )
     resp_payload = {"request_id": "req-4"}
     with (
-        patch("provider.direct.handle_user_unlink", new_callable=AsyncMock, return_value={}),
-        patch("provider.direct.build_response", return_value=resp_payload),
+        patch("music_assistant.providers.yandex_smarthome.direct.handle_user_unlink", new_callable=AsyncMock, return_value={}),
+        patch("music_assistant.providers.yandex_smarthome.direct.build_response", return_value=resp_payload),
     ):
         resp = await handler._handle_unlink(req)
         assert resp.status == 200
