@@ -643,7 +643,6 @@ class YandexYnisonProvider(PluginProvider):
             new_state["player_queue"]["current_playable_index"] = current_index + 1
             new_state["status"] = dict(new_state.get("status", {}))
             new_state["status"]["progress_ms"] = 0
-            new_state["status"].pop("duration_ms", None)
             new_state["status"]["paused"] = False
             await self._ynison.send_full_state(player_state=new_state)
         else:
@@ -669,7 +668,6 @@ class YandexYnisonProvider(PluginProvider):
             new_state["player_queue"]["current_playable_index"] = current_index - 1
             new_state["status"] = dict(new_state.get("status", {}))
             new_state["status"]["progress_ms"] = 0
-            new_state["status"].pop("duration_ms", None)
             new_state["status"]["paused"] = False
             await self._ynison.send_full_state(player_state=new_state)
 
