@@ -451,7 +451,7 @@ class TestYnisonStateHandling:
         )
 
     async def test_advance_queue_clears_stale_duration(self) -> None:
-        """Advancing the queue resets duration_ms to 0 to avoid stale values."""
+        """Advancing the queue removes duration_ms to avoid stale values."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -470,7 +470,7 @@ class TestYnisonStateHandling:
         await provider._advance_queue()
 
         sent_state = mock_ynison.send_full_state.call_args[1]["player_state"]
-        assert sent_state["status"]["duration_ms"] == 0
+        assert "duration_ms" not in sent_state["status"]
         assert sent_state["status"]["progress_ms"] == 0
         assert sent_state["player_queue"]["current_playable_index"] == 1
 
