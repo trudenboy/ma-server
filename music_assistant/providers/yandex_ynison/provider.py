@@ -97,6 +97,7 @@ class YandexYnisonProvider(PluginProvider):
         self._last_progress_ms: int = 0
         self._last_progress_time: float = 0.0
         self._last_player_update_time: float = 0.0
+        self._actual_duration_ms: int = 0
 
         # PluginSource
         self._source_details = PluginSource(
@@ -226,14 +227,19 @@ class YandexYnisonProvider(PluginProvider):
             # Track finished naturally — advance queue in Ynison
             if not self._track_changed_event.is_set() and self._ynison:
                 self.logger.info("Track %s finished, advancing to next", track_id)
-                await self._advance_queue()
-                # Wait for Ynison (or controller app) to confirm the track change.
-                # Use a longer timeout when queue was exhausted: the controller
-                # needs time to fetch and push more tracks (radio/My Wave).
-                try:
-                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
-                except TimeoutError:
-                    self.logger.info("No track change after advance, stopping stream")
+                has_next = await self._advance_queue()
+                if has_next:
+                    # Wait for Ynison to echo back the state with the new track
+                    try:
+                        await asyncio.wait_for(self._track_changed_event.wait(), timeout=10.0)
+                    except TimeoutError:
+                        self.logger.info("No track change after advance, stopping stream")
+                        break
+                else:
+                    # Queue exhausted — completion signal sent to Ynison.
+                    # Stop the stream; _activate_playback will restart via
+                    # select_source when the controller pushes a new track.
+                    self._stream_stop_event.set()
                     break
 
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
@@ -409,9 +415,10 @@ class YandexYnisonProvider(PluginProvider):
 
         meta = self._source_details.metadata
 
-        # Update duration and elapsed time from player state
-        if state.duration_ms:
-            meta.duration = state.duration_ms // 1000
+        # Update duration (prefer actual from stream_details) and elapsed time
+        best_duration = self._best_duration_ms()
+        if best_duration:
+            meta.duration = best_duration // 1000
         if state.progress_ms is not None:
             meta.elapsed_time = state.progress_ms // 1000
             meta.elapsed_time_last_updated = time.time()
@@ -442,6 +449,7 @@ class YandexYnisonProvider(PluginProvider):
         meta = self._source_details.metadata
         if stream_details.duration:
             meta.duration = stream_details.duration
+            self._actual_duration_ms = stream_details.duration * 1000
         meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
         meta.elapsed_time_last_updated = time.time()
         if self._source_details.in_use_by:
@@ -611,6 +619,14 @@ class YandexYnisonProvider(PluginProvider):
     # Playback control callbacks
     # ------------------------------------------------------------------
 
+    def _best_duration_ms(self) -> int:
+        """Return the best known duration: actual from stream, or Ynison state as fallback."""
+        if self._actual_duration_ms > 0:
+            return self._actual_duration_ms
+        if self._ynison:
+            return self._ynison.state.duration_ms
+        return 0
+
     async def _on_play(self) -> None:
         """Handle play command — send resume to Ynison."""
         if not self._ynison:
@@ -618,7 +634,7 @@ class YandexYnisonProvider(PluginProvider):
         state = self._ynison.state
         await self._ynison.update_playing_status(
             progress_ms=state.progress_ms,
-            duration_ms=state.duration_ms,
+            duration_ms=self._best_duration_ms(),
             paused=False,
         )
 
@@ -629,20 +645,22 @@ class YandexYnisonProvider(PluginProvider):
         state = self._ynison.state
         await self._ynison.update_playing_status(
             progress_ms=state.progress_ms,
-            duration_ms=state.duration_ms,
+            duration_ms=self._best_duration_ms(),
             paused=True,
         )
 
-    async def _advance_queue(self) -> None:
+    async def _advance_queue(self) -> bool:
         """Advance to the next track in the Ynison queue.
 
-        If the next track exists in playable_list, sends the updated index.
+        If the next track exists in playable_list, sends the updated index
+        and resets duration_ms to 0 so Ynison/app can populate the correct value.
         Otherwise, signals track completion to Ynison (progress=duration, paused)
-        so the controller app can load more tracks (e.g. in radio/My Wave mode),
-        then waits for the controller to push a new track.
+        so the controller app can load more tracks (e.g. in radio/My Wave mode).
+
+        Returns True if a next track was found, False if queue is exhausted.
         """
         if not self._ynison:
-            return
+            return False
         state = self._ynison.state
         queue = state.player_state.get("player_queue", {})
         current_index = queue.get("current_playable_index", 0)
@@ -653,20 +671,24 @@ class YandexYnisonProvider(PluginProvider):
             new_state["player_queue"]["current_playable_index"] = current_index + 1
             new_state["status"] = dict(new_state.get("status", {}))
             new_state["status"]["progress_ms"] = 0
+            new_state["status"]["duration_ms"] = 0
             new_state["status"]["paused"] = False
+            self._actual_duration_ms = 0
             await self._ynison.send_full_state(player_state=new_state)
-        else:
-            # Signal track completion so the controller app knows the track ended
-            # and can populate more tracks (critical for radio/My Wave).
-            duration = state.duration_ms or 0
-            self.logger.info(
-                "Queue exhausted at index %d/%d, signaling completion to Ynison",
-                current_index,
-                len(playable_list),
-            )
-            await self._ynison.update_playing_status(
-                progress_ms=duration, duration_ms=duration, paused=True
-            )
+            return True
+
+        # Signal track completion so the controller app knows the track ended
+        # and can populate more tracks (critical for radio/My Wave).
+        duration = self._best_duration_ms()
+        self.logger.info(
+            "Queue exhausted at index %d/%d, signaling completion to Ynison",
+            current_index,
+            len(playable_list),
+        )
+        await self._ynison.update_playing_status(
+            progress_ms=duration, duration_ms=duration, paused=True
+        )
+        return False
 
     async def _on_next(self) -> None:
         """Handle next track command — update queue index in Ynison."""
@@ -687,7 +709,9 @@ class YandexYnisonProvider(PluginProvider):
             new_state["player_queue"]["current_playable_index"] = current_index - 1
             new_state["status"] = dict(new_state.get("status", {}))
             new_state["status"]["progress_ms"] = 0
+            new_state["status"]["duration_ms"] = 0
             new_state["status"]["paused"] = False
+            self._actual_duration_ms = 0
             await self._ynison.send_full_state(player_state=new_state)
 
     async def _on_seek(self, position: int) -> None:
@@ -700,6 +724,6 @@ class YandexYnisonProvider(PluginProvider):
         state = self._ynison.state
         await self._ynison.update_playing_status(
             progress_ms=position * 1000,
-            duration_ms=state.duration_ms,
+            duration_ms=self._best_duration_ms(),
             paused=state.is_paused,
         )
