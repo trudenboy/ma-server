@@ -17,7 +17,7 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import LoginFailed
 from ya_passport_auth import SecretStr
 
-from provider import _find_sibling_token
+from music_assistant.providers.yandex_ynison.__init__ import _find_sibling_token
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -244,7 +244,7 @@ class TestClearActivePlayer:
 
         assert provider._active_player_id is None
         assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
-        provider.mass.players.trigger_player_update.assert_called_with("some-player")
+        provider.mass.players.trigger_player_update.assert_called_with("some-player")  # type: ignore[attr-defined]
 
 
 # ------------------------------------------------------------------
@@ -365,7 +365,7 @@ class TestYnisonStateHandling:
 
         # Verify force_update=True was used so the server sends a full
         # PLAYER_UPDATED event (not just a lightweight elapsed-time one)
-        provider.mass.players.trigger_player_update.assert_called_with("player1", force_update=True)
+        provider.mass.players.trigger_player_update.assert_called_with("player1", force_update=True)  # type: ignore[attr-defined]
 
     async def test_progress_throttled_update(self) -> None:
         """Regular progress updates trigger player update with throttling."""
@@ -393,7 +393,7 @@ class TestYnisonStateHandling:
 
         # First call — significant (new track) → always triggers
         await provider._handle_ynison_state(state)
-        call_count_1 = provider.mass.players.trigger_player_update.call_count
+        call_count_1 = provider.mass.players.trigger_player_update.call_count  # type: ignore[attr-defined]
 
         # Simulate same track still playing (no seek, no track change)
         provider._current_streaming_track_id = "track1"
@@ -416,12 +416,12 @@ class TestYnisonStateHandling:
 
         # Second call shortly after — throttled, no trigger
         await provider._handle_ynison_state(state2)
-        call_count_2 = provider.mass.players.trigger_player_update.call_count
+        call_count_2 = provider.mass.players.trigger_player_update.call_count  # type: ignore[attr-defined]
 
         # Force the throttle to expire
         provider._last_player_update_time = 0.0
         await provider._handle_ynison_state(state2)
-        call_count_3 = provider.mass.players.trigger_player_update.call_count
+        call_count_3 = provider.mass.players.trigger_player_update.call_count  # type: ignore[attr-defined]
 
         # First call triggered, second was throttled, third triggered
         assert call_count_1 >= 1
@@ -429,7 +429,7 @@ class TestYnisonStateHandling:
         assert call_count_3 > call_count_2
 
         # Regular (non-seek) updates should NOT use force_update
-        provider.mass.players.trigger_player_update.assert_called_with(
+        provider.mass.players.trigger_player_update.assert_called_with(  # type: ignore[attr-defined]
             "player1", force_update=False
         )
 
@@ -447,7 +447,7 @@ class TestYnisonStateHandling:
         assert meta is not None
         assert meta.duration == 185
         assert meta.elapsed_time == 30  # 30000ms → 30s
-        provider.mass.players.trigger_player_update.assert_called_once_with(
+        provider.mass.players.trigger_player_update.assert_called_once_with(  # type: ignore[attr-defined]
             "player1", force_update=True
         )
 
