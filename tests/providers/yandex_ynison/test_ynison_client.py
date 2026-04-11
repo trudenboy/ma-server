@@ -358,20 +358,28 @@ class TestReconnectSessionOwnership:
             logger=MagicMock(),
             http_session=ext_session,
         )
-        # Simulate that session reference was set initially
-        client._session = ext_session
-        # Mark session as closed to trigger re-creation branch
-        ext_session.closed = True
-        # Now mark it open again to test reuse path
-        ext_session.closed = False
-
-        # Trigger the reconnect session logic directly
         client._session = None  # simulate session lost
         client._stop_event.clear()
 
-        # The _reconnect method will try to connect, which will fail,
-        # but we can verify session selection logic via _session assignment
-        assert client._external_session is ext_session
+        def stop_after_session_select() -> None:
+            client._stop_event.set()
+            msg = "stop after session selection"
+            raise RuntimeError(msg)
+
+        sleep_path = "music_assistant.providers.yandex_ynison.ynison_client.asyncio.sleep"
+        with (
+            patch(sleep_path, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+            ) as mock_redir,
+        ):
+            mock_redir.side_effect = stop_after_session_select
+            await client._reconnect()
+
+        assert mock_redir.await_count == 1
+        assert client._session is ext_session
 
     async def test_reconnect_raises_on_closed_external_session(self) -> None:
         """Reconnect raises RuntimeError if external session is closed."""

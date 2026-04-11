@@ -477,12 +477,18 @@ class YandexYnisonProvider(PluginProvider):
             current_target = self._get_target_player_id()
             if new_player_id != current_target:
                 self.logger.debug(
-                    "Player switching disabled, ignoring selection on %s",
+                    "Player switching disabled, rejecting selection on %s",
                     new_player_id,
                 )
                 self._source_details.in_use_by = current_target
                 self.mass.players.trigger_player_update(new_player_id)
-                return
+                if current_target:
+                    self.mass.players.trigger_player_update(current_target)
+                msg = (
+                    "Player switching is disabled; source must remain on "
+                    f"{current_target or 'the configured target player'}"
+                )
+                raise RuntimeError(msg)
 
         # Stop previous player if switching
         if self._active_player_id and self._active_player_id != new_player_id:

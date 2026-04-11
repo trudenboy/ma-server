@@ -216,10 +216,12 @@ class TestSourceSelection:
         mass.players.get_player.return_value = MagicMock()
 
         provider._source_details.in_use_by = "other-player"
-        await provider._on_source_selected()
+        with pytest.raises(RuntimeError, match="Player switching is disabled"):
+            await provider._on_source_selected()
 
-        # Should have rejected the switch
+        # Should have rejected the switch and restored in_use_by
         assert provider._active_player_id is None
+        assert provider._source_details.in_use_by == "default-player"
 
 
 # ------------------------------------------------------------------
