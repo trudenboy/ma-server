@@ -98,8 +98,6 @@ class YandexYnisonProvider(PluginProvider):
         self._last_progress_time: float = 0.0
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
-        self._pending_advance_index: int | None = None
-        self._queue_replenished: asyncio.Event | None = None
 
         # PluginSource
         self._source_details = PluginSource(
@@ -357,14 +355,6 @@ class YandexYnisonProvider(PluginProvider):
             state.is_paused,
             state.progress_ms,
         )
-
-        # Signal pending EOV advance if queue grew enough
-        if (
-            self._pending_advance_index is not None
-            and self._queue_replenished is not None
-            and self._pending_advance_index < len(playable_list)
-        ):
-            self._queue_replenished.set()
 
         if is_our_device and not state.is_paused:
             await self._activate_playback(state)
@@ -701,8 +691,8 @@ class YandexYnisonProvider(PluginProvider):
 
         If the next index is within the playable list, we advance immediately.
         If we're at the end (typical for RADIO/wave with short queues),
-        we request EOV replenishment first, wait for the queue to grow,
-        and then advance.
+        we fetch more tracks via the Yandex Music API, append them to the
+        playable_list, and then advance.
         """
         if not self._ynison:
             return
@@ -735,30 +725,101 @@ class YandexYnisonProvider(PluginProvider):
         if next_index < len(playable_list):
             # 2a. Queue has room — advance immediately
             await self._advance_queue_index(next_index)
-            # EOV sync for future replenishment (radio/wave)
-            await self._ynison.sync_state_from_eov(actual_queue_id=entity_id)
         else:
-            # 2b. At end of queue — request EOV replenishment first
-            self.logger.info(
-                "At end of queue (index %d, len %d), requesting EOV replenishment before advancing",
-                current_index,
-                len(playable_list),
-            )
-            self._pending_advance_index = next_index
-            self._queue_replenished = asyncio.Event()
-            await self._ynison.sync_state_from_eov(actual_queue_id=entity_id)
-            try:
-                await asyncio.wait_for(self._queue_replenished.wait(), timeout=5.0)
-                # Queue grew — advance now with fresh state
-                await self._advance_queue_index(next_index)
-            except TimeoutError:
-                self.logger.warning("EOV replenishment timed out after 5s, cannot advance")
-            finally:
-                self._pending_advance_index = None
-                self._queue_replenished = None
+            # 2b. At end of queue — fetch more tracks and advance
+            expanded = await self._replenish_radio_queue(entity_id, entity_type, playable_list)
+            if expanded:
+                await self._advance_queue_index(next_index, expanded_list=expanded)
+            else:
+                self.logger.warning(
+                    "Could not replenish queue (entity=%s type=%s), cannot advance",
+                    entity_id,
+                    entity_type,
+                )
 
-    async def _advance_queue_index(self, next_index: int) -> None:
-        """Send update_player_state to advance the queue to next_index."""
+    async def _replenish_radio_queue(
+        self,
+        entity_id: str,
+        entity_type: str,
+        playable_list: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        """Fetch more tracks from Yandex Music API and return expanded playable_list.
+
+        The active device is responsible for replenishing RADIO/wave queues.
+        Ynison only syncs state — it does NOT generate new tracks.
+        """
+        if not self._yandex_provider:
+            self.logger.warning("No yandex_music provider available for radio replenishment")
+            return None
+
+        # Determine the last track ID for pagination
+        last_track_id: str | None = None
+        if playable_list:
+            last_track_id = playable_list[-1].get("playable_id")
+
+        self.logger.info(
+            "Fetching more tracks for %s station %s (queue=%s)",
+            entity_type,
+            entity_id,
+            last_track_id,
+        )
+
+        try:
+            client = self._yandex_provider.client
+            tracks, batch_id = await client.get_rotor_station_tracks(entity_id, queue=last_track_id)
+        except Exception:
+            self.logger.exception("Failed to fetch radio tracks for %s", entity_id)
+            return None
+
+        if not tracks:
+            self.logger.warning("No tracks returned for station %s", entity_id)
+            return None
+
+        # Determine the 'from' field from existing items
+        from_field = ""
+        if playable_list:
+            from_field = playable_list[0].get("from", "")
+
+        # Convert tracks to Ynison playable_list format
+        new_items: list[dict[str, Any]] = []
+        for track in tracks:
+            album_id = ""
+            if hasattr(track, "albums") and track.albums:
+                album_id = str(track.albums[0].id) if track.albums[0].id else ""
+            cover = ""
+            if hasattr(track, "cover_uri") and track.cover_uri:
+                cover = track.cover_uri
+            new_items.append(
+                {
+                    "playable_id": str(track.id),
+                    "album_id_optional": album_id,
+                    "playable_type": "TRACK",
+                    "from": from_field,
+                    "title": track.title or "",
+                    "cover_url_optional": cover,
+                }
+            )
+
+        self.logger.info(
+            "Fetched %d new tracks for station %s (batch=%s)",
+            len(new_items),
+            entity_id,
+            batch_id,
+        )
+
+        return list(playable_list) + new_items
+
+    async def _advance_queue_index(
+        self,
+        next_index: int,
+        *,
+        expanded_list: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Send update_player_state to advance the queue to next_index.
+
+        If expanded_list is provided, it replaces the playable_list
+        (used after radio queue replenishment).
+        """
         if not self._ynison:
             return
         state = self._ynison.state
@@ -766,6 +827,8 @@ class YandexYnisonProvider(PluginProvider):
         new_state = dict(state.player_state)
         new_state["player_queue"] = dict(queue)
         new_state["player_queue"]["current_playable_index"] = next_index
+        if expanded_list is not None:
+            new_state["player_queue"]["playable_list"] = expanded_list
         new_state["status"] = dict(new_state.get("status", {}))
         new_state["status"]["progress_ms"] = 0
         new_state["status"]["duration_ms"] = 0

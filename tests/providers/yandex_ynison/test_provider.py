@@ -460,7 +460,7 @@ class TestYnisonStateHandling:
         )
 
     async def test_signal_track_completion_advances_index(self) -> None:
-        """Track completion advances index, reports status, and requests EOV sync."""
+        """Track completion advances index and reports status."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -477,7 +477,6 @@ class TestYnisonStateHandling:
         )
         mock_ynison.update_playing_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
-        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
@@ -492,8 +491,6 @@ class TestYnisonStateHandling:
         assert sent_state["player_queue"]["current_playable_index"] == 1
         assert sent_state["status"]["progress_ms"] == 0
         assert sent_state["status"]["paused"] is False
-        # 3. EOV sync with actual entity_id
-        mock_ynison.sync_state_from_eov.assert_awaited_once_with(actual_queue_id="playlist:123")
         # Resets actual duration for next track
         assert provider._actual_duration_ms == 0
 
@@ -515,7 +512,6 @@ class TestYnisonStateHandling:
         mock_ynison.update_playing_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         mock_ynison.send_full_state = AsyncMock()
-        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
@@ -540,7 +536,6 @@ class TestYnisonStateHandling:
         )
         mock_ynison.update_playing_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
-        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
@@ -549,71 +544,58 @@ class TestYnisonStateHandling:
             progress_ms=300000, duration_ms=300000, paused=False
         )
 
-    async def test_signal_track_completion_eov_wait_for_radio(self) -> None:
-        """At end of RADIO queue, EOV is sent first and index advances after replenishment."""
+    async def test_signal_track_completion_radio_replenishes_queue(self) -> None:
+        """At end of RADIO queue, fetches more tracks via YM API and advances."""
         provider = _make_provider()
         mock_ynison = MagicMock()
-        # RADIO queue with only 2 items, currently at index 1 (last)
-        initial_state = YnisonState(
+        mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
             player_state={
                 "status": {"paused": False, "progress_ms": 200000, "duration_ms": 215000},
                 "player_queue": {
                     "current_playable_index": 1,
                     "playable_list": [
-                        {"playable_id": "t1"},
-                        {"playable_id": "t2"},
+                        {"playable_id": "t1", "from": "radio-src"},
+                        {"playable_id": "t2", "from": "radio-src"},
                     ],
-                    "entity_id": "mix-by-mood:3",
+                    "entity_id": "user:onyourwave",
                     "entity_type": "RADIO",
                 },
             },
         )
-        mock_ynison.state = initial_state
         mock_ynison.update_playing_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
-
-        # Simulate EOV adding tracks: when sync_state_from_eov is called,
-        # update the state to have more tracks and signal the event.
-        async def _fake_eov(**_kwargs: Any) -> None:
-            mock_ynison.state = YnisonState(
-                active_device_id=provider._device_id,
-                player_state={
-                    "status": initial_state.player_state["status"],
-                    "player_queue": {
-                        "current_playable_index": 1,
-                        "playable_list": [
-                            {"playable_id": "t1"},
-                            {"playable_id": "t2"},
-                            {"playable_id": "t3"},
-                            {"playable_id": "t4"},
-                        ],
-                        "entity_id": "mix-by-mood:3",
-                        "entity_type": "RADIO",
-                    },
-                },
-            )
-            # Simulate Ynison delivering the replenished state
-            if provider._queue_replenished is not None:
-                provider._queue_replenished.set()
-
-        mock_ynison.sync_state_from_eov = AsyncMock(side_effect=_fake_eov)
         provider._ynison = mock_ynison
+
+        # Mock YM provider returning new tracks
+        mock_track = MagicMock()
+        mock_track.id = "t3"
+        mock_track.title = "New Track"
+        mock_track.albums = [MagicMock(id="a3")]
+        mock_track.cover_uri = "cover3.jpg"
+
+        mock_client = MagicMock()
+        mock_client.get_rotor_station_tracks = AsyncMock(return_value=([mock_track], "batch-123"))
+        mock_ym_provider = MagicMock()
+        mock_ym_provider.client = mock_client
+        provider._yandex_provider = mock_ym_provider
 
         await provider._signal_track_completion()
 
-        # EOV was called first
-        mock_ynison.sync_state_from_eov.assert_awaited_once_with(actual_queue_id="mix-by-mood:3")
-        # Index was advanced after replenishment
+        # Fetched tracks from station
+        mock_client.get_rotor_station_tracks.assert_awaited_once_with("user:onyourwave", queue="t2")
+        # Advanced index to 2 with expanded playable_list
         call_args = mock_ynison.update_player_state.call_args
         sent_state = call_args.kwargs["player_state"]
         assert sent_state["player_queue"]["current_playable_index"] == 2
-        # Cleanup
-        assert provider._pending_advance_index is None
-        assert provider._queue_replenished is None
+        expanded = sent_state["player_queue"]["playable_list"]
+        assert len(expanded) == 3
+        assert expanded[2]["playable_id"] == "t3"
+        assert expanded[2]["title"] == "New Track"
+        assert expanded[2]["from"] == "radio-src"
 
-    async def test_signal_track_completion_eov_timeout(self) -> None:
-        """At end of queue, if EOV doesn't replenish within timeout, no crash."""
+    async def test_signal_track_completion_radio_no_provider(self) -> None:
+        """At end of queue without YM provider, does not crash."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -626,30 +608,22 @@ class TestYnisonStateHandling:
                         {"playable_id": "t1"},
                         {"playable_id": "t2"},
                     ],
-                    "entity_id": "mix-by-mood:3",
+                    "entity_id": "user:onyourwave",
                     "entity_type": "RADIO",
                 },
             },
         )
         mock_ynison.update_playing_status = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
-        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
+        provider._yandex_provider = None
 
-        # Patch timeout to be very short so test doesn't wait 5s
-        with patch(
-            "music_assistant.providers.yandex_ynison.provider.asyncio.wait_for",
-            side_effect=TimeoutError,
-        ):
-            await provider._signal_track_completion()
+        await provider._signal_track_completion()
 
-        # EOV was called
-        mock_ynison.sync_state_from_eov.assert_awaited_once()
-        # update_player_state was NOT called (timeout)
+        # Status reported
+        mock_ynison.update_playing_status.assert_awaited_once()
+        # Cannot advance — no provider to fetch tracks
         mock_ynison.update_player_state.assert_not_called()
-        # Cleanup happened
-        assert provider._pending_advance_index is None
-        assert provider._queue_replenished is None
 
     async def test_best_duration_prefers_actual(self) -> None:
         """_best_duration_ms prefers _actual_duration_ms over state.duration_ms."""
