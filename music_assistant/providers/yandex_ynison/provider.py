@@ -98,6 +98,8 @@ class YandexYnisonProvider(PluginProvider):
         self._last_progress_time: float = 0.0
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
+        self._prefetched_list: list[dict[str, Any]] | None = None
+        self._prefetch_task: asyncio.Task[Any] | None = None
 
         # PluginSource
         self._source_details = PluginSource(
@@ -357,6 +359,8 @@ class YandexYnisonProvider(PluginProvider):
         )
 
         if is_our_device and not state.is_paused:
+            # Pre-fetch next batch when playing second-to-last track
+            self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
             await self._activate_playback(state)
         elif is_our_device and state.is_paused:
             # Our device but paused — stop player, keep association
@@ -592,6 +596,7 @@ class YandexYnisonProvider(PluginProvider):
         self._active_player_id = None
         self._source_details.in_use_by = None
         self._stream_stop_event.set()
+        self._prefetched_list = None
 
         if prev_player_id:
             self.logger.debug(
@@ -683,6 +688,39 @@ class YandexYnisonProvider(PluginProvider):
             paused=True,
         )
 
+    def _maybe_prefetch(
+        self,
+        current_index: int,
+        playable_list: list[dict[str, Any]],
+        entity_id: str,
+        entity_type: str,
+    ) -> None:
+        """Kick off background prefetch when playing the second-to-last track."""
+        if not self._yandex_provider or not playable_list:
+            return
+        # second-to-last = index == len - 2
+        if current_index != len(playable_list) - 2:
+            return
+        # Already prefetched or prefetch in progress
+        if self._prefetched_list is not None:
+            return
+        if self._prefetch_task and not self._prefetch_task.done():
+            return
+
+        self.logger.info(
+            "Pre-fetching tracks (at index %d/%d, entity=%s)",
+            current_index,
+            len(playable_list),
+            entity_id[:40] if entity_id else "<none>",
+        )
+
+        async def _do_prefetch() -> None:
+            result = await self._replenish_radio_queue(entity_id, entity_type, playable_list)
+            if result:
+                self._prefetched_list = result
+
+        self._prefetch_task = asyncio.create_task(_do_prefetch())
+
     async def _signal_track_completion(self) -> None:
         """Signal that the current track finished playing.
 
@@ -726,8 +764,19 @@ class YandexYnisonProvider(PluginProvider):
             # 2a. Queue has room — advance immediately
             await self._advance_queue_index(next_index)
         else:
-            # 2b. At end of queue — fetch more tracks and advance
-            expanded = await self._replenish_radio_queue(entity_id, entity_type, playable_list)
+            # 2b. At end of queue — use prefetched data or fetch now
+            expanded: list[dict[str, Any]] | None = None
+            if self._prefetched_list:
+                self.logger.info("Using pre-fetched queue (%d items)", len(self._prefetched_list))
+                expanded = self._prefetched_list
+                self._prefetched_list = None
+            elif self._prefetch_task and not self._prefetch_task.done():
+                self.logger.info("Waiting for in-flight prefetch...")
+                await self._prefetch_task
+                expanded = self._prefetched_list
+                self._prefetched_list = None
+            else:
+                expanded = await self._replenish_radio_queue(entity_id, entity_type, playable_list)
             if expanded:
                 await self._advance_queue_index(next_index, expanded_list=expanded)
             else:

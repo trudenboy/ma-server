@@ -625,6 +625,110 @@ class TestYnisonStateHandling:
         # Cannot advance — no provider to fetch tracks
         mock_ynison.update_player_state.assert_not_called()
 
+    async def test_prefetch_on_second_to_last_track(self) -> None:
+        """Pre-fetches tracks when playing second-to-last item in queue."""
+        provider = _make_provider()
+        mock_ynison = MagicMock()
+        # 4 tracks, currently at index 2 (second-to-last)
+        mock_ynison.state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"paused": False, "progress_ms": 10000, "duration_ms": 200000},
+                "player_queue": {
+                    "current_playable_index": 2,
+                    "playable_list": [
+                        {"playable_id": "t1", "from": "src"},
+                        {"playable_id": "t2", "from": "src"},
+                        {"playable_id": "t3", "from": "src"},
+                        {"playable_id": "t4", "from": "src"},
+                    ],
+                    "entity_id": "user:onyourwave",
+                    "entity_type": "RADIO",
+                },
+            },
+        )
+        provider._ynison = mock_ynison
+
+        mock_track = MagicMock()
+        mock_track.id = "t5"
+        mock_track.title = "Prefetched"
+        mock_track.albums = [MagicMock(id="a5")]
+        mock_track.cover_uri = "cover5.jpg"
+
+        mock_client = MagicMock()
+        mock_client.get_rotor_station_tracks = AsyncMock(return_value=([mock_track], "batch-pfx"))
+        mock_ym_provider = MagicMock()
+        mock_ym_provider.client = mock_client
+        provider._yandex_provider = mock_ym_provider
+
+        # Trigger prefetch
+        provider._maybe_prefetch(
+            2,
+            mock_ynison.state.player_state["player_queue"]["playable_list"],
+            "user:onyourwave",
+            "RADIO",
+        )
+        assert provider._prefetch_task is not None
+        await provider._prefetch_task
+
+        # Prefetched list should contain old + new
+        assert provider._prefetched_list is not None
+        assert len(provider._prefetched_list) == 5
+        assert provider._prefetched_list[4]["playable_id"] == "t5"
+
+    async def test_signal_completion_uses_prefetched(self) -> None:
+        """Track completion uses pre-fetched data instead of making API call."""
+        provider = _make_provider()
+        mock_ynison = MagicMock()
+        mock_ynison.state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"paused": False, "progress_ms": 200000, "duration_ms": 215000},
+                "player_queue": {
+                    "current_playable_index": 3,
+                    "playable_list": [
+                        {"playable_id": "t1"},
+                        {"playable_id": "t2"},
+                        {"playable_id": "t3"},
+                        {"playable_id": "t4"},
+                    ],
+                    "entity_id": "user:onyourwave",
+                    "entity_type": "RADIO",
+                },
+            },
+        )
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.update_player_state = AsyncMock()
+        provider._ynison = mock_ynison
+
+        # Simulate pre-fetched data
+        prefetched = [
+            {"playable_id": "t1"},
+            {"playable_id": "t2"},
+            {"playable_id": "t3"},
+            {"playable_id": "t4"},
+            {"playable_id": "t5"},
+        ]
+        provider._prefetched_list = prefetched
+
+        mock_client = MagicMock()
+        mock_client.get_rotor_station_tracks = AsyncMock()
+        mock_ym_provider = MagicMock()
+        mock_ym_provider.client = mock_client
+        provider._yandex_provider = mock_ym_provider
+
+        await provider._signal_track_completion()
+
+        # Should NOT have called API — used prefetched
+        mock_client.get_rotor_station_tracks.assert_not_awaited()
+        # Advanced with prefetched list
+        call_args = mock_ynison.update_player_state.call_args
+        sent_state = call_args.kwargs["player_state"]
+        assert sent_state["player_queue"]["current_playable_index"] == 4
+        assert len(sent_state["player_queue"]["playable_list"]) == 5
+        # Prefetch consumed
+        assert provider._prefetched_list is None
+
     async def test_best_duration_prefers_actual(self) -> None:
         """_best_duration_ms prefers _actual_duration_ms over state.duration_ms."""
         provider = _make_provider()
