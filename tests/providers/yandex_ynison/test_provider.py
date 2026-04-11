@@ -476,6 +476,35 @@ class TestYnisonStateHandling:
         assert sent_state["status"]["progress_ms"] == 0
         assert sent_state["player_queue"]["current_playable_index"] == 1
 
+    async def test_advance_queue_exhausted_signals_completion(self) -> None:
+        """When queue is exhausted, signals track completion to Ynison instead of stopping."""
+        provider = _make_provider()
+        mock_ynison = MagicMock()
+        mock_ynison.state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"paused": False, "progress_ms": 180000, "duration_ms": 200000},
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": "t1"}],
+                },
+            },
+        )
+        mock_ynison.send_full_state = AsyncMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        provider._ynison = mock_ynison
+
+        await provider._advance_queue()
+
+        # Should NOT call send_full_state (no next track to advance to)
+        mock_ynison.send_full_state.assert_not_called()
+        # Should signal completion: progress=duration, paused=True
+        mock_ynison.update_playing_status.assert_awaited_once_with(
+            progress_ms=200000, duration_ms=200000, paused=True
+        )
+        # Should NOT set stream stop (wait for controller to push new track)
+        assert not provider._stream_stop_event.is_set()
+
 
 # ------------------------------------------------------------------
 # Token resolution

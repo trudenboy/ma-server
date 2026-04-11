@@ -227,11 +227,13 @@ class YandexYnisonProvider(PluginProvider):
             if not self._track_changed_event.is_set() and self._ynison:
                 self.logger.info("Track %s finished, advancing to next", track_id)
                 await self._advance_queue()
-                # Wait for Ynison to confirm the track change
+                # Wait for Ynison (or controller app) to confirm the track change.
+                # Use a longer timeout when queue was exhausted: the controller
+                # needs time to fetch and push more tracks (radio/My Wave).
                 try:
-                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=10.0)
+                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
                 except TimeoutError:
-                    self.logger.debug("No track change after advance, stopping stream")
+                    self.logger.info("No track change after advance, stopping stream")
                     break
 
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
@@ -632,7 +634,13 @@ class YandexYnisonProvider(PluginProvider):
         )
 
     async def _advance_queue(self) -> None:
-        """Advance to the next track in the Ynison queue."""
+        """Advance to the next track in the Ynison queue.
+
+        If the next track exists in playable_list, sends the updated index.
+        Otherwise, signals track completion to Ynison (progress=duration, paused)
+        so the controller app can load more tracks (e.g. in radio/My Wave mode),
+        then waits for the controller to push a new track.
+        """
         if not self._ynison:
             return
         state = self._ynison.state
@@ -648,8 +656,17 @@ class YandexYnisonProvider(PluginProvider):
             new_state["status"]["paused"] = False
             await self._ynison.send_full_state(player_state=new_state)
         else:
-            self.logger.info("Queue exhausted, no next track")
-            self._stream_stop_event.set()
+            # Signal track completion so the controller app knows the track ended
+            # and can populate more tracks (critical for radio/My Wave).
+            duration = state.duration_ms or 0
+            self.logger.info(
+                "Queue exhausted at index %d/%d, signaling completion to Ynison",
+                current_index,
+                len(playable_list),
+            )
+            await self._ynison.update_playing_status(
+                progress_ms=duration, duration_ms=duration, paused=True
+            )
 
     async def _on_next(self) -> None:
         """Handle next track command — update queue index in Ynison."""
