@@ -217,6 +217,26 @@ class YnisonClient:
         }
         await self._send(msg)
 
+    async def sync_state_from_eov(self, actual_queue_id: str = "") -> None:
+        """Request queue sync from the EOV (Unified Playback Queue) backend.
+
+        Asks the Ynison server to refresh the queue from the central EOV service.
+        Only works when this device is the active player. If the EOV queue
+        differs from actual_queue_id, the server broadcasts the updated state.
+
+        :param actual_queue_id: Current queue ID (empty string forces refresh).
+        """
+        msg = {
+            "sync_state_from_eov": {
+                "actual_queue_id": actual_queue_id,
+            },
+            "rid": str(uuid.uuid4()),
+            "player_action_timestamp_ms": 0,
+            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+        }
+        self._logger.debug("Requesting EOV queue sync (queue_id=%r)", actual_queue_id)
+        await self._send(msg)
+
     async def send_full_state(
         self,
         player_state: dict[str, Any] | None = None,

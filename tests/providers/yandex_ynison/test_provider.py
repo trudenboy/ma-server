@@ -487,7 +487,7 @@ class TestYnisonStateHandling:
         assert provider._actual_duration_ms == 0
 
     async def test_advance_queue_exhausted_signals_completion(self) -> None:
-        """When queue is exhausted, signals completion with paused=False to keep radio alive."""
+        """When queue is exhausted, signals completion and requests EOV sync."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -502,6 +502,7 @@ class TestYnisonStateHandling:
         )
         mock_ynison.send_full_state = AsyncMock()
         mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         result = await provider._advance_queue()
@@ -512,6 +513,8 @@ class TestYnisonStateHandling:
         mock_ynison.update_playing_status.assert_awaited_once_with(
             progress_ms=200000, duration_ms=200000, paused=False
         )
+        # EOV sync requested to replenish the queue
+        mock_ynison.sync_state_from_eov.assert_awaited_once()
 
     async def test_advance_queue_exhausted_uses_actual_duration(self) -> None:
         """Exhausted queue uses _actual_duration_ms instead of stale state.duration_ms."""
@@ -530,6 +533,7 @@ class TestYnisonStateHandling:
         )
         mock_ynison.send_full_state = AsyncMock()
         mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._advance_queue()
@@ -537,6 +541,7 @@ class TestYnisonStateHandling:
         mock_ynison.update_playing_status.assert_awaited_once_with(
             progress_ms=300000, duration_ms=300000, paused=False
         )
+        mock_ynison.sync_state_from_eov.assert_awaited_once()
 
     async def test_best_duration_prefers_actual(self) -> None:
         """_best_duration_ms prefers _actual_duration_ms over state.duration_ms."""

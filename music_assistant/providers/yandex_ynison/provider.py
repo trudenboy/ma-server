@@ -240,9 +240,8 @@ class YandexYnisonProvider(PluginProvider):
                         self._current_streaming_track_id = None
                         break
                 else:
-                    # Queue exhausted — completion signal sent (paused=False
-                    # so the YM radio engine stays active). Wait for the
-                    # controller to push more tracks before giving up.
+                    # Queue exhausted — EOV sync requested to replenish
+                    # the queue. Wait for the backend to push new tracks.
                     try:
                         await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
                     except TimeoutError:
@@ -701,18 +700,18 @@ class YandexYnisonProvider(PluginProvider):
             await self._ynison.send_full_state(player_state=new_state)
             return True
 
-        # Signal track completion so the controller app knows the track ended.
-        # Keep paused=False so the YM app radio engine stays active and can
-        # push more tracks (paused=True would end the radio session).
+        # Queue exhausted — request the EOV backend to replenish the queue.
+        # Also signal track completion (paused=False to keep radio alive).
         duration = self._best_duration_ms()
         self.logger.info(
-            "Queue exhausted at index %d/%d, signaling completion to Ynison",
+            "Queue exhausted at index %d/%d, requesting EOV sync",
             current_index,
             len(playable_list),
         )
         await self._ynison.update_playing_status(
             progress_ms=duration, duration_ms=duration, paused=False
         )
+        await self._ynison.sync_state_from_eov()
         return False
 
     async def _on_next(self) -> None:
