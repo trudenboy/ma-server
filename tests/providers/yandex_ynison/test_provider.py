@@ -459,8 +459,8 @@ class TestYnisonStateHandling:
             progress_ms=30000, duration_ms=185000, paused=False
         )
 
-    async def test_signal_track_completion_sends_status_and_eov(self) -> None:
-        """Track completion signals progress=duration and requests EOV sync."""
+    async def test_signal_track_completion_sends_status(self) -> None:
+        """Track completion signals progress=duration (passive — Yandex advances queue)."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -474,7 +474,6 @@ class TestYnisonStateHandling:
             },
         )
         mock_ynison.update_playing_status = AsyncMock()
-        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
@@ -483,8 +482,6 @@ class TestYnisonStateHandling:
         mock_ynison.update_playing_status.assert_awaited_once_with(
             progress_ms=200000, duration_ms=200000, paused=False
         )
-        # EOV sync requested to replenish the queue
-        mock_ynison.sync_state_from_eov.assert_awaited_once()
         # Resets actual duration for next track
         assert provider._actual_duration_ms == 0
 
@@ -503,16 +500,17 @@ class TestYnisonStateHandling:
             },
         )
         mock_ynison.update_playing_status = AsyncMock()
-        mock_ynison.sync_state_from_eov = AsyncMock()
         mock_ynison.update_player_state = AsyncMock()
         mock_ynison.send_full_state = AsyncMock()
+        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
 
-        # Must NOT send any queue state changes
+        # Must NOT send any queue state changes or EOV sync
         mock_ynison.update_player_state.assert_not_called()
         mock_ynison.send_full_state.assert_not_called()
+        mock_ynison.sync_state_from_eov.assert_not_called()
 
     async def test_signal_track_completion_uses_actual_duration(self) -> None:
         """Track completion prefers _actual_duration_ms over stale state.duration_ms."""
@@ -530,7 +528,6 @@ class TestYnisonStateHandling:
             },
         )
         mock_ynison.update_playing_status = AsyncMock()
-        mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()

@@ -335,6 +335,27 @@ class YandexYnisonProvider(PluginProvider):
         """Handle state update from Ynison."""
         is_our_device = state.active_device_id == self._device_id
 
+        # Detailed queue logging for diagnostics
+        queue = state.player_state.get("player_queue", {})
+        playable_list = queue.get("playable_list", [])
+        current_index = queue.get("current_playable_index", -1)
+        entity_type = queue.get("entity_type", "")
+        entity_id = queue.get("entity_id", "")
+        track_id = state.current_track_id
+        self.logger.debug(
+            "Ynison state: active_device=%s (ours=%s) track=%s "
+            "index=%d/%d entity=%s type=%s paused=%s progress=%dms",
+            state.active_device_id,
+            is_our_device,
+            track_id,
+            current_index,
+            len(playable_list),
+            entity_id[:40] if entity_id else "<none>",
+            entity_type,
+            state.is_paused,
+            state.progress_ms,
+        )
+
         if is_our_device and not state.is_paused:
             await self._activate_playback(state)
         elif is_our_device and state.is_paused:
@@ -669,9 +690,6 @@ class YandexYnisonProvider(PluginProvider):
         manipulate playable_index ourselves. Instead, we signal
         progress=duration so the YM app / Ynison backend advances the
         queue and pushes the next track via the WebSocket.
-
-        Also sends SyncStateFromEOV to request queue replenishment
-        from the centralized EOV service (important for radio/My Wave).
         """
         if not self._ynison:
             return
@@ -680,16 +698,21 @@ class YandexYnisonProvider(PluginProvider):
         queue = state.player_state.get("player_queue", {})
         current_index = queue.get("current_playable_index", 0)
         playable_list = queue.get("playable_list", [])
+        entity_type = queue.get("entity_type", "")
+        entity_id = queue.get("entity_id", "")
         self.logger.info(
-            "Track finished at index %d/%d, signaling completion to Ynison",
+            "Track finished at index %d/%d (entity=%s type=%s), "
+            "signaling completion (duration=%dms)",
             current_index,
             len(playable_list),
+            entity_id[:40] if entity_id else "<none>",
+            entity_type,
+            duration,
         )
         self._actual_duration_ms = 0
         await self._ynison.update_playing_status(
             progress_ms=duration, duration_ms=duration, paused=False
         )
-        await self._ynison.sync_state_from_eov()
 
     async def _on_next(self) -> None:
         """Handle next track command — signal track end so Yandex advances."""

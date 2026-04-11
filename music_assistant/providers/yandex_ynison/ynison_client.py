@@ -196,6 +196,12 @@ class YnisonClient:
 
     async def update_playing_status(self, progress_ms: int, duration_ms: int, paused: bool) -> None:
         """Send playback status update to Ynison."""
+        self._logger.info(
+            "→ update_playing_status: progress=%dms duration=%dms paused=%s",
+            progress_ms,
+            duration_ms,
+            paused,
+        )
         msg = {
             "update_playing_status": {
                 "playing_status": {
@@ -234,7 +240,7 @@ class YnisonClient:
             "player_action_timestamp_ms": 0,
             "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
         }
-        self._logger.debug("Requesting EOV queue sync (queue_id=%r)", actual_queue_id)
+        self._logger.info("→ sync_state_from_eov: queue_id=%r", actual_queue_id)
         await self._send(msg)
 
     async def update_player_state(self, player_state: dict[str, Any]) -> None:
@@ -243,6 +249,13 @@ class YnisonClient:
         Unlike send_full_state, this does NOT reset active device status.
         Use this for track advances, queue modifications, repeat/shuffle changes.
         """
+        queue = player_state.get("player_queue", {})
+        self._logger.info(
+            "→ update_player_state: index=%s queue_len=%d entity_type=%s",
+            queue.get("current_playable_index"),
+            len(queue.get("playable_list", [])),
+            queue.get("entity_type", ""),
+        )
         msg = {
             "update_player_state": {
                 "player_state": player_state,
@@ -492,11 +505,41 @@ class YnisonClient:
 
     def _parse_state(self, data: dict[str, Any]) -> None:
         """Parse PutYnisonStateResponse into YnisonState."""
+        old_track = self.state.current_track_id
+        old_index = self.state.player_state.get("player_queue", {}).get(
+            "current_playable_index", -1
+        )
+
         self.state.player_state = data.get("player_state", self.state.player_state)
         self.state.active_device_id = data.get(
             "active_device_id_optional", self.state.active_device_id
         )
         self.state.devices = data.get("devices", self.state.devices)
+
+        new_track = self.state.current_track_id
+        queue = self.state.player_state.get("player_queue", {})
+        new_index = queue.get("current_playable_index", -1)
+        queue_len = len(queue.get("playable_list", []))
+        entity_type = queue.get("entity_type", "")
+
+        if old_track != new_track or old_index != new_index:
+            self._logger.info(
+                "Ynison queue change: track %s→%s index %d→%d queue_len=%d entity_type=%s",
+                old_track,
+                new_track,
+                old_index,
+                new_index,
+                queue_len,
+                entity_type,
+            )
+        else:
+            self._logger.debug(
+                "Ynison state update (no queue change): track=%s index=%d progress=%dms paused=%s",
+                new_track,
+                new_index,
+                self.state.progress_ms,
+                self.state.is_paused,
+            )
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff."""
