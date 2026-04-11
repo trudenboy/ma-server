@@ -237,7 +237,7 @@ class TestClearActivePlayer:
         provider._clear_active_player()
 
         assert provider._active_player_id is None
-        assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
+        assert provider._source_details.in_use_by is None
         provider.mass.players.trigger_player_update.assert_called_with("some-player")
 
 
@@ -320,4 +320,4 @@ class TestYnisonStateHandling:
         await provider._handle_ynison_state(state)
 
         assert provider._active_player_id is None
-        assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
+        assert provider._source_details.in_use_by is None

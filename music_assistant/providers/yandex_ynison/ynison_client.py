@@ -371,7 +371,12 @@ class YnisonClient:
         headers = self._build_headers(redirect_ticket=ticket, session_id=session_id)
 
         ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
-        self._ws = await self._session.ws_connect(url, headers=headers, timeout=ws_timeout)
+        try:
+            self._ws = await self._session.ws_connect(url, headers=headers, timeout=ws_timeout)
+        except aiohttp.WSServerHandshakeError as err:
+            if err.status in (401, 403):
+                raise LoginFailed("Ynison authentication failed — invalid token") from err
+            raise
         self._connected = True
         self._logger.info("Connected to Ynison state service at %s", host)
 
