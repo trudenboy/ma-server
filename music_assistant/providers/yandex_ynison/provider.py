@@ -589,7 +589,12 @@ class YandexYnisonProvider(PluginProvider):
                     new_player_id,
                 )
                 self._source_details.in_use_by = current_target
-                self.mass.players.trigger_player_update(new_player_id)
+                # Revert the rejected player's active_source back to its MA queue
+                # (the controller already set it to our plugin before calling on_select)
+                try:
+                    await self.mass.players.select_source(new_player_id, new_player_id)
+                except Exception:
+                    self.logger.debug("Could not revert active_source for %s", new_player_id)
                 if current_target:
                     self.mass.players.trigger_player_update(current_target)
                 msg = (
