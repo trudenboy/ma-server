@@ -208,18 +208,6 @@ class YnisonClient:
         }
         await self._send(msg)
 
-    async def update_volume(self, volume: float) -> None:
-        """Send volume update to Ynison (0.0 - 1.0)."""
-        msg = {
-            "update_volume_info": {
-                "device_id_optional": self._device_info.device_id,
-                "volume_info": {
-                    "volume": max(0.0, min(1.0, volume)),
-                },
-            },
-        }
-        await self._send(msg)
-
     async def update_active_device(self, device_id: str) -> None:
         """Request playback transfer to this device."""
         msg = {

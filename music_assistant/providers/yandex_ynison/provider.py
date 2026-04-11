@@ -84,7 +84,6 @@ class YandexYnisonProvider(PluginProvider):
         self._runner_task: asyncio.Task[None] | None = None
         self._on_unload_callbacks: list[Callable[..., None]] = []
         self._yandex_provider: Any = None
-        self._last_volume_sent: int | None = None
         self._current_streaming_track_id: str | None = None
         self._track_changed_event = asyncio.Event()
         self._stream_stop_event = asyncio.Event()
@@ -591,14 +590,12 @@ class YandexYnisonProvider(PluginProvider):
             self._source_details.on_next = self._on_next
             self._source_details.on_previous = self._on_previous
             self._source_details.on_seek = self._on_seek
-            self._source_details.on_volume = self._on_volume
         else:
             self._source_details.on_play = None
             self._source_details.on_pause = None
             self._source_details.on_next = None
             self._source_details.on_previous = None
             self._source_details.on_seek = None
-            self._source_details.on_volume = None
 
         if self._source_details.in_use_by:
             self.mass.players.trigger_player_update(self._source_details.in_use_by)
@@ -684,18 +681,3 @@ class YandexYnisonProvider(PluginProvider):
             duration_ms=state.duration_ms,
             paused=state.is_paused,
         )
-
-    async def _on_volume(self, volume: int) -> None:
-        """Handle volume change — send to Ynison.
-
-        :param volume: Volume level (0-100) from Music Assistant.
-        """
-        if not self._ynison:
-            raise UnsupportedFeaturedException("Not connected to Ynison")
-
-        # Prevent ping-pong
-        if self._last_volume_sent == volume:
-            return
-
-        self._last_volume_sent = volume
-        await self._ynison.update_volume(volume / 100.0)

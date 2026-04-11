@@ -250,18 +250,6 @@ class TestYnisonClientSend:
         assert status["duration_ms"] == 5000
         assert status["paused"] is False
 
-    async def test_update_volume(self, client: YnisonClient) -> None:
-        """Sends volume update message."""
-        await client.update_volume(0.75)
-        msg = json.loads(self.mock_ws.send_str.call_args[0][0])
-        assert msg["update_volume_info"]["volume_info"]["volume"] == 0.75
-
-    async def test_update_volume_clamp(self, client: YnisonClient) -> None:
-        """Clamps volume to 1.0 maximum."""
-        await client.update_volume(1.5)
-        msg = json.loads(self.mock_ws.send_str.call_args[0][0])
-        assert msg["update_volume_info"]["volume_info"]["volume"] == 1.0
-
     async def test_update_active_device(self, client: YnisonClient) -> None:
         """Sends active device update message."""
         await client.update_active_device("device-123")
@@ -271,7 +259,7 @@ class TestYnisonClientSend:
     async def test_send_not_connected(self, client: YnisonClient) -> None:
         """Should silently skip when not connected."""
         client._ws = None
-        await client.update_volume(0.5)
+        await client.update_active_device("test")
         # No exception raised
 
 
