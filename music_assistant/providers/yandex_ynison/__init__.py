@@ -55,7 +55,9 @@ def _find_sibling_token(
         prov_values = prov_conf.get("values", {})
         token = prov_values.get(CONF_TOKEN)
         if token:
-            return str(token), str(prov_values.get(CONF_X_TOKEN) or "")
+            return str(token), (
+                str(prov_values[CONF_X_TOKEN]) if prov_values.get(CONF_X_TOKEN) else None
+            )
     return None, None
 
 

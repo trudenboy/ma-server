@@ -276,9 +276,7 @@ class YnisonClient:
             "capabilities": {
                 "can_be_player": True,
                 "can_be_remote_controller": False,
-                "volume_granularity": 16,
             },
-            "volume_info": {"volume": 0},
             "is_shadow": False,
         }
 
@@ -528,7 +526,10 @@ class YnisonClient:
             try:
                 await self._ws.send_str(json.dumps(msg))
             except (ConnectionError, aiohttp.ClientError):
-                self._logger.warning("Failed to send message to Ynison")
+                self._logger.warning("Failed to send message to Ynison, scheduling reconnect")
+                self._connected = False
+                if not self._stop_event.is_set():
+                    self._reconnect_task = asyncio.ensure_future(self._reconnect())
 
 
 def generate_device_id() -> str:
