@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import time
 from typing import TYPE_CHECKING, cast
 
 from music_assistant_models.enums import PlaybackState

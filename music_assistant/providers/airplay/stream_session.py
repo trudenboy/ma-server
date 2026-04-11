@@ -54,6 +54,7 @@ class AirPlayStreamSession:
         self._audio_source_task: asyncio.Task[None] | None = None
         self._player_ffmpeg: dict[str, FFMpeg] = {}
         self._lock = asyncio.Lock()
+        self._chunk_available = asyncio.Condition(self._lock)
         self.start_ntp: int = 0
         self.start_time: float = 0.0
         self.wait_start: float = 0.0
@@ -135,13 +136,16 @@ class AirPlayStreamSession:
         """Add a sync client to the session as a late joiner.
 
         The late joiner will:
-        1. Collect buffered chunks and calculate correct NTP start time
-        2. Start the stream and immediately feed buffered audio into the pipeline
-        3. Wait for device connection outside the lock (data buffers in the pipe)
-        4. Join the real-time stream in sync with other players
+        1. Wait (if needed) for the ring buffer to have audio at the target position
+        2. Collect buffered chunks and calculate correct NTP start time
+        3. Start the stream and immediately feed buffered audio into the pipeline
+        4. Wait for device connection outside the lock (data buffers in the pipe)
+        5. Join the real-time stream in sync with other players
         """
-        sync_leader = self.sync_clients[0]
-        if not sync_leader.stream or not sync_leader.stream.running:
+        if not self.sync_clients:
+            return
+        first_client = self.sync_clients[0]
+        if not first_client.stream or not first_client.stream.running:
             return
 
         allow_late_join = self.prov.config.get_value(
@@ -278,6 +282,42 @@ class AirPlayStreamSession:
             )
             # Remove the client if feeding buffered chunks fails
             self.mass.create_task(self.remove_client(airplay_player))
+
+    def _collect_buffered_chunks(self, airplay_player: AirPlayPlayer) -> list[tuple[bytes, float]]:
+        """Collect usable buffered chunks for a late joiner.
+
+        Filters the ring buffer to chunks whose wall-clock time satisfies
+        the device's minimum start constraint, trimming the first chunk
+        if needed for sample-accurate alignment.
+
+        :param airplay_player: The late joiner player.
+        :return: List of (chunk_data, position) tuples to send.
+        """
+        now = time.time()
+        wait_start_seconds = airplay_player.wait_start / 1000
+        min_start_at = now + wait_start_seconds
+        min_position = min_start_at - self.start_time
+
+        all_buffered = list(self._chunk_buffer)
+        buffered_chunks = [(chunk, pos) for chunk, pos in all_buffered if pos >= min_position]
+
+        # Trim the first chunk so byte 0 aligns exactly with min_position.
+        if not buffered_chunks and all_buffered:
+            pcm_sample_size = self.pcm_format.pcm_sample_size
+            bytes_per_sample = pcm_sample_size // self.pcm_format.sample_rate
+            for i, (chunk, pos) in enumerate(all_buffered):
+                chunk_duration = len(chunk) / pcm_sample_size
+                if pos < min_position < pos + chunk_duration:
+                    trim_seconds = min_position - pos
+                    trim_bytes = int(trim_seconds * pcm_sample_size)
+                    trim_bytes = (trim_bytes // bytes_per_sample) * bytes_per_sample
+                    trimmed = chunk[trim_bytes:]
+                    if trimmed:
+                        buffered_chunks.append((trimmed, min_position))
+                    buffered_chunks.extend(all_buffered[i + 1 :])
+                    break
+
+        return buffered_chunks
 
     async def _write_eof_to_player(self, airplay_player: AirPlayPlayer) -> None:
         """Write EOF to a specific player."""
