@@ -282,23 +282,31 @@ class YandexYnisonProvider(PluginProvider):
     # ------------------------------------------------------------------
 
     async def _resolve_token(self) -> SecretStr:
-        """Resolve the Yandex Music token, refreshing from x_token if needed."""
+        """Resolve the Yandex Music token, refreshing from x_token if needed.
+
+        Prefers refreshing from x_token when available so that an expired
+        music token does not permanently break the plugin (self-healing).
+        Falls back to the stored music token if the refresh attempt fails.
+        """
         token = cast("str | None", self.config.get_value(CONF_TOKEN))
         x_token = cast("str | None", self.config.get_value(CONF_X_TOKEN))
 
-        if token:
-            return SecretStr(token)
-
         if x_token:
-            self.logger.info("Refreshing music token from x_token")
             try:
+                self.logger.debug("Refreshing music token from x_token")
                 new_token = await refresh_music_token(SecretStr(x_token))
                 self._update_config_value(CONF_TOKEN, new_token.get_secret(), encrypted=True)
                 return new_token
             except LoginFailed:
                 raise
             except Exception as err:
+                if token:
+                    self.logger.warning("Token refresh failed, using stored token: %s", err)
+                    return SecretStr(token)
                 raise LoginFailed("Failed to refresh Yandex music token from x_token") from err
+
+        if token:
+            return SecretStr(token)
 
         raise LoginFailed("No Yandex Music token configured")
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from music_assistant_models.enums import (
     ContentType,
     PlaybackState,
@@ -13,6 +14,8 @@ from music_assistant_models.enums import (
     ProviderType,
     StreamType,
 )
+from music_assistant_models.errors import LoginFailed
+from ya_passport_auth import SecretStr
 
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
@@ -321,3 +324,62 @@ class TestYnisonStateHandling:
 
         assert provider._active_player_id is None
         assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
+
+
+# ------------------------------------------------------------------
+# Token resolution
+# ------------------------------------------------------------------
+
+
+class TestResolveToken:
+    """Tests for _resolve_token self-healing logic."""
+
+    async def test_prefers_x_token_refresh(self) -> None:
+        """When x_token is available, refreshes music token instead of using stored one."""
+        provider = _make_provider()
+        provider.config = _make_mock_config(
+            {CONF_TOKEN: "old-stored-token", CONF_X_TOKEN: "my-x-token"}
+        )
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
+            new_callable=AsyncMock,
+            return_value=SecretStr("fresh-music-token"),
+        ) as mock_refresh:
+            result = await provider._resolve_token()
+
+        assert result.get_secret() == "fresh-music-token"
+        mock_refresh.assert_awaited_once()
+
+    async def test_falls_back_to_stored_on_refresh_failure(self) -> None:
+        """Falls back to stored token when x_token refresh fails with non-auth error."""
+        provider = _make_provider()
+        provider.config = _make_mock_config(
+            {CONF_TOKEN: "old-stored-token", CONF_X_TOKEN: "my-x-token"}
+        )
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
+            new_callable=AsyncMock,
+            side_effect=TimeoutError("network"),
+        ):
+            result = await provider._resolve_token()
+
+        assert result.get_secret() == "old-stored-token"
+
+    async def test_uses_stored_token_when_no_x_token(self) -> None:
+        """Returns stored music token when x_token is not configured."""
+        provider = _make_provider()
+        provider.config = _make_mock_config({CONF_TOKEN: "stored", CONF_X_TOKEN: None})
+
+        result = await provider._resolve_token()
+
+        assert result.get_secret() == "stored"
+
+    async def test_raises_when_no_tokens(self) -> None:
+        """Raises LoginFailed when neither token is configured."""
+        provider = _make_provider()
+        provider.config = _make_mock_config({CONF_TOKEN: None, CONF_X_TOKEN: None})
+
+        with pytest.raises(LoginFailed, match="No Yandex Music token"):
+            await provider._resolve_token()

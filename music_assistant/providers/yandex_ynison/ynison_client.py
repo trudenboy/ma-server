@@ -490,8 +490,13 @@ class YnisonClient:
 
                 # Re-create session if needed
                 if self._session is None or self._session.closed:
-                    self._session = aiohttp.ClientSession()
-                    self._external_session = None
+                    if self._external_session is not None:
+                        if self._external_session.closed:
+                            msg = "External HTTP session is closed"
+                            raise RuntimeError(msg)
+                        self._session = self._external_session
+                    else:
+                        self._session = aiohttp.ClientSession()
 
                 host, ticket, session_id = await self._get_redirect_ticket()
                 await self._connect_state(host, ticket, session_id)
