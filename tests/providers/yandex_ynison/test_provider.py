@@ -434,21 +434,29 @@ class TestYnisonStateHandling:
         )
 
     async def test_duration_updated_from_stream_details(self) -> None:
-        """Duration is updated from stream_details when streaming starts."""
+        """Duration is updated from stream_details and pushed to Ynison."""
         provider = _make_provider()
         provider._source_details.in_use_by = "player1"
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        provider._ynison = mock_ynison
 
         stream_details = MagicMock()
         stream_details.duration = 185  # seconds
 
-        provider._update_metadata_from_stream(stream_details, seek_ms=30000)
+        await provider._update_metadata_from_stream(stream_details, seek_ms=30000)
 
         meta = provider._source_details.metadata
         assert meta is not None
         assert meta.duration == 185
         assert meta.elapsed_time == 30  # 30000ms → 30s
+        assert provider._actual_duration_ms == 185000
         provider.mass.players.trigger_player_update.assert_called_once_with(  # type: ignore[attr-defined]
             "player1", force_update=True
+        )
+        # Real duration pushed to Ynison
+        mock_ynison.update_playing_status.assert_awaited_once_with(
+            progress_ms=30000, duration_ms=185000, paused=False
         )
 
     async def test_advance_queue_clears_stale_duration(self) -> None:

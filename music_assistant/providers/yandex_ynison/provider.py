@@ -257,7 +257,7 @@ class YandexYnisonProvider(PluginProvider):
             return
 
         # Update metadata from stream details (authoritative source for duration)
-        self._update_metadata_from_stream(stream_details, seek_ms)
+        await self._update_metadata_from_stream(stream_details, seek_ms)
 
         # Determine audio input based on stream type
         audio_input: AsyncGenerator[bytes, None] | str
@@ -440,7 +440,9 @@ class YandexYnisonProvider(PluginProvider):
                 cover = cover.replace("%%", "400x400")
             meta.image_url = cover
 
-    def _update_metadata_from_stream(self, stream_details: StreamDetails, seek_ms: int = 0) -> None:
+    async def _update_metadata_from_stream(
+        self, stream_details: StreamDetails, seek_ms: int = 0
+    ) -> None:
         """Update PluginSource metadata from stream details (authoritative for duration)."""
         if self._source_details.metadata is None:
             self._source_details.metadata = StreamMetadata(
@@ -450,6 +452,15 @@ class YandexYnisonProvider(PluginProvider):
         if stream_details.duration:
             meta.duration = stream_details.duration
             self._actual_duration_ms = stream_details.duration * 1000
+            # Push the real duration to Ynison so the YM app shows
+            # the correct value (we send duration_ms=0 on advance to
+            # prevent stale propagation, so this corrects it).
+            if self._ynison:
+                await self._ynison.update_playing_status(
+                    progress_ms=seek_ms,
+                    duration_ms=self._actual_duration_ms,
+                    paused=False,
+                )
         meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
         meta.elapsed_time_last_updated = time.time()
         if self._source_details.in_use_by:
