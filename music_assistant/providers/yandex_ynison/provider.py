@@ -19,7 +19,7 @@ from music_assistant_models.enums import (
 )
 from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
 from music_assistant_models.media_items import AudioFormat
-from music_assistant_models.streamdetails import StreamMetadata
+from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
 
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
@@ -243,6 +243,9 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.exception("Failed to get stream details for track %s", track_id)
             return
 
+        # Update metadata from stream details (authoritative source for duration)
+        self._update_metadata_from_stream(stream_details, seek_ms)
+
         # Determine audio input based on stream type
         audio_input: AsyncGenerator[bytes, None] | str
         if stream_details.stream_type == StreamType.CUSTOM:
@@ -423,6 +426,22 @@ class YandexYnisonProvider(PluginProvider):
                 # Replace %% placeholder with size
                 cover = cover.replace("%%", "400x400")
             meta.image_url = cover
+
+    def _update_metadata_from_stream(self, stream_details: StreamDetails, seek_ms: int = 0) -> None:
+        """Update PluginSource metadata from stream details (authoritative for duration)."""
+        if self._source_details.metadata is None:
+            self._source_details.metadata = StreamMetadata(
+                title=f"Yandex Music Connect | {self._display_name}",
+            )
+        meta = self._source_details.metadata
+        if stream_details.duration:
+            meta.duration = stream_details.duration
+        meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
+        meta.elapsed_time_last_updated = time.time()
+        if self._source_details.in_use_by:
+            self.mass.players.trigger_player_update(
+                self._source_details.in_use_by, force_update=True
+            )
 
     async def _pause_playback(self) -> None:
         """Handle pause — stop streaming but keep player association for resume."""
@@ -624,6 +643,7 @@ class YandexYnisonProvider(PluginProvider):
             new_state["player_queue"]["current_playable_index"] = current_index + 1
             new_state["status"] = dict(new_state.get("status", {}))
             new_state["status"]["progress_ms"] = 0
+            new_state["status"]["duration_ms"] = 0
             new_state["status"]["paused"] = False
             await self._ynison.send_full_state(player_state=new_state)
         else:
@@ -649,6 +669,7 @@ class YandexYnisonProvider(PluginProvider):
             new_state["player_queue"]["current_playable_index"] = current_index - 1
             new_state["status"] = dict(new_state.get("status", {}))
             new_state["status"]["progress_ms"] = 0
+            new_state["status"]["duration_ms"] = 0
             new_state["status"]["paused"] = False
             await self._ynison.send_full_state(player_state=new_state)
 

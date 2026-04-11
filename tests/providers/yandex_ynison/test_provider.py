@@ -432,6 +432,48 @@ class TestYnisonStateHandling:
             "player1", force_update=False
         )
 
+    async def test_duration_updated_from_stream_details(self) -> None:
+        """Duration is updated from stream_details when streaming starts."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        stream_details = MagicMock()
+        stream_details.duration = 185  # seconds
+
+        provider._update_metadata_from_stream(stream_details, seek_ms=30000)
+
+        meta = provider._source_details.metadata
+        assert meta is not None
+        assert meta.duration == 185
+        assert meta.elapsed_time == 30  # 30000ms → 30s
+        provider.mass.players.trigger_player_update.assert_called_once_with(
+            "player1", force_update=True
+        )
+
+    async def test_advance_queue_clears_stale_duration(self) -> None:
+        """Advancing the queue resets duration_ms to 0 to avoid stale values."""
+        provider = _make_provider()
+        mock_ynison = MagicMock()
+        mock_ynison.state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {"paused": False, "progress_ms": 100000, "duration_ms": 200000},
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": "t1"}, {"playable_id": "t2"}],
+                },
+            },
+        )
+        mock_ynison.send_full_state = AsyncMock()
+        provider._ynison = mock_ynison
+
+        await provider._advance_queue()
+
+        sent_state = mock_ynison.send_full_state.call_args[1]["player_state"]
+        assert sent_state["status"]["duration_ms"] == 0
+        assert sent_state["status"]["progress_ms"] == 0
+        assert sent_state["player_queue"]["current_playable_index"] == 1
+
 
 # ------------------------------------------------------------------
 # Token resolution
