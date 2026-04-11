@@ -390,8 +390,9 @@ class TestReconnectSessionOwnership:
         client._session = None  # simulate session lost
 
         # Patch sleep to avoid delays, and redirect to test the session logic
+        sleep_path = "music_assistant.providers.yandex_ynison.ynison_client.asyncio.sleep"
         with (
-            patch("music_assistant.providers.yandex_ynison.ynison_client.asyncio.sleep", new_callable=AsyncMock),
+            patch(sleep_path, new_callable=AsyncMock),
             patch.object(client, "_get_redirect_ticket", new_callable=AsyncMock) as mock_redir,
         ):
             mock_redir.side_effect = AssertionError("should not reach here")
