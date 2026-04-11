@@ -237,11 +237,28 @@ class YnisonClient:
         self._logger.debug("Requesting EOV queue sync (queue_id=%r)", actual_queue_id)
         await self._send(msg)
 
+    async def update_player_state(self, player_state: dict[str, Any]) -> None:
+        """Send player state update (queue changes, track skip).
+
+        Unlike send_full_state, this does NOT reset active device status.
+        Use this for track advances, queue modifications, repeat/shuffle changes.
+        """
+        msg = {
+            "update_player_state": {
+                "player_state": player_state,
+            },
+            "rid": str(uuid.uuid4()),
+            "player_action_timestamp_ms": 0,
+            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+        }
+        self._logger.debug("Sending player state: %s", json.dumps(msg)[:500])
+        await self._send(msg)
+
     async def send_full_state(
         self,
         player_state: dict[str, Any] | None = None,
     ) -> None:
-        """Send full state update (used for queue changes, track skip)."""
+        """Send full state update (cold start, reconnect after offline)."""
         state = player_state or self._build_initial_state()
         msg = {
             "update_full_state": {

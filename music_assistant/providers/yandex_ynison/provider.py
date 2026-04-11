@@ -227,28 +227,18 @@ class YandexYnisonProvider(PluginProvider):
                 self._current_streaming_track_id = None
                 break
 
-            # Track finished naturally — advance queue in Ynison
+            # Track finished naturally — signal completion to Ynison.
+            # Yandex controls the queue; we just wait for the next track.
             if not self._track_changed_event.is_set() and self._ynison:
                 self.logger.info("Track %s finished, advancing to next", track_id)
-                has_next = await self._advance_queue()
-                if has_next:
-                    # Wait for Ynison to echo back the state with the new track
-                    try:
-                        await asyncio.wait_for(self._track_changed_event.wait(), timeout=10.0)
-                    except TimeoutError:
-                        self.logger.info("No track change after advance, stopping stream")
-                        self._current_streaming_track_id = None
-                        break
-                else:
-                    # Queue exhausted — EOV sync requested to replenish
-                    # the queue. Wait for the backend to push new tracks.
-                    try:
-                        await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
-                    except TimeoutError:
-                        self.logger.info("No new tracks after queue exhaustion, stopping stream")
-                        self._stream_stop_event.set()
-                        self._current_streaming_track_id = None
-                        break
+                await self._signal_track_completion()
+                try:
+                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
+                except TimeoutError:
+                    self.logger.info("No new track from Ynison after completion, stopping stream")
+                    self._stream_stop_event.set()
+                    self._current_streaming_track_id = None
+                    break
 
             # Clear before next iteration — the new track ID will be set at
             # the top of the loop from the latest Ynison state.
@@ -672,53 +662,40 @@ class YandexYnisonProvider(PluginProvider):
             paused=True,
         )
 
-    async def _advance_queue(self) -> bool:
-        """Advance to the next track in the Ynison queue.
+    async def _signal_track_completion(self) -> None:
+        """Signal that the current track finished playing.
 
-        If the next track exists in playable_list, sends the updated index
-        and resets duration_ms to 0 so Ynison/app can populate the correct value.
-        Otherwise, signals track completion to Ynison (progress=duration, paused)
-        so the controller app can load more tracks (e.g. in radio/My Wave mode).
+        MA is a passive player — Yandex controls the queue. We never
+        manipulate playable_index ourselves. Instead, we signal
+        progress=duration so the YM app / Ynison backend advances the
+        queue and pushes the next track via the WebSocket.
 
-        Returns True if a next track was found, False if queue is exhausted.
+        Also sends SyncStateFromEOV to request queue replenishment
+        from the centralized EOV service (important for radio/My Wave).
         """
         if not self._ynison:
-            return False
+            return
         state = self._ynison.state
+        duration = self._best_duration_ms()
         queue = state.player_state.get("player_queue", {})
         current_index = queue.get("current_playable_index", 0)
         playable_list = queue.get("playable_list", [])
-        if current_index + 1 < len(playable_list):
-            new_state = dict(state.player_state)
-            new_state["player_queue"] = dict(queue)
-            new_state["player_queue"]["current_playable_index"] = current_index + 1
-            new_state["status"] = dict(new_state.get("status", {}))
-            new_state["status"]["progress_ms"] = 0
-            new_state["status"]["duration_ms"] = 0
-            new_state["status"]["paused"] = False
-            self._actual_duration_ms = 0
-            await self._ynison.send_full_state(player_state=new_state)
-            return True
-
-        # Queue exhausted — request the EOV backend to replenish the queue.
-        # Also signal track completion (paused=False to keep radio alive).
-        duration = self._best_duration_ms()
         self.logger.info(
-            "Queue exhausted at index %d/%d, requesting EOV sync",
+            "Track finished at index %d/%d, signaling completion to Ynison",
             current_index,
             len(playable_list),
         )
+        self._actual_duration_ms = 0
         await self._ynison.update_playing_status(
             progress_ms=duration, duration_ms=duration, paused=False
         )
         await self._ynison.sync_state_from_eov()
-        return False
 
     async def _on_next(self) -> None:
-        """Handle next track command — update queue index in Ynison."""
+        """Handle next track command — signal track end so Yandex advances."""
         if not self._ynison:
             raise UnsupportedFeaturedException("Not connected to Ynison")
-        await self._advance_queue()
+        await self._signal_track_completion()
 
     async def _on_previous(self) -> None:
         """Handle previous track command — update queue index in Ynison."""
@@ -736,7 +713,7 @@ class YandexYnisonProvider(PluginProvider):
             new_state["status"]["duration_ms"] = 0
             new_state["status"]["paused"] = False
             self._actual_duration_ms = 0
-            await self._ynison.send_full_state(player_state=new_state)
+            await self._ynison.update_player_state(player_state=new_state)
 
     async def _on_seek(self, position: int) -> None:
         """Handle seek command — send position update to Ynison.
