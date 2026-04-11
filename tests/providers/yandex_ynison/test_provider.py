@@ -327,6 +327,102 @@ class TestYnisonStateHandling:
         assert provider._active_player_id is None
         assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
 
+    async def test_seek_detected_from_ynison(self) -> None:
+        """Detects seek from Yandex app via progress drift."""
+        provider = _make_provider()
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
+
+        def _make_state(progress_ms: int) -> YnisonState:
+            return YnisonState(
+                active_device_id=provider._device_id,
+                player_state={
+                    "status": {
+                        "paused": False,
+                        "progress_ms": progress_ms,
+                        "duration_ms": 200000,
+                    },
+                    "player_queue": {
+                        "current_playable_index": 0,
+                        "playable_list": [{"playable_id": "track1"}],
+                    },
+                },
+            )
+
+        # First state — track starts at 0ms
+        await provider._handle_ynison_state(_make_state(0))
+        assert provider._current_streaming_track_id is None  # not streaming yet
+        provider._current_streaming_track_id = "track1"
+
+        # Second state — seek to 60s (drift 60000ms > 2000ms)
+        await provider._handle_ynison_state(_make_state(60000))
+        assert provider._seek_position_ms == 60000
+        assert provider._track_changed_event.is_set()
+
+    async def test_progress_throttled_update(self) -> None:
+        """Regular progress updates trigger player update with throttling."""
+        provider = _make_provider()
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
+
+        state = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {
+                    "paused": False,
+                    "progress_ms": 5000,
+                    "duration_ms": 200000,
+                },
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": "track1"}],
+                },
+            },
+        )
+
+        # First call — significant (new track) → always triggers
+        await provider._handle_ynison_state(state)
+        call_count_1 = provider.mass.players.trigger_player_update.call_count
+
+        # Simulate same track still playing (no seek, no track change)
+        provider._current_streaming_track_id = "track1"
+        provider._last_progress_ms = 5000
+
+        state2 = YnisonState(
+            active_device_id=provider._device_id,
+            player_state={
+                "status": {
+                    "paused": False,
+                    "progress_ms": 6000,
+                    "duration_ms": 200000,
+                },
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": "track1"}],
+                },
+            },
+        )
+
+        # Second call shortly after — throttled, no trigger
+        await provider._handle_ynison_state(state2)
+        call_count_2 = provider.mass.players.trigger_player_update.call_count
+
+        # Force the throttle to expire
+        provider._last_player_update_time = 0.0
+        await provider._handle_ynison_state(state2)
+        call_count_3 = provider.mass.players.trigger_player_update.call_count
+
+        # First call triggered, second was throttled, third triggered
+        assert call_count_1 >= 1
+        assert call_count_2 == call_count_1
+        assert call_count_3 > call_count_2
+
 
 # ------------------------------------------------------------------
 # Token resolution

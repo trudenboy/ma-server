@@ -91,6 +91,7 @@ class YandexYnisonProvider(PluginProvider):
         self._seek_position_ms: int = 0
         self._last_progress_ms: int = 0
         self._last_progress_time: float = 0.0
+        self._last_player_update_time: float = 0.0
 
         # PluginSource
         self._source_details = PluginSource(
@@ -361,7 +362,7 @@ class YandexYnisonProvider(PluginProvider):
             elapsed_ms = (now - self._last_progress_time) * 1000 if self._last_progress_time else 0
             expected_ms = self._last_progress_ms + elapsed_ms
             drift_ms = abs(state.progress_ms - expected_ms)
-            if self._last_progress_ms > 0 and drift_ms > 5000:
+            if drift_ms > 2000:
                 self.logger.info(
                     "Seek detected on track %s: expected ~%dms, got %dms (drift %dms)",
                     new_track,
@@ -378,9 +379,12 @@ class YandexYnisonProvider(PluginProvider):
         # Update metadata from state
         self._update_metadata(state)
 
-        # Only trigger player update on meaningful changes to avoid UI churn
-        if significant_change or needs_reselect:
+        # Always trigger player update on significant changes;
+        # throttle regular updates to avoid UI churn (every 5 seconds)
+        now_mono = time.monotonic()
+        if significant_change or needs_reselect or now_mono - self._last_player_update_time >= 5.0:
             self.mass.players.trigger_player_update(target_player_id)
+            self._last_player_update_time = now_mono
 
     def _update_metadata(self, state: YnisonState) -> None:
         """Update PluginSource metadata from Ynison state."""
@@ -554,7 +558,7 @@ class YandexYnisonProvider(PluginProvider):
         """Update source capabilities based on linked provider availability."""
         has_provider = self._yandex_provider is not None
         self._source_details.can_play_pause = has_provider
-        self._source_details.can_seek = False  # seek not implemented yet
+        self._source_details.can_seek = has_provider
         self._source_details.can_next_previous = has_provider
 
         if has_provider:
@@ -562,7 +566,7 @@ class YandexYnisonProvider(PluginProvider):
             self._source_details.on_pause = self._on_pause
             self._source_details.on_next = self._on_next
             self._source_details.on_previous = self._on_previous
-            self._source_details.on_seek = None  # seek not implemented yet
+            self._source_details.on_seek = self._on_seek
             self._source_details.on_volume = self._on_volume
         else:
             self._source_details.on_play = None
