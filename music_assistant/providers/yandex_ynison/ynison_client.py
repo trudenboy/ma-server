@@ -447,7 +447,9 @@ class YnisonClient:
 
         self._connected = False
 
-        if not self._stop_event.is_set():
+        if not self._stop_event.is_set() and (
+            self._reconnect_task is None or self._reconnect_task.done()
+        ):
             self._logger.warning("Ynison connection lost, scheduling reconnect")
             self._reconnect_task = asyncio.ensure_future(self._reconnect())
 
@@ -528,7 +530,9 @@ class YnisonClient:
             except (ConnectionError, aiohttp.ClientError):
                 self._logger.warning("Failed to send message to Ynison, scheduling reconnect")
                 self._connected = False
-                if not self._stop_event.is_set():
+                if not self._stop_event.is_set() and (
+                    self._reconnect_task is None or self._reconnect_task.done()
+                ):
                     self._reconnect_task = asyncio.ensure_future(self._reconnect())
 
 

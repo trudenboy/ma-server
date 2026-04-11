@@ -313,7 +313,7 @@ class TestYnisonStateHandling:
 
         await provider._handle_ynison_state(state)
 
-        assert provider._source_details.in_use_by == "player1"
+        assert provider._active_player_id == "player1"
 
     async def test_clears_on_device_switch(self) -> None:
         """Clears active player when device switches away."""

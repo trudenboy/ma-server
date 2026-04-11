@@ -345,10 +345,11 @@ class YandexYnisonProvider(PluginProvider):
         needs_reselect = self._stream_stop_event.is_set()
         self._stream_stop_event.clear()
 
-        # Select source on the target player if not already active or resuming
+        # Select source on the target player if not already active or resuming.
+        # Do not pre-set in_use_by: the player controller relies on it to detect
+        # and stop any previous player during handover.
         if self._source_details.in_use_by != target_player_id or needs_reselect:
             self._active_player_id = target_player_id
-            self._source_details.in_use_by = target_player_id
             self.mass.create_task(
                 self.mass.players.select_source(target_player_id, self.instance_id)
             )
