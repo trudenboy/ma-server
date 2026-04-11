@@ -459,8 +459,8 @@ class TestYnisonStateHandling:
             progress_ms=30000, duration_ms=185000, paused=False
         )
 
-    async def test_signal_track_completion_sends_status(self) -> None:
-        """Track completion signals progress=duration and EOV sync with entity_id."""
+    async def test_signal_track_completion_advances_index(self) -> None:
+        """Track completion advances index, reports status, and requests EOV sync."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -476,22 +476,29 @@ class TestYnisonStateHandling:
             },
         )
         mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.update_player_state = AsyncMock()
         mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 
         await provider._signal_track_completion()
 
-        # Signals completion with paused=False so radio stays active
+        # 1. Reports progress=duration
         mock_ynison.update_playing_status.assert_awaited_once_with(
             progress_ms=200000, duration_ms=200000, paused=False
         )
-        # EOV sync with actual entity_id (not empty — preserves queue ownership)
+        # 2. Advances current_playable_index by 1
+        call_args = mock_ynison.update_player_state.call_args
+        sent_state = call_args.kwargs["player_state"]
+        assert sent_state["player_queue"]["current_playable_index"] == 1
+        assert sent_state["status"]["progress_ms"] == 0
+        assert sent_state["status"]["paused"] is False
+        # 3. EOV sync with actual entity_id
         mock_ynison.sync_state_from_eov.assert_awaited_once_with(actual_queue_id="playlist:123")
         # Resets actual duration for next track
         assert provider._actual_duration_ms == 0
 
-    async def test_signal_track_completion_never_manipulates_queue(self) -> None:
-        """Track completion never sends queue index changes — Yandex controls the queue."""
+    async def test_signal_track_completion_no_send_full_state(self) -> None:
+        """Track completion never sends full state reset."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -513,8 +520,7 @@ class TestYnisonStateHandling:
 
         await provider._signal_track_completion()
 
-        # Must NOT send any queue state changes (only status + EOV sync)
-        mock_ynison.update_player_state.assert_not_called()
+        # Must NOT send full state reset
         mock_ynison.send_full_state.assert_not_called()
 
     async def test_signal_track_completion_uses_actual_duration(self) -> None:
@@ -533,6 +539,7 @@ class TestYnisonStateHandling:
             },
         )
         mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.update_player_state = AsyncMock()
         mock_ynison.sync_state_from_eov = AsyncMock()
         provider._ynison = mock_ynison
 

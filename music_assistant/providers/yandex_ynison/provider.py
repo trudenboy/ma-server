@@ -686,14 +686,10 @@ class YandexYnisonProvider(PluginProvider):
     async def _signal_track_completion(self) -> None:
         """Signal that the current track finished playing.
 
-        MA is a passive player — Yandex controls the queue. We never
-        manipulate playable_index ourselves. Instead, we signal
-        progress=duration and request EOV sync so the Ynison backend
-        advances the queue and pushes the next track via the WebSocket.
-
-        The actual entity_id is passed to sync_state_from_eov so EOV
-        knows which queue to advance (empty string would force a full
-        queue reset that breaks Yandex's queue ownership).
+        Ynison is a state-sync protocol — the active device must advance
+        current_playable_index itself.  We increment the index, send the
+        updated player state, then request EOV sync so radio/wave queues
+        get replenished with new tracks.
         """
         if not self._ynison:
             return
@@ -704,21 +700,36 @@ class YandexYnisonProvider(PluginProvider):
         playable_list = queue.get("playable_list", [])
         entity_type = queue.get("entity_type", "")
         entity_id = queue.get("entity_id", "")
+        next_index = current_index + 1
+
         self.logger.info(
             "Track finished at index %d/%d (entity=%s type=%s), "
-            "signaling completion (duration=%dms)",
+            "advancing to index %d (duration=%dms)",
             current_index,
             len(playable_list),
             entity_id[:40] if entity_id else "<none>",
             entity_type,
+            next_index,
             duration,
         )
         self._actual_duration_ms = 0
+
+        # 1. Report that playback reached the end
         await self._ynison.update_playing_status(
             progress_ms=duration, duration_ms=duration, paused=False
         )
-        # Ask EOV backend to advance the queue. Pass the actual entity_id
-        # so EOV syncs within the current queue instead of replacing it.
+
+        # 2. Advance queue index — active device must do this in Ynison
+        new_state = dict(state.player_state)
+        new_state["player_queue"] = dict(queue)
+        new_state["player_queue"]["current_playable_index"] = next_index
+        new_state["status"] = dict(new_state.get("status", {}))
+        new_state["status"]["progress_ms"] = 0
+        new_state["status"]["duration_ms"] = 0
+        new_state["status"]["paused"] = False
+        await self._ynison.update_player_state(player_state=new_state)
+
+        # 3. Request EOV sync for queue replenishment (radio/wave)
         await self._ynison.sync_state_from_eov(actual_queue_id=entity_id)
 
     async def _on_next(self) -> None:
