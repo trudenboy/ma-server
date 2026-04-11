@@ -8,6 +8,7 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType, ProviderFeature
 from music_assistant_models.errors import LoginFailed
 
+from .config_helpers import find_sibling_token
 from .constants import (
     CONF_ACTION_AUTH_QR,
     CONF_ACTION_CLEAR_AUTH,
@@ -41,26 +42,6 @@ async def setup(
     return YandexYnisonProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
-def _find_sibling_token(
-    mass: MusicAssistant,
-    instance_id: str | None,
-) -> tuple[str | None, str | None]:
-    """Find token and x_token from an existing sibling ynison instance."""
-    raw_providers = mass.config.get("providers", {})
-    for prov_conf in raw_providers.values():
-        if prov_conf.get("domain") != "yandex_ynison":
-            continue
-        if instance_id and prov_conf.get("instance_id") == instance_id:
-            continue
-        prov_values = prov_conf.get("values", {})
-        token = prov_values.get(CONF_TOKEN)
-        if token:
-            return str(token), (
-                str(prov_values[CONF_X_TOKEN]) if prov_values.get(CONF_X_TOKEN) else None
-            )
-    return None, None
-
-
 async def get_config_entries(
     mass: MusicAssistant,
     instance_id: str | None = None,
@@ -72,7 +53,7 @@ async def get_config_entries(
         values = {}
 
     # Pre-fill token from sibling instance if this instance has no token yet
-    sibling_token, sibling_x_token = _find_sibling_token(mass, instance_id)
+    sibling_token, sibling_x_token = find_sibling_token(mass, instance_id)
     if not values.get(CONF_TOKEN) and sibling_token:
         values[CONF_TOKEN] = sibling_token
         if sibling_x_token:
