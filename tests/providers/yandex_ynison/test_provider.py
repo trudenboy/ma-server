@@ -487,7 +487,7 @@ class TestYnisonStateHandling:
         assert provider._actual_duration_ms == 0
 
     async def test_advance_queue_exhausted_signals_completion(self) -> None:
-        """When queue is exhausted, signals track completion to Ynison instead of stopping."""
+        """When queue is exhausted, signals completion with paused=False to keep radio alive."""
         provider = _make_provider()
         mock_ynison = MagicMock()
         mock_ynison.state = YnisonState(
@@ -507,11 +507,10 @@ class TestYnisonStateHandling:
         result = await provider._advance_queue()
 
         assert result is False
-        # Should NOT call send_full_state (no next track to advance to)
         mock_ynison.send_full_state.assert_not_called()
-        # Should signal completion: progress=duration, paused=True
+        # paused=False keeps the YM radio session active
         mock_ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=200000, duration_ms=200000, paused=True
+            progress_ms=200000, duration_ms=200000, paused=False
         )
 
     async def test_advance_queue_exhausted_uses_actual_duration(self) -> None:
@@ -535,9 +534,8 @@ class TestYnisonStateHandling:
 
         await provider._advance_queue()
 
-        # Should use _actual_duration_ms (300000), not stale state value (200000)
         mock_ynison.update_playing_status.assert_awaited_once_with(
-            progress_ms=300000, duration_ms=300000, paused=True
+            progress_ms=300000, duration_ms=300000, paused=False
         )
 
     async def test_best_duration_prefers_actual(self) -> None:

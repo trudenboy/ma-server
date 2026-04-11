@@ -236,11 +236,15 @@ class YandexYnisonProvider(PluginProvider):
                         self.logger.info("No track change after advance, stopping stream")
                         break
                 else:
-                    # Queue exhausted — completion signal sent to Ynison.
-                    # Stop the stream; _activate_playback will restart via
-                    # select_source when the controller pushes a new track.
-                    self._stream_stop_event.set()
-                    break
+                    # Queue exhausted — completion signal sent (paused=False
+                    # so the YM radio engine stays active). Wait for the
+                    # controller to push more tracks before giving up.
+                    try:
+                        await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
+                    except TimeoutError:
+                        self.logger.info("No new tracks after queue exhaustion, stopping stream")
+                        self._stream_stop_event.set()
+                        break
 
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
         """Stream a single track by ID, yielding PCM chunks.
@@ -688,8 +692,9 @@ class YandexYnisonProvider(PluginProvider):
             await self._ynison.send_full_state(player_state=new_state)
             return True
 
-        # Signal track completion so the controller app knows the track ended
-        # and can populate more tracks (critical for radio/My Wave).
+        # Signal track completion so the controller app knows the track ended.
+        # Keep paused=False so the YM app radio engine stays active and can
+        # push more tracks (paused=True would end the radio session).
         duration = self._best_duration_ms()
         self.logger.info(
             "Queue exhausted at index %d/%d, signaling completion to Ynison",
@@ -697,7 +702,7 @@ class YandexYnisonProvider(PluginProvider):
             len(playable_list),
         )
         await self._ynison.update_playing_status(
-            progress_ms=duration, duration_ms=duration, paused=True
+            progress_ms=duration, duration_ms=duration, paused=False
         )
         return False
 
