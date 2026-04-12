@@ -256,10 +256,26 @@ class YandexYnisonProvider(PluginProvider):
             track_id = self._ynison.state.current_track_id
             self._current_streaming_track_id = track_id
 
-            # Don't start streaming if Ynison reports paused — wait for resume
+            # Don't start streaming if Ynison reports paused — wait for resume.
+            # Poll every 1s because a same-track resume won't trigger
+            # _track_changed_event (it only fires on track change / seek).
             if self._ynison.state.is_paused:
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
+                pause_deadline = time.monotonic() + 30.0
+                while (
+                    not self._stream_stop_event.is_set()
+                    and self._source_details.in_use_by == player_id
+                    and self._ynison
+                    and self._ynison.state.current_track_id == track_id
+                    and self._ynison.state.is_paused
+                    and time.monotonic() < pause_deadline
+                ):
+                    remaining = pause_deadline - time.monotonic()
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            self._track_changed_event.wait(),
+                            timeout=min(1.0, remaining),
+                        )
+                    self._track_changed_event.clear()
                 continue
 
             if not self._yandex_provider:
