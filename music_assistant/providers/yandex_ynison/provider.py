@@ -999,6 +999,9 @@ class YandexYnisonProvider(PluginProvider):
             result = await self._replenish_radio_queue(entity_id, entity_type, playable_list)
             if result:
                 self._prefetched_list = result
+                # Push expanded queue to Ynison immediately so the YM app
+                # sees upcoming tracks and enables the "next" button.
+                await self._update_queue_list(result)
 
         self._prefetch_task = asyncio.create_task(_do_prefetch())
 
@@ -1182,6 +1185,21 @@ class YandexYnisonProvider(PluginProvider):
         new_state["status"]["progress_ms"] = 0
         new_state["status"]["duration_ms"] = 0
         new_state["status"]["paused"] = False
+        await self._ynison.update_player_state(player_state=new_state)
+
+    async def _update_queue_list(self, expanded_list: list[dict[str, Any]]) -> None:
+        """Push an expanded playable_list to Ynison without changing index or progress.
+
+        Called right after prefetch completes so the YM app sees upcoming
+        tracks and enables the "next" button.
+        """
+        if not self._ynison or not self._ynison.connected:
+            return
+        state = self._ynison.state
+        queue = state.player_state.get("player_queue", {})
+        new_state = dict(state.player_state)
+        new_state["player_queue"] = dict(queue)
+        new_state["player_queue"]["playable_list"] = expanded_list
         await self._ynison.update_player_state(player_state=new_state)
 
     async def _on_next(self) -> None:

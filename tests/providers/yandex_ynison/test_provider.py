@@ -673,6 +673,8 @@ class TestYnisonStateHandling:
         """Pre-fetches tracks when playing second-to-last item in queue."""
         provider = _make_provider()
         mock_ynison = MagicMock()
+        mock_ynison.connected = True
+        mock_ynison.update_player_state = AsyncMock()
         # 4 tracks, currently at index 2 (second-to-last)
         mock_ynison.state = YnisonState(
             active_device_id=provider._device_id,
