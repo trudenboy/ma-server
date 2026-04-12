@@ -325,8 +325,8 @@ class YandexYnisonProvider(PluginProvider):
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
         """Stream a single track, yielding raw audio bytes (no transcoding).
 
-        For normal playback: raw passthrough (FLAC/MP3/AAC bytes as-is).
-        For seek: ffmpeg fallback (server-side seek, output FLAC).
+        For normal playback: raw passthrough (bytes as-is from CDN).
+        For seek: ffmpeg fallback (server-side seek, output matches source format).
 
         get_audio_stream from yandex_music provider handles both raw and
         encrypted transports via windowed Range requests with CDN reconnect.
@@ -339,6 +339,9 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.exception("Failed to get stream details for track %s", track_id)
             return
 
+        # Update PluginSource audio_format to match actual stream format
+        # so MA's ffmpeg gets correct container/codec hints (e.g. MP4+FLAC)
+        self._source_details.audio_format = stream_details.audio_format
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
         if seek_ms > 0:
@@ -348,13 +351,13 @@ class YandexYnisonProvider(PluginProvider):
             async for chunk in get_ffmpeg_stream(
                 audio_input=self._yandex_provider.get_audio_stream(stream_details),
                 input_format=stream_details.audio_format,
-                output_format=self._source_details.audio_format,
+                output_format=stream_details.audio_format,
                 extra_input_args=["-ss", f"{seek_sec:.3f}"],
             ):
                 yield chunk
             return
 
-        # No seek → raw passthrough (FLAC/MP3/AAC bytes forwarded as-is)
+        # No seek → raw passthrough (bytes forwarded as-is)
         self.logger.info(
             "Streaming track %s (passthrough): format=%s",
             track_id,
@@ -384,15 +387,16 @@ class YandexYnisonProvider(PluginProvider):
             try:
                 sd = await self._yandex_provider.get_stream_details(track_id, MediaType.TRACK)
                 prebuffer.stream_details = sd
+                # Update PluginSource audio_format from actual stream
+                self._source_details.audio_format = sd.audio_format
                 await self._update_metadata_from_stream(sd, seek_ms)
 
                 if seek_ms > 0:
-                    # Seek requires ffmpeg — fill queue with ffmpeg output
                     seek_sec = seek_ms / 1000.0
                     async for chunk in get_ffmpeg_stream(
                         audio_input=self._yandex_provider.get_audio_stream(sd),
                         input_format=sd.audio_format,
-                        output_format=self._source_details.audio_format,
+                        output_format=sd.audio_format,
                         extra_input_args=["-ss", f"{seek_sec:.3f}"],
                     ):
                         await prebuffer.queue.put(chunk)

@@ -825,7 +825,7 @@ class TestYnisonStateHandling:
 
 
 class TestFLACPassthrough:
-    """Tests for FLAC passthrough streaming (no local ffmpeg)."""
+    """Tests for audio passthrough streaming (no local ffmpeg)."""
 
     async def test_stream_track_passthrough_no_seek(self) -> None:
         """Without seek, _stream_track yields raw bytes from get_audio_stream."""
@@ -858,6 +858,8 @@ class TestFLACPassthrough:
 
         assert collected == raw_chunks
         mock_yandex.get_stream_details.assert_awaited_once()
+        # audio_format updated from stream_details
+        assert provider._source_details.audio_format is sd.audio_format
 
     async def test_stream_track_seek_uses_ffmpeg(self) -> None:
         """With seek > 0, _stream_track falls back to ffmpeg."""
