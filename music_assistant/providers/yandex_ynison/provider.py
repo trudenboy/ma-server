@@ -216,7 +216,8 @@ class YandexYnisonProvider(PluginProvider):
                 await self._runner_task
 
         for callback in self._on_unload_callbacks:
-            callback()
+            with suppress(KeyError):
+                callback()
 
     def get_source(self) -> PluginSource:
         """Get (audio)source details for this plugin."""
