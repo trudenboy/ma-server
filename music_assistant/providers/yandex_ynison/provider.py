@@ -694,7 +694,14 @@ class YandexYnisonProvider(PluginProvider):
     async def _send_progress_to_ynison(
         self, progress_ms: int, duration_ms: int, paused: bool
     ) -> None:
-        """Send progress to Ynison and record it for echo detection."""
+        """Send progress to Ynison and record it for echo detection.
+
+        Progress is clamped to duration because Ynison rejects updates where
+        progress > duration (error 400030001) and disconnects the WebSocket.
+        The byte counter can slightly overshoot duration at end-of-stream.
+        """
+        if duration_ms > 0:
+            progress_ms = min(progress_ms, duration_ms)
         self._last_sent_to_ynison_ms = progress_ms
         self._last_sent_to_ynison_time = time.monotonic()
         if self._ynison:
@@ -966,13 +973,13 @@ class YandexYnisonProvider(PluginProvider):
         entity_id: str,
         entity_type: str,
     ) -> None:
-        """Kick off background prefetch when playing the second-to-last track."""
+        """Kick off background prefetch when nearing the end of the queue."""
         if entity_type not in self._RADIO_ENTITY_TYPES:
             return
         if not self._yandex_provider or not playable_list:
             return
-        # second-to-last = index == len - 2
-        if current_index != len(playable_list) - 2:
+        # second-to-last or last — trigger prefetch near end of queue
+        if current_index < len(playable_list) - 2:
             return
         # Already prefetched or prefetch in progress
         if self._prefetched_list is not None:
@@ -1148,9 +1155,21 @@ class YandexYnisonProvider(PluginProvider):
 
         If expanded_list is provided, it replaces the playable_list
         (used after radio queue replenishment).
+
+        Waits up to 10 s for reconnection if Ynison is temporarily
+        disconnected (e.g. after a transient error).
         """
         if not self._ynison:
             return
+        if not self._ynison.connected:
+            self.logger.info("Waiting for Ynison reconnection before advancing queue…")
+            for _ in range(10):
+                await asyncio.sleep(1)
+                if not self._ynison or self._ynison.connected:
+                    break
+            if not self._ynison or not self._ynison.connected:
+                self.logger.warning("Cannot advance queue — Ynison still disconnected")
+                return
         state = self._ynison.state
         queue = state.player_state.get("player_queue", {})
         new_state = dict(state.player_state)
