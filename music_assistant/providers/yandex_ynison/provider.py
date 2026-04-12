@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.enums import (
@@ -44,6 +45,25 @@ if TYPE_CHECKING:
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
+
+
+@dataclass
+class PreBuffer:
+    """Holds pre-buffered audio data for an upcoming track."""
+
+    track_id: str
+    seek_ms: int
+    queue: asyncio.Queue[bytes | None] = field(default_factory=lambda: asyncio.Queue(maxsize=64))
+    stream_details: StreamDetails | None = None
+    error: Exception | None = None
+    task: asyncio.Task[None] | None = None
+
+    async def cancel(self) -> None:
+        """Cancel the prebuffer task and drain the queue."""
+        if self.task and not self.task.done():
+            self.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.task
 
 
 class YandexYnisonProvider(PluginProvider):
@@ -98,6 +118,7 @@ class YandexYnisonProvider(PluginProvider):
         self._last_progress_time: float = 0.0
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
+        self._prebuffer: PreBuffer | None = None
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
 
@@ -110,8 +131,7 @@ class YandexYnisonProvider(PluginProvider):
             can_seek=False,
             can_next_previous=False,
             audio_format=AudioFormat(
-                content_type=ContentType.PCM_S16LE,
-                codec_type=ContentType.PCM_S16LE,
+                content_type=ContentType.FLAC,
                 sample_rate=44100,
                 bit_depth=16,
                 channels=2,
@@ -158,6 +178,10 @@ class YandexYnisonProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        if self._prebuffer:
+            await self._prebuffer.cancel()
+            self._prebuffer = None
+
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -217,18 +241,42 @@ class YandexYnisonProvider(PluginProvider):
                     await self.mass.players.cmd_stop(player_id)
                 return
 
-            # Stream the current track (with seek offset if any)
+            # Stream the current track — use prebuffer if available
             seek_ms = self._seek_position_ms
             self._seek_position_ms = 0
-            async for chunk in self._stream_track(track_id, seek_ms=seek_ms):
-                yield chunk
-                # Check if track changed, stopped, or source deselected
-                if (
-                    self._track_changed_event.is_set()
-                    or self._stream_stop_event.is_set()
-                    or self._source_details.in_use_by != player_id
-                ):
-                    break
+
+            if (
+                self._prebuffer
+                and self._prebuffer.track_id == track_id
+                and self._prebuffer.seek_ms == seek_ms
+                and not self._prebuffer.error
+            ):
+                # Prebuffer hit — data is already loading/ready
+                self.logger.debug("Using prebuffer for track %s", track_id)
+                async for chunk in self._yield_from_prebuffer():
+                    yield chunk
+                    if (
+                        self._track_changed_event.is_set()
+                        or self._stream_stop_event.is_set()
+                        or self._source_details.in_use_by != player_id
+                    ):
+                        break
+            else:
+                # Prebuffer miss — stream directly (fallback)
+                if self._prebuffer and self._prebuffer.track_id != track_id:
+                    self.logger.debug(
+                        "Prebuffer miss: have %s, need %s",
+                        self._prebuffer.track_id,
+                        track_id,
+                    )
+                async for chunk in self._stream_track(track_id, seek_ms=seek_ms):
+                    yield chunk
+                    if (
+                        self._track_changed_event.is_set()
+                        or self._stream_stop_event.is_set()
+                        or self._source_details.in_use_by != player_id
+                    ):
+                        break
 
             # Don't clear _current_streaming_track_id yet — keep it set
             # during advance/wait so Ynison echo of the same track doesn't
@@ -275,10 +323,13 @@ class YandexYnisonProvider(PluginProvider):
         return False
 
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
-        """Stream a single track by ID, yielding PCM chunks.
+        """Stream a single track, yielding raw audio bytes (no transcoding).
 
-        Converts source audio to PCM via ffmpeg since MA reads audio_format
-        before our generator starts — dynamic format updates are too late.
+        For normal playback: raw passthrough (FLAC/MP3/AAC bytes as-is).
+        For seek: ffmpeg fallback (server-side seek, output FLAC).
+
+        get_audio_stream from yandex_music provider handles both raw and
+        encrypted transports via windowed Range requests with CDN reconnect.
         """
         try:
             stream_details = await self._yandex_provider.get_stream_details(
@@ -288,42 +339,83 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.exception("Failed to get stream details for track %s", track_id)
             return
 
-        # Update metadata from stream details (authoritative source for duration)
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
-        # Determine audio input based on stream type
-        audio_input: AsyncGenerator[bytes, None] | str
-        if stream_details.stream_type == StreamType.CUSTOM:
-            audio_input = self._yandex_provider.get_audio_stream(stream_details)
-            self.logger.info(
-                "Streaming track %s (custom): format=%s", track_id, stream_details.audio_format
-            )
-        elif stream_details.stream_type == StreamType.HTTP and stream_details.path:
-            audio_input = stream_details.path
-            self.logger.info(
-                "Streaming track %s (http): format=%s", track_id, stream_details.audio_format
-            )
-        else:
-            self.logger.warning(
-                "Unsupported stream type %s for track %s",
-                stream_details.stream_type,
-                track_id,
-            )
+        if seek_ms > 0:
+            # Seek requires ffmpeg (provider doesn't support byte-level seek)
+            seek_sec = seek_ms / 1000.0
+            self.logger.info("Seeking to %.1fs in track %s via ffmpeg", seek_sec, track_id)
+            async for chunk in get_ffmpeg_stream(
+                audio_input=self._yandex_provider.get_audio_stream(stream_details),
+                input_format=stream_details.audio_format,
+                output_format=self._source_details.audio_format,
+                extra_input_args=["-ss", f"{seek_sec:.3f}"],
+            ):
+                yield chunk
             return
 
-        # Build extra input args for seek
-        extra_input_args: list[str] | None = None
-        if seek_ms > 0:
-            seek_sec = seek_ms / 1000.0
-            extra_input_args = ["-ss", f"{seek_sec:.3f}"]
-            self.logger.info("Seeking to %.1fs in track %s", seek_sec, track_id)
+        # No seek → raw passthrough (FLAC/MP3/AAC bytes forwarded as-is)
+        self.logger.info(
+            "Streaming track %s (passthrough): format=%s",
+            track_id,
+            stream_details.audio_format,
+        )
+        async for chunk in self._yandex_provider.get_audio_stream(stream_details):
+            yield chunk
 
-        async for chunk in get_ffmpeg_stream(
-            audio_input=audio_input,
-            input_format=stream_details.audio_format,
-            output_format=self._source_details.audio_format,
-            extra_input_args=extra_input_args,
-        ):
+    # ------------------------------------------------------------------
+    # Pre-buffer
+    # ------------------------------------------------------------------
+
+    async def _start_prebuffer(self, track_id: str, seek_ms: int = 0) -> None:
+        """Start pre-buffering a track into an asyncio.Queue.
+
+        Called immediately on track change from Ynison — before the player
+        HTTP GET arrives. When get_audio_stream runs, it checks if a matching
+        prebuffer exists and yields from the queue instead of calling the API.
+        """
+        if self._prebuffer:
+            await self._prebuffer.cancel()
+
+        prebuffer = PreBuffer(track_id=track_id, seek_ms=seek_ms)
+        self._prebuffer = prebuffer
+
+        async def _fill() -> None:
+            try:
+                sd = await self._yandex_provider.get_stream_details(track_id, MediaType.TRACK)
+                prebuffer.stream_details = sd
+                await self._update_metadata_from_stream(sd, seek_ms)
+
+                if seek_ms > 0:
+                    # Seek requires ffmpeg — fill queue with ffmpeg output
+                    seek_sec = seek_ms / 1000.0
+                    async for chunk in get_ffmpeg_stream(
+                        audio_input=self._yandex_provider.get_audio_stream(sd),
+                        input_format=sd.audio_format,
+                        output_format=self._source_details.audio_format,
+                        extra_input_args=["-ss", f"{seek_sec:.3f}"],
+                    ):
+                        await prebuffer.queue.put(chunk)
+                else:
+                    async for chunk in self._yandex_provider.get_audio_stream(sd):
+                        await prebuffer.queue.put(chunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                prebuffer.error = err
+                self.logger.warning("Prebuffer failed for %s: %s", track_id, err)
+            finally:
+                await prebuffer.queue.put(None)  # EOF sentinel
+
+        prebuffer.task = self.mass.create_task(_fill())
+
+    async def _yield_from_prebuffer(self) -> AsyncGenerator[bytes, None]:
+        """Yield chunks from the active prebuffer queue until EOF sentinel."""
+        assert self._prebuffer is not None
+        while True:
+            chunk = await self._prebuffer.queue.get()
+            if chunk is None:
+                break
             yield chunk
 
     # ------------------------------------------------------------------
@@ -425,6 +517,9 @@ class YandexYnisonProvider(PluginProvider):
             self._seek_position_ms = state.progress_ms
             self._track_changed_event.set()
             significant_change = True
+            # Start prebuffering immediately — before the player HTTP GET
+            if self._yandex_provider:
+                self.mass.create_task(self._start_prebuffer(new_track, state.progress_ms))
         elif new_track and new_track == self._current_streaming_track_id:
             # Detect seek: compare reported progress with expected progress
             # Expected = last known progress + elapsed wall-clock time
@@ -632,6 +727,9 @@ class YandexYnisonProvider(PluginProvider):
         self._prefetched_list = None
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
+        if self._prebuffer:
+            self.mass.create_task(self._prebuffer.cancel())
+            self._prebuffer = None
 
         if prev_player_id:
             self.logger.debug(
@@ -975,3 +1073,7 @@ class YandexYnisonProvider(PluginProvider):
         # immediately without waiting for the Ynison echo.
         self._seek_position_ms = seek_ms
         self._track_changed_event.set()
+        # Cancel prebuffer — seek changes the stream position
+        if self._prebuffer:
+            self.mass.create_task(self._prebuffer.cancel())
+            self._prebuffer = None

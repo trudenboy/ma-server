@@ -105,7 +105,7 @@ class TestProviderInit:
 
         source = provider.get_source()
         assert source.stream_type == StreamType.CUSTOM
-        assert source.audio_format.content_type == ContentType.PCM_S16LE
+        assert source.audio_format.content_type == ContentType.FLAC
         assert source.audio_format.sample_rate == 44100
         assert source.can_play_pause is False
         assert source.can_seek is False
@@ -820,8 +820,274 @@ class TestYnisonStateHandling:
 
 
 # ------------------------------------------------------------------
-# Token resolution
+# FLAC passthrough
 # ------------------------------------------------------------------
+
+
+class TestFLACPassthrough:
+    """Tests for FLAC passthrough streaming (no local ffmpeg)."""
+
+    async def test_stream_track_passthrough_no_seek(self) -> None:
+        """Without seek, _stream_track yields raw bytes from get_audio_stream."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        raw_chunks = [b"flac-chunk-1", b"flac-chunk-2"]
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            for c in raw_chunks:
+                yield c
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        collected: list[bytes] = []
+        async for chunk in provider._stream_track("track:123"):
+            collected.append(chunk)
+
+        assert collected == raw_chunks
+        mock_yandex.get_stream_details.assert_awaited_once()
+
+    async def test_stream_track_seek_uses_ffmpeg(self) -> None:
+        """With seek > 0, _stream_track falls back to ffmpeg."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"raw-data"
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"ffmpeg-seeked-output"
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ) as mock_ffmpeg:
+            collected: list[bytes] = []
+            async for chunk in provider._stream_track("track:123", seek_ms=5000):
+                collected.append(chunk)
+
+        assert collected == [b"ffmpeg-seeked-output"]
+        mock_ffmpeg.assert_called_once()
+        call_kwargs = mock_ffmpeg.call_args
+        assert "-ss" in call_kwargs.kwargs.get("extra_input_args", [])
+
+    async def test_audio_format_is_flac(self) -> None:
+        """PluginSource audio_format should be FLAC for passthrough."""
+        provider = _make_provider()
+        source = provider.get_source()
+        assert source.audio_format.content_type == ContentType.FLAC
+        assert source.audio_format.sample_rate == 44100
+
+    async def test_stream_track_api_error_returns_empty(self) -> None:
+        """If get_stream_details fails, _stream_track yields nothing."""
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(side_effect=Exception("API error"))
+        provider._yandex_provider = mock_yandex
+
+        collected: list[bytes] = []
+        async for chunk in provider._stream_track("track:bad"):
+            collected.append(chunk)
+
+        assert collected == []
+
+
+# ------------------------------------------------------------------
+# Pre-buffer
+# ------------------------------------------------------------------
+
+
+class TestPreBuffer:
+    """Tests for pre-buffer system."""
+
+    async def test_prebuffer_happy_path(self) -> None:
+        """Prebuffer fills queue; get_audio_stream yields from it."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        raw_chunks = [b"chunk-1", b"chunk-2", b"chunk-3"]
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            for c in raw_chunks:
+                yield c
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        # Use real create_task
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
+
+        await provider._start_prebuffer("track:1")
+        assert provider._prebuffer is not None
+        assert provider._prebuffer.track_id == "track:1"
+
+        # Wait for fill task to finish
+        assert provider._prebuffer.task is not None
+        await provider._prebuffer.task
+
+        # Yield from prebuffer
+        collected: list[bytes] = []
+        async for chunk in provider._yield_from_prebuffer():
+            collected.append(chunk)
+
+        assert collected == raw_chunks
+
+    async def test_prebuffer_cancel(self) -> None:
+        """Cancelling prebuffer stops the fill task."""
+        provider = _make_provider()
+
+        mock_yandex = MagicMock()
+
+        async def _slow_stream(_details: object) -> Any:
+            for i in range(100):
+                await asyncio.sleep(0.1)
+                yield f"chunk-{i}".encode()
+
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+        mock_yandex.get_audio_stream = _slow_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
+
+        await provider._start_prebuffer("track:1")
+        assert provider._prebuffer is not None
+        # Let it start filling
+        await asyncio.sleep(0.05)
+        await provider._prebuffer.cancel()
+        assert provider._prebuffer.task is not None
+        assert provider._prebuffer.task.done()
+
+    async def test_prebuffer_error_fallback(self) -> None:
+        """When prebuffer errors, get_audio_stream falls back to _stream_track."""
+        provider = _make_provider()
+
+        mock_yandex = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(side_effect=Exception("API failed"))
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
+
+        await provider._start_prebuffer("track:err")
+        assert provider._prebuffer is not None
+        assert provider._prebuffer.task is not None
+        await provider._prebuffer.task
+
+        # Should have error set
+        assert provider._prebuffer.error is not None
+
+    async def test_prebuffer_replaced_on_new_track(self) -> None:
+        """Starting a new prebuffer cancels the old one."""
+        provider = _make_provider()
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"data"
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
+
+        await provider._start_prebuffer("track:1")
+        first_prebuffer = provider._prebuffer
+        assert first_prebuffer is not None
+
+        await provider._start_prebuffer("track:2")
+        assert provider._prebuffer is not None
+        assert provider._prebuffer.track_id == "track:2"
+        # First task should be cancelled
+        assert first_prebuffer.task is not None
+        assert first_prebuffer.task.done()
+
+    async def test_clear_active_player_cancels_prebuffer(self) -> None:
+        """_clear_active_player should cancel and clear prebuffer."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"data"
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
+
+        await provider._start_prebuffer("track:1")
+        assert provider._prebuffer is not None
+
+        provider._clear_active_player()
+        assert provider._prebuffer is None
 
 
 class TestResolveToken:
