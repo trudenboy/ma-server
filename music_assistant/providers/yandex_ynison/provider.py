@@ -78,11 +78,20 @@ class PreBuffer:
     task: asyncio.Task[None] | None = None
 
     async def cancel(self) -> None:
-        """Cancel the prebuffer task and drain the queue."""
+        """Cancel the prebuffer task, drain the queue and unblock consumers."""
         if self.task and not self.task.done():
             self.task.cancel()
             with suppress(asyncio.CancelledError):
                 await self.task
+        # Drain leftover chunks so the queue isn't full
+        while True:
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Ensure any blocked consumer sees EOF
+        with suppress(asyncio.QueueFull):
+            self.queue.put_nowait(None)
 
 
 class YandexYnisonProvider(PluginProvider):
@@ -249,6 +258,8 @@ class YandexYnisonProvider(PluginProvider):
 
             # Don't start streaming if Ynison reports paused — wait for resume
             if self._ynison.state.is_paused:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self._track_changed_event.wait(), timeout=30.0)
                 continue
 
             if not self._yandex_provider:
@@ -379,6 +390,7 @@ class YandexYnisonProvider(PluginProvider):
             )
         except Exception:
             self.logger.exception("Failed to get stream details for track %s", track_id)
+            self._stream_stop_event.set()
             return
 
         await self._update_metadata_from_stream(stream_details, seek_ms)
@@ -444,15 +456,18 @@ class YandexYnisonProvider(PluginProvider):
                 prebuffer.error = err
                 self.logger.warning("Prebuffer failed for %s: %s", track_id, err)
             finally:
-                await prebuffer.queue.put(None)  # EOF sentinel
+                # Use put_nowait so a cancellation can't block on a full queue
+                with suppress(asyncio.QueueFull):
+                    prebuffer.queue.put_nowait(None)  # EOF sentinel
 
         prebuffer.task = self.mass.create_task(_fill())
 
     async def _yield_from_prebuffer(self) -> AsyncGenerator[bytes, None]:
         """Yield chunks from the active prebuffer queue until EOF sentinel."""
-        assert self._prebuffer is not None
+        prebuffer = self._prebuffer
+        assert prebuffer is not None
         while True:
-            chunk = await self._prebuffer.queue.get()
+            chunk = await prebuffer.queue.get()
             if chunk is None:
                 break
             yield chunk
@@ -858,7 +873,11 @@ class YandexYnisonProvider(PluginProvider):
                 "Playback ended on player %s, clearing active player",
                 prev_player_id,
             )
-            if was_in_use:
+            player = self.mass.players.get_player(prev_player_id)
+            still_ours = (
+                was_in_use and player is not None and player.active_source == self.instance_id
+            )
+            if still_ours:
                 self.mass.create_task(self.mass.players.cmd_stop(prev_player_id))
             self.mass.players.trigger_player_update(prev_player_id)
 

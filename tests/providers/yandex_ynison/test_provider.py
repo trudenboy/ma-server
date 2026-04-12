@@ -246,6 +246,11 @@ class TestClearActivePlayer:
         provider._active_player_id = "some-player"
         provider._source_details.in_use_by = "some-player"
 
+        # Mock player lookup so _clear_active_player can check active_source
+        mock_player = MagicMock()
+        mock_player.active_source = provider.instance_id
+        provider.mass.players.get_player.return_value = mock_player  # type: ignore[attr-defined]
+
         provider._clear_active_player()
 
         assert provider._active_player_id is None

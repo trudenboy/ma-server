@@ -196,7 +196,7 @@ class YnisonClient:
 
     async def update_playing_status(self, progress_ms: int, duration_ms: int, paused: bool) -> None:
         """Send playback status update to Ynison."""
-        self._logger.info(
+        self._logger.debug(
             "→ update_playing_status: progress=%dms duration=%dms paused=%s",
             progress_ms,
             duration_ms,
