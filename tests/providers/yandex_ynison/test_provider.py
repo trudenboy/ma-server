@@ -28,7 +28,11 @@ from music_assistant.providers.yandex_ynison.constants import (
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
 )
-from music_assistant.providers.yandex_ynison.provider import YandexYnisonProvider
+from music_assistant.providers.yandex_ynison.provider import (
+    _PCM_LOSSLESS,
+    _PCM_LOSSY,
+    YandexYnisonProvider,
+)
 from music_assistant.providers.yandex_ynison.ynison_client import YnisonState
 
 
@@ -359,6 +363,9 @@ class TestYnisonStateHandling:
         await provider._handle_ynison_state(_make_state(0))
         assert provider._current_streaming_track_id == "track1"  # set eagerly on detection
 
+        # Expire the grace period so the seek detection isn't suppressed
+        provider._seek_grace_until = 0.0
+
         # Second state — seek to 60s (drift 60000ms > 2000ms)
         await provider._handle_ynison_state(_make_state(60000))
         assert provider._seek_position_ms == 60000
@@ -367,6 +374,42 @@ class TestYnisonStateHandling:
         # Verify force_update=True was used so the server sends a full
         # PLAYER_UPDATED event (not just a lightweight elapsed-time one)
         provider.mass.players.trigger_player_update.assert_called_with("player1", force_update=True)  # type: ignore[attr-defined]
+
+    async def test_seek_grace_period_after_track_change(self) -> None:
+        """Seek detection is suppressed during grace period after track change."""
+        provider = _make_provider()
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]  # type: ignore[attr-defined]
+        provider.mass.players.get_player.return_value = player  # type: ignore[attr-defined]
+
+        def _make_state(progress_ms: int) -> YnisonState:
+            return YnisonState(
+                active_device_id=provider._device_id,
+                player_state={
+                    "status": {
+                        "paused": False,
+                        "progress_ms": progress_ms,
+                        "duration_ms": 200000,
+                    },
+                    "player_queue": {
+                        "current_playable_index": 0,
+                        "playable_list": [{"playable_id": "track1"}],
+                    },
+                },
+            )
+
+        # Track starts — sets grace period
+        await provider._handle_ynison_state(_make_state(0))
+        assert provider._seek_grace_until > 0
+
+        # Echo with progress=0 arrives during grace period — should NOT
+        # trigger seek even though drift calculation would exceed threshold
+        provider._track_changed_event.clear()
+        await provider._handle_ynison_state(_make_state(0))
+        assert provider._seek_position_ms == 0  # unchanged
+        assert not provider._track_changed_event.is_set()  # no false seek
 
     async def test_progress_throttled_update(self) -> None:
         """Regular progress updates trigger player update with throttling."""
@@ -1340,3 +1383,44 @@ class TestSiblingTokenDetection:
         token, x_token = find_sibling_token(mass, instance_id=None)
         assert token is None
         assert x_token is None
+
+
+class TestPCMFrameAlignment:
+    """Tests for PCM frame alignment padding in get_audio_stream."""
+
+    async def test_frame_alignment_padding_s24le(self) -> None:
+        """Verify padding math for s24le stereo (frame_size=6)."""
+        provider = _make_provider()
+        provider._normalized_format = _PCM_LOSSLESS
+        fmt = provider._normalized_format
+        frame_size = (fmt.bit_depth // 8) * fmt.channels
+        assert frame_size == 6  # 3 bytes x 2 channels
+
+        # 4096 bytes yielded: 4096 % 6 = 4, need 2 bytes padding
+        bytes_yielded = 4096
+        remainder = bytes_yielded % frame_size
+        assert remainder == 4
+        pad = frame_size - remainder
+        assert pad == 2
+
+    async def test_frame_alignment_padding_s16le(self) -> None:
+        """Verify padding math for s16le stereo (frame_size=4)."""
+        provider = _make_provider()
+        provider._normalized_format = _PCM_LOSSY
+        fmt = provider._normalized_format
+        frame_size = (fmt.bit_depth // 8) * fmt.channels
+        assert frame_size == 4  # 2 bytes x 2 channels
+
+        # 4096 is already aligned to 4
+        assert 4096 % frame_size == 0
+
+        # 4097 needs 3 bytes padding
+        assert 4097 % frame_size == 1
+        assert frame_size - (4097 % frame_size) == 3
+
+    async def test_no_padding_when_aligned(self) -> None:
+        """No padding needed when bytes_yielded is already frame-aligned."""
+        fmt = _PCM_LOSSLESS
+        frame_size = (fmt.bit_depth // 8) * fmt.channels
+        # 6000 bytes = 1000 frames of s24le stereo
+        assert 6000 % frame_size == 0
