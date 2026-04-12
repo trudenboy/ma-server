@@ -910,8 +910,10 @@ class TestPCMNormalization:
         # Default (no YM provider linked) → lossy profile
         assert call_kwargs.kwargs["output_format"] is provider._normalized_format
         assert call_kwargs.kwargs["output_format"].content_type == ContentType.PCM_S16LE
-        # No seek args when seek_ms=0
-        assert call_kwargs.kwargs.get("extra_input_args") is None
+        # No seek args when seek_ms=0, but readrate is always present
+        args = call_kwargs.kwargs.get("extra_input_args", [])
+        assert "-readrate" in args
+        assert "-ss" not in args
 
     async def test_stream_track_seek_adds_ss_arg(self) -> None:
         """With seek > 0, _stream_track adds -ss to ffmpeg args."""
@@ -949,7 +951,9 @@ class TestPCMNormalization:
         assert collected == [b"pcm-seeked"]
         mock_ffmpeg.assert_called_once()
         call_kwargs = mock_ffmpeg.call_args
-        assert "-ss" in call_kwargs.kwargs.get("extra_input_args", [])
+        args = call_kwargs.kwargs.get("extra_input_args", [])
+        assert "-ss" in args
+        assert "-readrate" in args
 
     async def test_default_format_is_pcm_s16le(self) -> None:
         """Default PluginSource audio_format is PCM s16le (lossy profile)."""

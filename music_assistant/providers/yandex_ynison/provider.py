@@ -377,7 +377,12 @@ class YandexYnisonProvider(PluginProvider):
 
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
-        extra_input_args = ["-ss", f"{seek_ms / 1000.0:.3f}"] if seek_ms > 0 else None
+        # Throttle input reading to ~1.1x realtime so our PCM output arrives
+        # at near-realtime rate — compatible with MA's -re flag on the outer
+        # ffmpeg. Initial burst of 5s eliminates startup latency.
+        extra_input_args = ["-readrate", "1.1", "-readrate_initial_burst", "5"]
+        if seek_ms > 0:
+            extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 
         self.logger.info(
             "Streaming track %s → %s: input=%s seek=%dms",
@@ -417,7 +422,9 @@ class YandexYnisonProvider(PluginProvider):
                 prebuffer.stream_details = sd
                 await self._update_metadata_from_stream(sd, seek_ms)
 
-                extra_input_args = ["-ss", f"{seek_ms / 1000.0:.3f}"] if seek_ms > 0 else None
+                extra_input_args = ["-readrate", "1.1", "-readrate_initial_burst", "5"]
+                if seek_ms > 0:
+                    extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
                 async for chunk in get_ffmpeg_stream(
                     audio_input=self._yandex_provider.get_audio_stream(sd),
                     input_format=sd.audio_format,
