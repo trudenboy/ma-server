@@ -47,6 +47,22 @@ if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
 
 
+# PCM normalization profiles by YM quality tier.
+# Ensures MA's single ffmpeg receives a consistent format between tracks.
+_PCM_LOSSLESS = AudioFormat(
+    content_type=ContentType.PCM_S24LE,
+    sample_rate=48000,
+    bit_depth=24,
+    channels=2,
+)
+_PCM_LOSSY = AudioFormat(
+    content_type=ContentType.PCM_S16LE,
+    sample_rate=44100,
+    bit_depth=16,
+    channels=2,
+)
+
+
 @dataclass
 class PreBuffer:
     """Holds pre-buffered audio data for an upcoming track."""
@@ -121,6 +137,7 @@ class YandexYnisonProvider(PluginProvider):
         self._prebuffer: PreBuffer | None = None
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
+        self._normalized_format: AudioFormat = _PCM_LOSSY
 
         # PluginSource
         self._source_details = PluginSource(
@@ -130,12 +147,7 @@ class YandexYnisonProvider(PluginProvider):
             can_play_pause=False,
             can_seek=False,
             can_next_previous=False,
-            audio_format=AudioFormat(
-                content_type=ContentType.FLAC,
-                sample_rate=44100,
-                bit_depth=16,
-                channels=2,
-            ),
+            audio_format=self._normalized_format,
             metadata=StreamMetadata(
                 title=f"Yandex Music Connect | {self._display_name}",
             ),
@@ -323,13 +335,12 @@ class YandexYnisonProvider(PluginProvider):
         return False
 
     async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
-        """Stream a single track, yielding raw audio bytes (no transcoding).
+        """Stream a single track, normalizing to fixed PCM via per-track ffmpeg.
 
-        For normal playback: raw passthrough (bytes as-is from CDN).
-        For seek: ffmpeg fallback (server-side seek, output matches source format).
-
-        get_audio_stream from yandex_music provider handles both raw and
-        encrypted transports via windowed Range requests with CDN reconnect.
+        Every track is decoded through its own ffmpeg process to produce a
+        fixed PCM output (s16le or s24le based on YM quality setting). This
+        ensures MA's single ffmpeg process never encounters mid-stream format
+        changes (codec, bit depth, sample rate).
         """
         try:
             stream_details = await self._yandex_provider.get_stream_details(
@@ -339,31 +350,23 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.exception("Failed to get stream details for track %s", track_id)
             return
 
-        # Update PluginSource audio_format to match actual stream format
-        # so MA's ffmpeg gets correct container/codec hints (e.g. MP4+FLAC)
-        self._source_details.audio_format = stream_details.audio_format
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
-        if seek_ms > 0:
-            # Seek requires ffmpeg (provider doesn't support byte-level seek)
-            seek_sec = seek_ms / 1000.0
-            self.logger.info("Seeking to %.1fs in track %s via ffmpeg", seek_sec, track_id)
-            async for chunk in get_ffmpeg_stream(
-                audio_input=self._yandex_provider.get_audio_stream(stream_details),
-                input_format=stream_details.audio_format,
-                output_format=stream_details.audio_format,
-                extra_input_args=["-ss", f"{seek_sec:.3f}"],
-            ):
-                yield chunk
-            return
+        extra_input_args = ["-ss", f"{seek_ms / 1000.0:.3f}"] if seek_ms > 0 else None
 
-        # No seek → raw passthrough (bytes forwarded as-is)
         self.logger.info(
-            "Streaming track %s (passthrough): format=%s",
+            "Streaming track %s → %s: input=%s seek=%dms",
             track_id,
+            self._normalized_format.content_type.value,
             stream_details.audio_format,
+            seek_ms,
         )
-        async for chunk in self._yandex_provider.get_audio_stream(stream_details):
+        async for chunk in get_ffmpeg_stream(
+            audio_input=self._yandex_provider.get_audio_stream(stream_details),
+            input_format=stream_details.audio_format,
+            output_format=self._normalized_format,
+            extra_input_args=extra_input_args,
+        ):
             yield chunk
 
     # ------------------------------------------------------------------
@@ -387,22 +390,16 @@ class YandexYnisonProvider(PluginProvider):
             try:
                 sd = await self._yandex_provider.get_stream_details(track_id, MediaType.TRACK)
                 prebuffer.stream_details = sd
-                # Update PluginSource audio_format from actual stream
-                self._source_details.audio_format = sd.audio_format
                 await self._update_metadata_from_stream(sd, seek_ms)
 
-                if seek_ms > 0:
-                    seek_sec = seek_ms / 1000.0
-                    async for chunk in get_ffmpeg_stream(
-                        audio_input=self._yandex_provider.get_audio_stream(sd),
-                        input_format=sd.audio_format,
-                        output_format=sd.audio_format,
-                        extra_input_args=["-ss", f"{seek_sec:.3f}"],
-                    ):
-                        await prebuffer.queue.put(chunk)
-                else:
-                    async for chunk in self._yandex_provider.get_audio_stream(sd):
-                        await prebuffer.queue.put(chunk)
+                extra_input_args = ["-ss", f"{seek_ms / 1000.0:.3f}"] if seek_ms > 0 else None
+                async for chunk in get_ffmpeg_stream(
+                    audio_input=self._yandex_provider.get_audio_stream(sd),
+                    input_format=sd.audio_format,
+                    output_format=self._normalized_format,
+                    extra_input_args=extra_input_args,
+                ):
+                    await prebuffer.queue.put(chunk)
             except asyncio.CancelledError:
                 raise
             except Exception as err:
@@ -759,6 +756,7 @@ class YandexYnisonProvider(PluginProvider):
             if provider.domain == "yandex_music" and provider.type == ProviderType.MUSIC:
                 self.logger.debug("Found Yandex Music provider — enabling playback control")
                 self._yandex_provider = provider
+                self._update_normalized_format()
                 self._update_source_capabilities()
                 return
 
@@ -768,6 +766,27 @@ class YandexYnisonProvider(PluginProvider):
             )
             self._yandex_provider = None
             self._update_source_capabilities()
+
+    def _update_normalized_format(self) -> None:
+        """Set PCM normalization profile based on YM quality setting.
+
+        superb/lossless → PCM s24le/48kHz (covers hi-res FLAC)
+        high/balanced/efficient → PCM s16le/44.1kHz (exact match for lossy)
+        """
+        quality = ""
+        if self._yandex_provider:
+            quality = str(self._yandex_provider.config.get_value("quality") or "").strip().lower()
+        if quality in ("superb", "lossless"):
+            self._normalized_format = _PCM_LOSSLESS
+        else:
+            self._normalized_format = _PCM_LOSSY
+        self._source_details.audio_format = self._normalized_format
+        self.logger.debug(
+            "Normalization format: %s/%dHz/%dbit",
+            self._normalized_format.content_type.value,
+            self._normalized_format.sample_rate,
+            self._normalized_format.bit_depth,
+        )
 
     def _update_source_capabilities(self) -> None:
         """Update source capabilities based on linked provider availability."""

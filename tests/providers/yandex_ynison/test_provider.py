@@ -105,8 +105,10 @@ class TestProviderInit:
 
         source = provider.get_source()
         assert source.stream_type == StreamType.CUSTOM
-        assert source.audio_format.content_type == ContentType.FLAC
+        assert source.audio_format.content_type == ContentType.PCM_S16LE
         assert source.audio_format.sample_rate == 44100
+        assert source.audio_format.bit_depth == 16
+        assert source.audio_format.channels == 2
         assert source.can_play_pause is False
         assert source.can_seek is False
         assert source.can_next_previous is False
@@ -818,15 +820,16 @@ class TestYnisonStateHandling:
 
 
 # ------------------------------------------------------------------
-# FLAC passthrough
+# ------------------------------------------------------------------
+# PCM normalization (per-track ffmpeg → adaptive PCM)
 # ------------------------------------------------------------------
 
 
-class TestFLACPassthrough:
-    """Tests for audio passthrough streaming (no local ffmpeg)."""
+class TestPCMNormalization:
+    """Tests for per-track ffmpeg normalization to PCM."""
 
-    async def test_stream_track_passthrough_no_seek(self) -> None:
-        """Without seek, _stream_track yields raw bytes from get_audio_stream."""
+    async def test_stream_track_always_uses_ffmpeg(self) -> None:
+        """_stream_track always normalizes through ffmpeg, even without seek."""
         provider = _make_provider()
         provider._source_details.in_use_by = "player1"
 
@@ -836,11 +839,8 @@ class TestFLACPassthrough:
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
 
-        raw_chunks = [b"flac-chunk-1", b"flac-chunk-2"]
-
         async def _fake_audio_stream(_details: object) -> Any:
-            for c in raw_chunks:
-                yield c
+            yield b"raw-cdn-data"
 
         mock_yandex.get_audio_stream = _fake_audio_stream
         provider._yandex_provider = mock_yandex
@@ -850,17 +850,28 @@ class TestFLACPassthrough:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
-        collected: list[bytes] = []
-        async for chunk in provider._stream_track("track:123"):
-            collected.append(chunk)
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"pcm-normalized"
 
-        assert collected == raw_chunks
-        mock_yandex.get_stream_details.assert_awaited_once()
-        # audio_format updated from stream_details
-        assert provider._source_details.audio_format is sd.audio_format
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ) as mock_ffmpeg:
+            collected: list[bytes] = []
+            async for chunk in provider._stream_track("track:123"):
+                collected.append(chunk)
 
-    async def test_stream_track_seek_uses_ffmpeg(self) -> None:
-        """With seek > 0, _stream_track falls back to ffmpeg."""
+        assert collected == [b"pcm-normalized"]
+        mock_ffmpeg.assert_called_once()
+        call_kwargs = mock_ffmpeg.call_args
+        # Default (no YM provider linked) → lossy profile
+        assert call_kwargs.kwargs["output_format"] is provider._normalized_format
+        assert call_kwargs.kwargs["output_format"].content_type == ContentType.PCM_S16LE
+        # No seek args when seek_ms=0
+        assert call_kwargs.kwargs.get("extra_input_args") is None
+
+    async def test_stream_track_seek_adds_ss_arg(self) -> None:
+        """With seek > 0, _stream_track adds -ss to ffmpeg args."""
         provider = _make_provider()
         provider._source_details.in_use_by = "player1"
 
@@ -882,7 +893,7 @@ class TestFLACPassthrough:
         provider._ynison = mock_ynison
 
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
-            yield b"ffmpeg-seeked-output"
+            yield b"pcm-seeked"
 
         with patch(
             "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
@@ -892,17 +903,87 @@ class TestFLACPassthrough:
             async for chunk in provider._stream_track("track:123", seek_ms=5000):
                 collected.append(chunk)
 
-        assert collected == [b"ffmpeg-seeked-output"]
+        assert collected == [b"pcm-seeked"]
         mock_ffmpeg.assert_called_once()
         call_kwargs = mock_ffmpeg.call_args
         assert "-ss" in call_kwargs.kwargs.get("extra_input_args", [])
 
-    async def test_audio_format_is_flac(self) -> None:
-        """PluginSource audio_format should be FLAC for passthrough."""
+    async def test_default_format_is_pcm_s16le(self) -> None:
+        """Default PluginSource audio_format is PCM s16le (lossy profile)."""
         provider = _make_provider()
         source = provider.get_source()
-        assert source.audio_format.content_type == ContentType.FLAC
+        assert source.audio_format.content_type == ContentType.PCM_S16LE
         assert source.audio_format.sample_rate == 44100
+        assert source.audio_format.bit_depth == 16
+        assert source.audio_format.channels == 2
+
+    async def test_superb_quality_uses_lossless_profile(self) -> None:
+        """When YM quality=superb, format switches to PCM s24le/48kHz."""
+        provider = _make_provider()
+
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value.side_effect = lambda k: "superb" if k == "quality" else None
+        provider._yandex_provider = mock_yandex
+        provider._update_normalized_format()
+
+        assert provider._normalized_format.content_type == ContentType.PCM_S24LE
+        assert provider._normalized_format.sample_rate == 48000
+        assert provider._normalized_format.bit_depth == 24
+        assert provider._source_details.audio_format is provider._normalized_format
+
+    async def test_balanced_quality_uses_lossy_profile(self) -> None:
+        """When YM quality=balanced, format stays PCM s16le/44.1kHz."""
+        provider = _make_provider()
+
+        mock_yandex = MagicMock()
+        mock_yandex.domain = "yandex_music"
+        mock_yandex.type = ProviderType.MUSIC
+        mock_yandex.config.get_value.side_effect = lambda k: "balanced" if k == "quality" else None
+        provider._yandex_provider = mock_yandex
+        provider._update_normalized_format()
+
+        assert provider._normalized_format.content_type == ContentType.PCM_S16LE
+        assert provider._normalized_format.sample_rate == 44100
+        assert provider._normalized_format.bit_depth == 16
+
+    async def test_audio_format_not_modified_by_stream(self) -> None:
+        """PluginSource audio_format stays fixed (not updated from stream)."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()  # different format
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"data"
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"pcm"
+
+        original_format = provider._normalized_format
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            async for _ in provider._stream_track("track:123"):
+                pass
+
+        # audio_format should still be _normalized_format, not sd.audio_format
+        assert provider._source_details.audio_format is original_format
 
     async def test_stream_track_api_error_returns_empty(self) -> None:
         """If get_stream_details fails, _stream_track yields nothing."""
@@ -927,7 +1008,7 @@ class TestPreBuffer:
     """Tests for pre-buffer system."""
 
     async def test_prebuffer_happy_path(self) -> None:
-        """Prebuffer fills queue; get_audio_stream yields from it."""
+        """Prebuffer fills queue via ffmpeg normalization."""
         provider = _make_provider()
         provider._source_details.in_use_by = "player1"
 
@@ -937,11 +1018,8 @@ class TestPreBuffer:
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
 
-        raw_chunks = [b"chunk-1", b"chunk-2", b"chunk-3"]
-
         async def _fake_audio_stream(_details: object) -> Any:
-            for c in raw_chunks:
-                yield c
+            yield b"raw-cdn"
 
         mock_yandex.get_audio_stream = _fake_audio_stream
         provider._yandex_provider = mock_yandex
@@ -951,23 +1029,33 @@ class TestPreBuffer:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
+        pcm_chunks = [b"pcm-1", b"pcm-2", b"pcm-3"]
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            for c in pcm_chunks:
+                yield c
+
         # Use real create_task
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
 
-        await provider._start_prebuffer("track:1")
-        assert provider._prebuffer is not None
-        assert provider._prebuffer.track_id == "track:1"
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            await provider._start_prebuffer("track:1")
+            assert provider._prebuffer is not None
+            assert provider._prebuffer.track_id == "track:1"
 
-        # Wait for fill task to finish
-        assert provider._prebuffer.task is not None
-        await provider._prebuffer.task
+            # Wait for fill task to finish
+            assert provider._prebuffer.task is not None
+            await provider._prebuffer.task
 
         # Yield from prebuffer
         collected: list[bytes] = []
         async for chunk in provider._yield_from_prebuffer():
             collected.append(chunk)
 
-        assert collected == raw_chunks
+        assert collected == pcm_chunks
 
     async def test_prebuffer_cancel(self) -> None:
         """Cancelling prebuffer stops the fill task."""
@@ -992,15 +1080,24 @@ class TestPreBuffer:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
+        async def _slow_ffmpeg(**_kwargs: object) -> Any:
+            for i in range(100):
+                await asyncio.sleep(0.1)
+                yield f"pcm-{i}".encode()
+
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
 
-        await provider._start_prebuffer("track:1")
-        assert provider._prebuffer is not None
-        # Let it start filling
-        await asyncio.sleep(0.05)
-        await provider._prebuffer.cancel()
-        assert provider._prebuffer.task is not None
-        assert provider._prebuffer.task.done()
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_slow_ffmpeg,
+        ):
+            await provider._start_prebuffer("track:1")
+            assert provider._prebuffer is not None
+            # Let it start filling
+            await asyncio.sleep(0.05)
+            await provider._prebuffer.cancel()
+            assert provider._prebuffer.task is not None
+            assert provider._prebuffer.task.done()
 
     async def test_prebuffer_error_fallback(self) -> None:
         """When prebuffer errors, get_audio_stream falls back to _stream_track."""
@@ -1046,18 +1143,25 @@ class TestPreBuffer:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"pcm"
+
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
 
-        await provider._start_prebuffer("track:1")
-        first_prebuffer = provider._prebuffer
-        assert first_prebuffer is not None
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            await provider._start_prebuffer("track:1")
+            first_prebuffer = provider._prebuffer
+            assert first_prebuffer is not None
 
-        await provider._start_prebuffer("track:2")
-        assert provider._prebuffer is not None
-        assert provider._prebuffer.track_id == "track:2"
-        # First task should be cancelled
-        assert first_prebuffer.task is not None
-        assert first_prebuffer.task.done()
+            await provider._start_prebuffer("track:2")
+            assert provider._prebuffer is not None
+            assert provider._prebuffer.track_id == "track:2"
+            # First task should be cancelled
+            assert first_prebuffer.task is not None
+            assert first_prebuffer.task.done()
 
     async def test_clear_active_player_cancels_prebuffer(self) -> None:
         """_clear_active_player should cancel and clear prebuffer."""
@@ -1081,10 +1185,17 @@ class TestPreBuffer:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"pcm"
+
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)
 
-        await provider._start_prebuffer("track:1")
-        assert provider._prebuffer is not None
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            await provider._start_prebuffer("track:1")
+            assert provider._prebuffer is not None
 
         provider._clear_active_player()
         assert provider._prebuffer is None
