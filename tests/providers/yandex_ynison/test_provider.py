@@ -355,8 +355,7 @@ class TestYnisonStateHandling:
 
         # First state — track starts at 0ms
         await provider._handle_ynison_state(_make_state(0))
-        assert provider._current_streaming_track_id is None  # not streaming yet
-        provider._current_streaming_track_id = "track1"
+        assert provider._current_streaming_track_id == "track1"  # set eagerly on detection
 
         # Second state — seek to 60s (drift 60000ms > 2000ms)
         await provider._handle_ynison_state(_make_state(60000))
@@ -396,7 +395,6 @@ class TestYnisonStateHandling:
         call_count_1 = provider.mass.players.trigger_player_update.call_count  # type: ignore[attr-defined]
 
         # Simulate same track still playing (no seek, no track change)
-        provider._current_streaming_track_id = "track1"
         provider._last_progress_ms = 5000
 
         state2 = YnisonState(

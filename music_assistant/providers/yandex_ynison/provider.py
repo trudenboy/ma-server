@@ -518,6 +518,7 @@ class YandexYnisonProvider(PluginProvider):
         new_track = state.current_track_id
         if new_track and new_track != self._current_streaming_track_id:
             self.logger.info("Track changed: %s -> %s", self._current_streaming_track_id, new_track)
+            self._current_streaming_track_id = new_track
             self._seek_position_ms = state.progress_ms
             self._track_changed_event.set()
             significant_change = True
