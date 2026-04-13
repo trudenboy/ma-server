@@ -1000,19 +1000,24 @@ class YandexYnisonProvider(PluginProvider):
         Progress is clamped to duration because Ynison rejects updates where
         progress > duration (error 400030001) and disconnects the WebSocket.
         The byte counter can slightly overshoot duration at end-of-stream.
+
+        Echo-tracking fields are only updated after a message is actually sent
+        so that silent no-ops during disconnect don't suppress later real
+        Ynison updates (which would look like "echoes").
         """
         if duration_ms <= 0:
             # Ynison rejects progress > duration; skip until duration is known.
             return
+        if not self._ynison or not self._ynison.connected:
+            return
         progress_ms = min(progress_ms, duration_ms)
+        await self._ynison.update_playing_status(
+            progress_ms=progress_ms,
+            duration_ms=duration_ms,
+            paused=paused,
+        )
         self._last_sent_to_ynison_ms = progress_ms
         self._last_sent_to_ynison_time = time.monotonic()
-        if self._ynison:
-            await self._ynison.update_playing_status(
-                progress_ms=progress_ms,
-                duration_ms=duration_ms,
-                paused=paused,
-            )
 
     def _bytes_to_ms(self, byte_count: int) -> int:
         """Convert PCM byte count to milliseconds using the normalized format."""
