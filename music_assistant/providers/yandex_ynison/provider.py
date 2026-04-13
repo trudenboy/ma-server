@@ -602,9 +602,14 @@ class YandexYnisonProvider(PluginProvider):
                 sd = await self._yandex_provider.get_stream_details(  # type: ignore[union-attr]
                     track_id, media_type
                 )
+                # StreamDetails.data has serialize="omit", so to_dict()
+                # strips it. Manually include it so cached entries keep
+                # the URL / decryption key needed by get_audio_stream().
+                cache_value = sd.to_dict()
+                cache_value["data"] = sd.data
                 await self.mass.cache.set(
                     cache_key,
-                    sd.to_dict(),
+                    cache_value,
                     expiration=_STREAM_DETAILS_CACHE_TTL,
                     provider=self.instance_id,
                 )

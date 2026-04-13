@@ -1929,14 +1929,17 @@ class TestGetStreamDetailsWithRetry:
         mock_yp = MagicMock()
         sd = MagicMock()
         sd.to_dict.return_value = {"track_id": "t1"}
+        sd.data = {"url": "https://cdn.example.com/audio.mp3", "decryption_key": "abc"}
         mock_yp.get_stream_details = AsyncMock(return_value=sd)
         provider._yandex_provider = mock_yp
 
         result = await provider._get_stream_details_with_retry("t1")
         assert result is sd
         mock_yp.get_stream_details.assert_awaited_once()
-        # Verify cache.set was called
+        # Verify cache.set was called with data field preserved
         provider.mass.cache.set.assert_awaited_once()
+        cached_value = provider.mass.cache.set.call_args[0][1]
+        assert cached_value["data"] == sd.data
 
     async def test_cache_hit_skips_api(self) -> None:
         """Returns cached stream details without API call."""
