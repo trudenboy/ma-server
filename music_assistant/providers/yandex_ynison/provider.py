@@ -1287,7 +1287,7 @@ class YandexYnisonProvider(PluginProvider):
         """
         # Start with auto-detected base from YM quality
         quality = ""
-        if self._yandex_provider:
+        if self._yandex_provider and hasattr(self._yandex_provider, "get_quality"):
             quality = self._yandex_provider.get_quality()
         is_lossless = quality in ("superb", "lossless")
         base = PCM_LOSSLESS_PARAMS if is_lossless else PCM_LOSSY_PARAMS
