@@ -866,31 +866,39 @@ class YandexYnisonProvider(PluginProvider):
                 if not has_next:
                     self.mass.create_task(self._start_prebuffer(new_track, state.progress_ms))
         elif new_track and new_track == self._current_streaming_track_id:
-            # Detect seek: compare Ynison progress against our stream position.
-            # Ignore Ynison echoes (values we recently sent) to prevent
-            # feedback loops where our own progress updates trigger false seeks.
-            now = time.monotonic()
-            if now < self._seek_grace_until:
-                pass  # Skip during grace period after track change or seek
-            elif self._is_ynison_echo(state.progress_ms):
-                pass  # Echo of our own update — ignore
+            # Same-track resume after pause: explicitly seek to the Ynison position
+            # so the new stream starts at the right offset.
+            if needs_reselect:
+                self._seek_position_ms = state.progress_ms
+                self._track_changed_event.set()
+                self._seek_grace_until = time.monotonic() + 5.0
+                significant_change = True
             else:
-                our_ms = max(self._streaming_progress_ms, self._last_sent_to_ynison_ms)
-                if our_ms >= 0:
-                    drift_ms = abs(state.progress_ms - our_ms)
-                    if drift_ms > 3000:
-                        self.logger.info(
-                            "Seek detected on track %s: "
-                            "expected ~%dms, Ynison at %dms (drift %dms)",
-                            new_track,
-                            our_ms,
-                            state.progress_ms,
-                            int(drift_ms),
-                        )
-                        self._seek_position_ms = state.progress_ms
-                        self._track_changed_event.set()
-                        self._seek_grace_until = now + 5.0
-                        significant_change = True
+                # Detect seek: compare Ynison progress against our stream position.
+                # Ignore Ynison echoes (values we recently sent) to prevent
+                # feedback loops where our own progress updates trigger false seeks.
+                now = time.monotonic()
+                if now < self._seek_grace_until:
+                    pass  # Skip during grace period after track change or seek
+                elif self._is_ynison_echo(state.progress_ms):
+                    pass  # Echo of our own update — ignore
+                else:
+                    our_ms = max(self._streaming_progress_ms, self._last_sent_to_ynison_ms)
+                    if our_ms >= 0:
+                        drift_ms = abs(state.progress_ms - our_ms)
+                        if drift_ms > 3000:
+                            self.logger.info(
+                                "Seek detected on track %s: "
+                                "expected ~%dms, Ynison at %dms (drift %dms)",
+                                new_track,
+                                our_ms,
+                                state.progress_ms,
+                                int(drift_ms),
+                            )
+                            self._seek_position_ms = state.progress_ms
+                            self._track_changed_event.set()
+                            self._seek_grace_until = now + 5.0
+                            significant_change = True
 
         # Update metadata from state
         self._update_metadata(state)
@@ -1047,8 +1055,13 @@ class YandexYnisonProvider(PluginProvider):
 
     async def _pause_playback(self) -> None:
         """Handle pause — stop streaming but keep player association for resume."""
+        paused_progress_ms = self._streaming_progress_ms
         self._stream_stop_event.set()
-        self._streaming_progress_ms = 0
+        # Preserve the last known position for same-track resume and reset the
+        # Ynison echo baseline so resume logic does not suppress the required seek.
+        self._streaming_progress_ms = paused_progress_ms
+        self._last_sent_to_ynison_ms = -1
+        self._last_sent_to_ynison_time = 0.0
         player_id = self._source_details.in_use_by
         if player_id:
             try:
