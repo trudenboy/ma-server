@@ -146,6 +146,7 @@ class YandexYnisonProvider(PluginProvider):
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
         self._prebuffer: PreBuffer | None = None
+        self._next_prebuffer: PreBuffer | None = None
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
         self._normalized_format: AudioFormat = _PCM_LOSSY
@@ -207,6 +208,9 @@ class YandexYnisonProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        if self._next_prebuffer:
+            await self._next_prebuffer.cancel()
+            self._next_prebuffer = None
         if self._prebuffer:
             await self._prebuffer.cancel()
             self._prebuffer = None
@@ -295,6 +299,24 @@ class YandexYnisonProvider(PluginProvider):
             bytes_yielded = 0
             self._streaming_progress_ms = seek_ms
             last_progress_sync = time.monotonic()
+
+            # Promote next-track prebuffer if it matches
+            if (
+                self._next_prebuffer
+                and self._next_prebuffer.track_id == track_id
+                and seek_ms <= 1000
+                and self._next_prebuffer.seek_ms == 0
+                and not self._next_prebuffer.error
+            ):
+                if self._prebuffer:
+                    await self._prebuffer.cancel()
+                self._prebuffer = self._next_prebuffer
+                self._next_prebuffer = None
+                seek_ms = 0
+                self._streaming_progress_ms = 0
+                # Update metadata now that this is the active track
+                if self._prebuffer.stream_details:
+                    await self._update_metadata_from_stream(self._prebuffer.stream_details, 0)
 
             if (
                 self._prebuffer
@@ -502,6 +524,74 @@ class YandexYnisonProvider(PluginProvider):
                 break
             yield chunk
 
+    async def _start_next_prebuffer(self, track_id: str) -> None:
+        """Pre-buffer the NEXT track while the current one is still playing.
+
+        Uses a separate _next_prebuffer slot so the current track's prebuffer
+        is not interrupted.  Promoted to _prebuffer in get_audio_stream when
+        the track transition actually happens.
+        """
+        if self._next_prebuffer:
+            await self._next_prebuffer.cancel()
+
+        prebuffer = PreBuffer(track_id=track_id, seek_ms=0)
+        self._next_prebuffer = prebuffer
+
+        async def _fill() -> None:
+            try:
+                assert self._yandex_provider is not None
+                sd = await self._yandex_provider.get_stream_details(track_id, MediaType.TRACK)
+                prebuffer.stream_details = sd
+                # Don't update metadata yet — still playing current track
+                extra_input_args = ["-readrate", "1.1", "-readrate_initial_burst", "5"]
+                async for chunk in get_ffmpeg_stream(
+                    audio_input=self._yandex_provider.get_audio_stream(sd),
+                    input_format=sd.audio_format,
+                    output_format=self._normalized_format,
+                    extra_input_args=extra_input_args,
+                ):
+                    await prebuffer.queue.put(chunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                prebuffer.error = err
+                self.logger.warning("Next-track prebuffer failed for %s: %s", track_id, err)
+            finally:
+                if prebuffer.queue.full():
+                    with suppress(asyncio.QueueEmpty):
+                        prebuffer.queue.get_nowait()
+                prebuffer.queue.put_nowait(None)
+
+        prebuffer.task = self.mass.create_task(_fill())
+
+    def _maybe_prebuffer_next(
+        self,
+        current_index: int,
+        playable_list: list[dict[str, Any]],
+        state: YnisonState,
+    ) -> None:
+        """Start pre-buffering next track's audio at ~80% of current track."""
+        if not self._yandex_provider or not self._current_streaming_track_id:
+            return
+        duration = self._best_duration_ms()
+        if duration <= 0 or state.progress_ms < duration * 0.8:
+            return
+        next_index = current_index + 1
+        if next_index >= len(playable_list):
+            return
+        next_track_id = playable_list[next_index].get("playable_id", "")
+        if not next_track_id:
+            return
+        # Already have a next-prebuffer for this track
+        if self._next_prebuffer and self._next_prebuffer.track_id == next_track_id:
+            return
+        self.logger.info(
+            "Pre-buffering audio for next track %s (at %.0f%% of current)",
+            next_track_id,
+            state.progress_ms * 100.0 / duration,
+        )
+        self.mass.create_task(self._start_next_prebuffer(next_track_id))
+
     # ------------------------------------------------------------------
     # Token handling
     # ------------------------------------------------------------------
@@ -565,6 +655,8 @@ class YandexYnisonProvider(PluginProvider):
         if is_our_device and not state.is_paused:
             # Pre-fetch next batch when playing second-to-last track
             self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
+            # Pre-buffer next track audio at ~80% progress for gapless transition
+            self._maybe_prebuffer_next(current_index, playable_list, state)
             await self._activate_playback(state)
         elif is_our_device and state.is_paused:
             # Our device but paused — stop player, keep association
@@ -608,8 +700,15 @@ class YandexYnisonProvider(PluginProvider):
             # looks like a large drift.
             self._seek_grace_until = time.monotonic() + 5.0
             # Start prebuffering immediately — before the player HTTP GET
+            # Skip if _next_prebuffer already has this track pre-loaded.
             if self._yandex_provider:
-                self.mass.create_task(self._start_prebuffer(new_track, state.progress_ms))
+                has_next = (
+                    self._next_prebuffer
+                    and self._next_prebuffer.track_id == new_track
+                    and not self._next_prebuffer.error
+                )
+                if not has_next:
+                    self.mass.create_task(self._start_prebuffer(new_track, state.progress_ms))
         elif new_track and new_track == self._current_streaming_track_id:
             # Detect seek: compare Ynison progress against our stream position.
             # Ignore Ynison echoes (values we recently sent) to prevent
@@ -900,6 +999,9 @@ class YandexYnisonProvider(PluginProvider):
         if self._prebuffer:
             self.mass.create_task(self._prebuffer.cancel())
             self._prebuffer = None
+        if self._next_prebuffer:
+            self.mass.create_task(self._next_prebuffer.cancel())
+            self._next_prebuffer = None
 
         if prev_player_id:
             self.logger.debug(
