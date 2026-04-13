@@ -138,6 +138,8 @@ class YnisonClient:
         Raises on auth failure; auto-reconnects on transient errors.
         """
         self._stop_event.clear()
+        if self._external_session and self._external_session.closed:
+            raise RuntimeError("Provided http_session is closed")
         self._session = self._external_session or aiohttp.ClientSession()
 
         try:

@@ -396,3 +396,21 @@ class TestReconnectSessionOwnership:
 
         # All attempts should fail because external session is closed
         assert not client._connected
+
+    async def test_connect_raises_on_closed_external_session(self) -> None:
+        """connect() raises RuntimeError if external session is already closed."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        ext_session = MagicMock(spec=aiohttp.ClientSession)
+        ext_session.closed = True
+
+        client = YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="dev1", title="Test"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+            http_session=ext_session,
+        )
+
+        with pytest.raises(RuntimeError, match="closed"):
+            await client.connect()
