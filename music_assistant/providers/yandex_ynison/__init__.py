@@ -16,6 +16,7 @@ from .constants import (
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
     CONF_PLAYER,
+    CONF_PREBUFFER_NEXT,
     CONF_REMEMBER_SESSION,
     CONF_TOKEN,
     CONF_X_TOKEN,
@@ -185,6 +186,15 @@ async def get_config_entries(
             "to switch playback to that player. When disabled, playback is fixed to the "
             "configured default player.",
             default_value=True,
+        ),
+        # Pre-buffer next track for gapless transition
+        ConfigEntry(
+            key=CONF_PREBUFFER_NEXT,
+            type=ConfigEntryType.BOOLEAN,
+            label="Pre-buffer next track",
+            description="When enabled, the next track in the queue is pre-buffered at ~80% "
+            "progress for near-gapless transition. May increase network and memory usage.",
+            default_value=False,
         ),
         # Display name in Yandex Music app
         ConfigEntry(

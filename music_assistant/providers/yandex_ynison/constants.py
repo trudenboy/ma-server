@@ -20,6 +20,7 @@ CONF_PLAYER: Final[str] = "player"
 CONF_DISPLAY_NAME: Final[str] = "display_name"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
 CONF_DEVICE_ID: Final[str] = "device_id"
+CONF_PREBUFFER_NEXT: Final[str] = "prebuffer_next_track"
 
 # Actions
 CONF_ACTION_AUTH_QR: Final[str] = "auth_qr"

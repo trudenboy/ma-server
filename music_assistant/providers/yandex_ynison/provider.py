@@ -32,6 +32,7 @@ from .constants import (
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
     CONF_PLAYER,
+    CONF_PREBUFFER_NEXT,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
@@ -192,6 +193,10 @@ class YandexYnisonProvider(PluginProvider):
         allow_switch_value = self.config.get_value(CONF_ALLOW_PLAYER_SWITCH)
         self._allow_player_switch: bool = (
             cast("bool", allow_switch_value) if allow_switch_value is not None else True
+        )
+        prebuffer_next_value = self.config.get_value(CONF_PREBUFFER_NEXT)
+        self._prebuffer_next_enabled: bool = (
+            cast("bool", prebuffer_next_value) if prebuffer_next_value is not None else False
         )
         self._display_name: str = (
             cast("str", self.config.get_value(CONF_DISPLAY_NAME)) or DEFAULT_DISPLAY_NAME
@@ -812,7 +817,8 @@ class YandexYnisonProvider(PluginProvider):
             # Pre-fetch next batch when playing second-to-last track
             self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
             # Pre-buffer next track audio at ~80% progress for gapless transition
-            self._maybe_prebuffer_next(current_index, playable_list, state)
+            if self._prebuffer_next_enabled:
+                self._maybe_prebuffer_next(current_index, playable_list, state)
             await self._activate_playback(state)
         elif is_our_device and state.is_paused:
             # Our device but paused — stop player, keep association
