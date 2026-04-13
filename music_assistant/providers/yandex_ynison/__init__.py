@@ -15,12 +15,15 @@ from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
+    CONF_OUTPUT_BIT_DEPTH,
+    CONF_OUTPUT_SAMPLE_RATE,
     CONF_PLAYER,
     CONF_PREBUFFER_NEXT,
     CONF_REMEMBER_SESSION,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
+    OUTPUT_AUTO,
     PLAYER_ID_AUTO,
 )
 from .provider import YandexYnisonProvider
@@ -195,6 +198,35 @@ async def get_config_entries(
             description="When enabled, the next track in the queue is pre-buffered at ~80% "
             "progress for near-gapless transition. May increase network and memory usage.",
             default_value=False,
+        ),
+        # Output sample rate
+        ConfigEntry(
+            key=CONF_OUTPUT_SAMPLE_RATE,
+            type=ConfigEntryType.STRING,
+            label="Output sample rate",
+            description="Sample rate for PCM output to the player. "
+            "'Auto' selects 44.1 kHz for lossy or 48 kHz for lossless sources.",
+            default_value=OUTPUT_AUTO,
+            options=[
+                ConfigValueOption("Auto (from source quality)", OUTPUT_AUTO),
+                ConfigValueOption("44100 Hz (CD)", "44100"),
+                ConfigValueOption("48000 Hz", "48000"),
+                ConfigValueOption("96000 Hz (Hi-Res)", "96000"),
+            ],
+        ),
+        # Output bit depth
+        ConfigEntry(
+            key=CONF_OUTPUT_BIT_DEPTH,
+            type=ConfigEntryType.STRING,
+            label="Output bit depth",
+            description="Bit depth for PCM output to the player. "
+            "'Auto' selects 16-bit for lossy or 24-bit for lossless sources.",
+            default_value=OUTPUT_AUTO,
+            options=[
+                ConfigValueOption("Auto (from source quality)", OUTPUT_AUTO),
+                ConfigValueOption("16-bit", "16"),
+                ConfigValueOption("24-bit", "24"),
+            ],
         ),
         # Display name in Yandex Music app
         ConfigEntry(

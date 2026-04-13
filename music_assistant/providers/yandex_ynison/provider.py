@@ -31,11 +31,14 @@ from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
     CONF_DISPLAY_NAME,
+    CONF_OUTPUT_BIT_DEPTH,
+    CONF_OUTPUT_SAMPLE_RATE,
     CONF_PLAYER,
     CONF_PREBUFFER_NEXT,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
+    OUTPUT_AUTO,
     PLAYER_ID_AUTO,
 )
 from .yandex_auth import refresh_music_token
@@ -197,6 +200,12 @@ class YandexYnisonProvider(PluginProvider):
         prebuffer_next_value = self.config.get_value(CONF_PREBUFFER_NEXT)
         self._prebuffer_next_enabled: bool = (
             cast("bool", prebuffer_next_value) if prebuffer_next_value is not None else False
+        )
+        self._cfg_sample_rate: str = (
+            cast("str", self.config.get_value(CONF_OUTPUT_SAMPLE_RATE)) or OUTPUT_AUTO
+        )
+        self._cfg_bit_depth: str = (
+            cast("str", self.config.get_value(CONF_OUTPUT_BIT_DEPTH)) or OUTPUT_AUTO
         )
         self._display_name: str = (
             cast("str", self.config.get_value(CONF_DISPLAY_NAME)) or DEFAULT_DISPLAY_NAME
@@ -1220,22 +1229,37 @@ class YandexYnisonProvider(PluginProvider):
             self._update_source_capabilities()
 
     def _update_normalized_format(self) -> None:
-        """Set PCM normalization profile based on YM quality setting.
+        """Set PCM normalization profile based on config and YM quality.
 
-        superb/lossless → PCM s24le/48kHz (covers hi-res FLAC)
-        high/balanced/efficient → PCM s16le/44.1kHz (exact match for lossy)
+        Priority: explicit config values > auto-detection from YM quality.
+        Auto-detection: superb/lossless → 24bit/48kHz, else → 16bit/44.1kHz.
 
         Creates fresh AudioFormat instances each time to prevent mutation by
         MA's FFMpeg._log_reader_task (which sets input_format.codec_type
         in-place on the object passed as input_format to the outer ffmpeg).
         """
+        # Start with auto-detected base from YM quality
         quality = ""
         if self._yandex_provider:
             quality = str(self._yandex_provider.config.get_value("quality") or "").strip().lower()
-        if quality in ("superb", "lossless"):
-            self._normalized_params = _PCM_LOSSLESS_PARAMS
-        else:
-            self._normalized_params = _PCM_LOSSY_PARAMS
+        is_lossless = quality in ("superb", "lossless")
+        base = _PCM_LOSSLESS_PARAMS if is_lossless else _PCM_LOSSY_PARAMS
+
+        # Apply config overrides
+        sample_rate = base["sample_rate"]
+        bit_depth = base["bit_depth"]
+        if self._cfg_sample_rate != OUTPUT_AUTO:
+            sample_rate = int(self._cfg_sample_rate)
+        if self._cfg_bit_depth != OUTPUT_AUTO:
+            bit_depth = int(self._cfg_bit_depth)
+
+        content_type = ContentType.PCM_S24LE if bit_depth == 24 else ContentType.PCM_S16LE
+        self._normalized_params = {
+            "content_type": content_type,
+            "sample_rate": sample_rate,
+            "bit_depth": bit_depth,
+            "channels": 2,
+        }
         # Fresh copy for each caller so no shared mutable state
         self._normalized_format = _make_pcm_format(self._normalized_params)
         self._source_details.audio_format = _make_pcm_format(self._normalized_params)

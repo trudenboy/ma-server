@@ -21,6 +21,11 @@ CONF_DISPLAY_NAME: Final[str] = "display_name"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
 CONF_DEVICE_ID: Final[str] = "device_id"
 CONF_PREBUFFER_NEXT: Final[str] = "prebuffer_next_track"
+CONF_OUTPUT_SAMPLE_RATE: Final[str] = "output_sample_rate"
+CONF_OUTPUT_BIT_DEPTH: Final[str] = "output_bit_depth"
+
+# Special value for "auto" config options
+OUTPUT_AUTO: Final[str] = "auto"
 
 # Actions
 CONF_ACTION_AUTH_QR: Final[str] = "auth_qr"
