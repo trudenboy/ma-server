@@ -618,7 +618,7 @@ class YnisonClient:
                 return
             try:
                 await self._ws.send_str(json.dumps(msg))
-            except (ConnectionError, aiohttp.ClientError):
+            except (ConnectionError, aiohttp.ClientError, RuntimeError, OSError):
                 self._logger.warning("Failed to send message to Ynison, scheduling reconnect")
                 self._connected = False
                 if not self._stop_event.is_set() and (

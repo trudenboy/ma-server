@@ -708,6 +708,9 @@ class TestYnisonStateHandling:
         mock_ym_provider.client = mock_client
         provider._yandex_provider = mock_ym_provider
 
+        # Use real create_task so prefetch coroutine actually runs
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
+
         # Trigger prefetch
         provider._maybe_prefetch(
             2,

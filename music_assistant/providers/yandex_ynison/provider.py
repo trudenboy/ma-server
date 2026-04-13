@@ -1322,7 +1322,7 @@ class YandexYnisonProvider(PluginProvider):
                 # sees upcoming tracks and enables the "next" button.
                 await self._update_queue_list(result)
 
-        self._prefetch_task = asyncio.create_task(_do_prefetch())
+        self._prefetch_task = self.mass.create_task(_do_prefetch())
 
     async def _signal_track_completion(self) -> None:
         """Signal that the current track finished playing.
