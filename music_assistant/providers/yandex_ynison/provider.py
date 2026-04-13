@@ -356,6 +356,17 @@ class YandexYnisonProvider(PluginProvider):
                 self._current_streaming_track_id = None
                 break
 
+            # If prebuffer ended due to an error, don't treat as natural
+            # track end — abort instead of desyncing Ynison queue state.
+            if self._prebuffer and self._prebuffer.error:
+                self.logger.warning(
+                    "Stream aborted for track %s: prebuffer error: %s",
+                    track_id,
+                    self._prebuffer.error,
+                )
+                self._current_streaming_track_id = None
+                break
+
             # Track finished naturally — signal completion to Ynison.
             # Yandex controls the queue; we just wait for the next track.
             if not self._track_changed_event.is_set() and self._ynison:
@@ -472,9 +483,12 @@ class YandexYnisonProvider(PluginProvider):
                 prebuffer.error = err
                 self.logger.warning("Prebuffer failed for %s: %s", track_id, err)
             finally:
-                # Use put_nowait so a cancellation can't block on a full queue
-                with suppress(asyncio.QueueFull):
-                    prebuffer.queue.put_nowait(None)  # EOF sentinel
+                # Guarantee EOF sentinel delivery — if the queue is full
+                # (consumer hasn't drained yet), discard one chunk to make room.
+                if prebuffer.queue.full():
+                    with suppress(asyncio.QueueEmpty):
+                        prebuffer.queue.get_nowait()
+                prebuffer.queue.put_nowait(None)  # EOF sentinel
 
         prebuffer.task = self.mass.create_task(_fill())
 
