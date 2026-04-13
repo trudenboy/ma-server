@@ -559,8 +559,11 @@ class YnisonClient:
                 return
 
             delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
+            # Add ±20% jitter to prevent thundering-herd reconnects
+            jitter = delay * 0.2 * (2 * random.random() - 1)
+            delay = max(0.5, delay + jitter)
             self._logger.info(
-                "Ynison reconnect attempt %d/%d in %.0fs",
+                "Ynison reconnect attempt %d/%d in %.1fs",
                 attempt + 1,
                 MAX_RECONNECT_ATTEMPTS,
                 delay,

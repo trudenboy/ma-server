@@ -462,6 +462,7 @@ class YandexYnisonProvider(PluginProvider):
                 and not self._prebuffer.error
             ):
                 # Prebuffer hit — data is already loading/ready
+                track_fmt = self._prebuffer.output_format
                 self.logger.debug(
                     "Using prebuffer for track %s (fmt=%s/%dHz, queued=%d)",
                     track_id,
@@ -488,6 +489,7 @@ class YandexYnisonProvider(PluginProvider):
                         break
             else:
                 # Prebuffer miss — stream directly (fallback)
+                track_fmt = _make_pcm_format(self._normalized_params)
                 if self._prebuffer and self._prebuffer.track_id != track_id:
                     self.logger.debug(
                         "Prebuffer miss: have %s, need %s",
@@ -510,8 +512,9 @@ class YandexYnisonProvider(PluginProvider):
 
             # Pad to PCM frame boundary — prevents frame misalignment in
             # MA's single ffmpeg when a track stream is interrupted mid-chunk.
-            fmt = self._normalized_format
-            frame_size = (fmt.bit_depth // 8) * fmt.channels
+            # Use track_fmt captured at stream start (not self._normalized_format
+            # which may have changed mid-stream due to quality/config update).
+            frame_size = (track_fmt.bit_depth // 8) * track_fmt.channels
             remainder = bytes_yielded % frame_size
             if remainder:
                 pad = frame_size - remainder
