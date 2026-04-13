@@ -845,8 +845,10 @@ class YandexYnisonProvider(PluginProvider):
         progress > duration (error 400030001) and disconnects the WebSocket.
         The byte counter can slightly overshoot duration at end-of-stream.
         """
-        if duration_ms > 0:
-            progress_ms = min(progress_ms, duration_ms)
+        if duration_ms <= 0:
+            # Ynison rejects progress > duration; skip until duration is known.
+            return
+        progress_ms = min(progress_ms, duration_ms)
         self._last_sent_to_ynison_ms = progress_ms
         self._last_sent_to_ynison_time = time.monotonic()
         if self._ynison:
