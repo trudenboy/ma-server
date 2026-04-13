@@ -123,21 +123,17 @@ class AirPlayProtocol(ABC):
             album = metadata.album or ""
 
             metadata_checksum = f"{title}|{artist}|{album}|{duration}|{metadata.image_url}"
-            if (
-                metadata_checksum == self._metadata_checksum
-                and time.time() - self._last_metadata_sent <= 2
-            ):
-                # metadata has not changed since last time, skip sending to CLI
+            if metadata_checksum == self._metadata_checksum:
                 return
             self._metadata_checksum = metadata_checksum
-            self._last_metadata_sent = time.time()
 
             cmd = f"TITLE={title}\nARTIST={artist}\nALBUM={album}\n"
             cmd += f"DURATION={duration}\nPROGRESS=0\nACTION=SENDMETA\n"
 
             await self.send_cli_command(cmd)
-            # get image
+            self._last_progress_sent = 0
             if metadata.image_url:
                 await self.send_cli_command(f"ARTWORK={metadata.image_url}")
-        if progress is not None:
+        if progress is not None and abs(progress - self._last_progress_sent) >= 2:
+            self._last_progress_sent = progress
             await self.send_cli_command(f"PROGRESS={progress}")

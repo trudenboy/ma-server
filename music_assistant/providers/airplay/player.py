@@ -160,6 +160,15 @@ class AirPlayPlayer(Player):
         if require_authentication:
             base_entries = [*self._get_pairing_config_entries(values)]
 
+        # Determine effective protocol from values being saved (if available)
+        # or fall back to stored config. This ensures config entries reflect
+        # the current form state, not stale stored state.
+        if values and (val := values.get(CONF_AIRPLAY_PROTOCOL)) is not None:
+            effective_protocol = self._get_protocol_for_config_value(cast("int", val))
+        else:
+            effective_protocol = self.protocol
+        is_raop = effective_protocol == StreamingProtocol.RAOP
+
         # Regular AirPlay config entries
         base_entries += [
             ConfigEntry(
@@ -213,7 +222,7 @@ class AirPlayPlayer(Player):
                 description="Some devices require a password to connect/play.",
                 depends_on=CONF_AIRPLAY_PROTOCOL,
                 depends_on_value=StreamingProtocol.RAOP.value,
-                hidden=self.protocol != StreamingProtocol.RAOP,
+                hidden=not is_raop,
                 category="protocol_generic",
                 advanced=True,
             ),
@@ -239,6 +248,24 @@ class AirPlayPlayer(Player):
 
         if is_broken_airplay_model(self.device_info.manufacturer, self.device_info.model):
             base_entries.insert(-1, BROKEN_AIRPLAY_WARN)
+
+        if effective_protocol == StreamingProtocol.AIRPLAY2:
+            # Insert the warning right after the protocol choice entry
+            for i, entry in enumerate(base_entries):
+                if entry.key == CONF_AIRPLAY_PROTOCOL:
+                    base_entries.insert(
+                        i + 1,
+                        ConfigEntry(
+                            key="AIRPLAY2_SYNC_WARN",
+                            type=ConfigEntryType.ALERT,
+                            default_value=None,
+                            required=False,
+                            label="AirPlay 2 currently does not support audio synchronization. "
+                            "Grouping/syncing with other players is not available. "
+                            "Switch to AirPlay 1 (RAOP) if you need multi-room sync.",
+                        ),
+                    )
+                    break
 
         return base_entries
 
@@ -719,7 +746,10 @@ class AirPlayPlayer(Player):
                 # add new child to the existing stream (RAOP or AirPlay2) session (if any)
                 self._attr_group_members.append(player_id)
                 if stream_session and child_player_to_add is not None:
-                    await stream_session.add_client(child_player_to_add)
+                    # Skip add_client if the player is already streaming in this session
+                    # (e.g. after a dynamic leader switch where the stream continues)
+                    if child_player_to_add not in stream_session.sync_clients:
+                        await stream_session.add_client(child_player_to_add)
 
             # Ensure group leader includes itself in group_members when it has members
             # This is required for the synced_to property to work correctly
@@ -831,6 +861,19 @@ class AirPlayPlayer(Player):
                 self.player_id, CONF_STORED_VOLUME, self._attr_volume_level
             )
             self.update_state()
+
+    async def on_config_updated(self) -> None:
+        """Handle logic when the player config is updated."""
+        await super().on_config_updated()
+        prov = cast("AirPlayProvider", self.provider)
+        bridge_manager = prov.bridge_manager
+        has_bridge = bridge_manager.get_bridge(self.player_id) is not None
+        if self.protocol == StreamingProtocol.AIRPLAY2 and has_bridge:
+            # AP2 doesn't support sync — tear down the Sendspin bridge
+            await bridge_manager.remove_bridge(self.player_id)
+        elif self.protocol != StreamingProtocol.AIRPLAY2 and not has_bridge:
+            # Switched back to RAOP — set up the Sendspin bridge
+            await bridge_manager.setup_bridge(self)
 
     async def on_unload(self) -> None:
         """Handle logic when the player is unloaded from the Player controller."""

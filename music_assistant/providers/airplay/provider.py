@@ -283,6 +283,12 @@ class AirPlayProvider(PlayerProvider):
             )
             if not player:
                 return
+            if player.protocol_parent_id and (
+                parent := self.mass.players.get_player(player.protocol_parent_id)
+            ):
+                parent_player = parent
+            else:
+                parent_player = player
 
             player_id = player.player_id
             ignore_volume_report = (
