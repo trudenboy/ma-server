@@ -779,6 +779,9 @@ class YandexYnisonProvider(PluginProvider):
                 await self.mass.players.cmd_stop(player_id)
             except Exception:
                 self.logger.debug("Failed to stop player %s on pause", player_id)
+            if self._source_details.in_use_by == player_id:
+                self._source_details.in_use_by = None
+                self.mass.players.trigger_player_update(player_id)
 
     async def _handle_ynison_disconnect(self) -> None:
         """Handle permanent disconnect from Ynison."""
