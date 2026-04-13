@@ -1341,6 +1341,7 @@ class TestSiblingTokenDetection:
     def test_finds_sibling_token(self) -> None:
         """Detects token from an existing sibling ynison instance."""
         mass = _make_mock_mass()
+        mass.config.decrypt_string = lambda s: s
         mass.config.get = MagicMock(
             return_value={
                 "inst1": {

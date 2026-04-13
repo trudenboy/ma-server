@@ -24,7 +24,8 @@ def find_sibling_token(
         prov_values = prov_conf.get("values", {})
         token = prov_values.get(CONF_TOKEN)
         if token:
-            return str(token), (
-                str(prov_values[CONF_X_TOKEN]) if prov_values.get(CONF_X_TOKEN) else None
+            x_token = prov_values.get(CONF_X_TOKEN)
+            return mass.config.decrypt_string(str(token)), (
+                mass.config.decrypt_string(str(x_token)) if x_token else None
             )
     return None, None
