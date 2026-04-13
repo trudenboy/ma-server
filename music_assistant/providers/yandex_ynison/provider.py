@@ -1077,7 +1077,10 @@ class YandexYnisonProvider(PluginProvider):
         )
 
         if next_index < len(playable_list):
-            # 2a. Queue has room — advance immediately
+            # 2a. Queue has room — advance immediately.
+            # Clear stale prefetch data so _maybe_prefetch can trigger for
+            # the new queue tail on subsequent state updates.
+            self._prefetched_list = None
             await self._advance_queue_index(next_index)
         elif entity_type in self._RADIO_ENTITY_TYPES:
             # 2b. At end of RADIO queue — use prefetched data or fetch now
@@ -1093,8 +1096,19 @@ class YandexYnisonProvider(PluginProvider):
                 self._prefetched_list = None
             else:
                 expanded = await self._replenish_radio_queue(entity_id, entity_type, playable_list)
-            if expanded:
+            if expanded and next_index < len(expanded):
                 await self._advance_queue_index(next_index, expanded_list=expanded)
+            elif expanded:
+                self.logger.warning(
+                    "Expanded queue has %d items but next_index=%d — re-fetching",
+                    len(expanded),
+                    next_index,
+                )
+                fresh = await self._replenish_radio_queue(entity_id, entity_type, expanded)
+                if fresh and next_index < len(fresh):
+                    await self._advance_queue_index(next_index, expanded_list=fresh)
+                else:
+                    self.logger.warning("Still cannot advance after re-fetch")
             else:
                 self.logger.warning(
                     "Could not replenish queue (entity=%s type=%s), cannot advance",
