@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
@@ -49,18 +50,87 @@ if TYPE_CHECKING:
 
 # PCM normalization profiles by YM quality tier.
 # Ensures MA's single ffmpeg receives a consistent format between tracks.
-_PCM_LOSSLESS = AudioFormat(
-    content_type=ContentType.PCM_S24LE,
-    sample_rate=48000,
-    bit_depth=24,
-    channels=2,
-)
-_PCM_LOSSY = AudioFormat(
-    content_type=ContentType.PCM_S16LE,
-    sample_rate=44100,
-    bit_depth=16,
-    channels=2,
-)
+# NOTE: AudioFormat is a *mutable* dataclass — MA's FFMpeg._log_reader_task
+# mutates input_format.codec_type in-place.  We MUST create a fresh copy for
+# every place that stores a reference (PluginSource.audio_format, PreBuffer,
+# ffmpeg output_format) so that mutation of one doesn't corrupt the others.
+_PCM_LOSSLESS_PARAMS: dict[str, Any] = {
+    "content_type": ContentType.PCM_S24LE,
+    "sample_rate": 48000,
+    "bit_depth": 24,
+    "channels": 2,
+}
+_PCM_LOSSY_PARAMS: dict[str, Any] = {
+    "content_type": ContentType.PCM_S16LE,
+    "sample_rate": 44100,
+    "bit_depth": 16,
+    "channels": 2,
+}
+
+
+def _make_pcm_format(params: dict[str, Any]) -> AudioFormat:
+    """Create a fresh AudioFormat from stored params (safe from mutation)."""
+    return AudioFormat(**params)
+
+
+def _log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
+    """Log diagnostic info about the first chunk of a track stream.
+
+    Computes RMS amplitude of the first 1024 samples to help detect garbage
+    data (which appears as near-maximum amplitude white noise / hissing).
+    """
+    if not chunk:
+        return
+    sample_width = fmt.bit_depth // 8
+    if sample_width == 2:
+        pack_fmt = "<h"
+    elif sample_width == 3:
+        pack_fmt = None  # 24-bit needs manual unpacking
+    else:
+        logger.debug(
+            "First chunk: %d bytes (unsupported bit_depth=%d for RMS)",
+            len(chunk),
+            fmt.bit_depth,
+        )
+        return
+
+    n_samples = min(1024, len(chunk) // sample_width)
+    if n_samples == 0:
+        logger.debug("First chunk: %d bytes (too small for RMS)", len(chunk))
+        return
+
+    sum_sq = 0.0
+    for i in range(n_samples):
+        offset = i * sample_width
+        if pack_fmt:
+            (sample,) = struct.unpack_from(pack_fmt, chunk, offset)
+        else:
+            # 24-bit little-endian signed
+            b = chunk[offset : offset + 3]
+            val = int.from_bytes(b, "little", signed=False)
+            if val >= 0x800000:
+                val -= 0x1000000
+            sample = val
+        sum_sq += sample * sample
+
+    rms = (sum_sq / n_samples) ** 0.5
+    max_val = (1 << (fmt.bit_depth - 1)) - 1
+    rms_pct = (rms / max_val) * 100 if max_val else 0
+
+    # RMS > 70% of max for raw PCM almost certainly indicates garbage data
+    level = "WARNING" if rms_pct > 70 else "DEBUG"
+    log_fn = logger.warning if level == "WARNING" else logger.debug
+    log_fn(
+        "First chunk: %d bytes, RMS=%.0f (%.1f%% of max %d), fmt=%s/%dHz/%dbit",
+        len(chunk),
+        rms,
+        rms_pct,
+        max_val,
+        fmt.content_type.value,
+        fmt.sample_rate,
+        fmt.bit_depth,
+    )
+
 
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
@@ -72,10 +142,12 @@ class PreBuffer:
 
     track_id: str
     seek_ms: int
+    output_format: AudioFormat
     queue: asyncio.Queue[bytes | None] = field(default_factory=lambda: asyncio.Queue(maxsize=64))
     stream_details: StreamDetails | None = None
     error: Exception | None = None
     task: asyncio.Task[None] | None = None
+    chunks_queued: int = 0
 
     async def cancel(self) -> None:
         """Cancel the prebuffer task, drain the queue and unblock consumers."""
@@ -149,7 +221,8 @@ class YandexYnisonProvider(PluginProvider):
         self._next_prebuffer: PreBuffer | None = None
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
-        self._normalized_format: AudioFormat = _PCM_LOSSY
+        self._normalized_params: dict[str, Any] = _PCM_LOSSY_PARAMS
+        self._normalized_format: AudioFormat = _make_pcm_format(_PCM_LOSSY_PARAMS)
 
         # Progress tracking — byte counter is the single source of truth
         # during active streaming; Ynison echoes are detected and ignored.
@@ -308,15 +381,65 @@ class YandexYnisonProvider(PluginProvider):
                 and self._next_prebuffer.seek_ms == 0
                 and not self._next_prebuffer.error
             ):
-                if self._prebuffer:
+                # Verify the prebuffer was encoded with the CURRENT format
+                pb_fmt = self._next_prebuffer.output_format
+                cur_fmt = self._normalized_format
+                if (
+                    pb_fmt.content_type != cur_fmt.content_type
+                    or pb_fmt.sample_rate != cur_fmt.sample_rate
+                    or pb_fmt.bit_depth != cur_fmt.bit_depth
+                ):
+                    self.logger.warning(
+                        "Next-prebuffer format mismatch: %s/%dHz/%dbit vs expected %s/%dHz/%dbit"
+                        " — discarding prebuffer",
+                        pb_fmt.content_type.value,
+                        pb_fmt.sample_rate,
+                        pb_fmt.bit_depth,
+                        cur_fmt.content_type.value,
+                        cur_fmt.sample_rate,
+                        cur_fmt.bit_depth,
+                    )
+                    await self._next_prebuffer.cancel()
+                    self._next_prebuffer = None
+                else:
+                    if self._prebuffer:
+                        await self._prebuffer.cancel()
+                    self._prebuffer = self._next_prebuffer
+                    self._next_prebuffer = None
+                    seek_ms = 0
+                    self._streaming_progress_ms = 0
+                    # Update metadata now that this is the active track
+                    if self._prebuffer.stream_details:
+                        await self._update_metadata_from_stream(self._prebuffer.stream_details, 0)
+
+            if (
+                self._prebuffer
+                and self._prebuffer.track_id == track_id
+                and self._prebuffer.seek_ms == seek_ms
+                and not self._prebuffer.error
+            ):
+                # Validate format even for direct prebuffer hits
+                pb_fmt = self._prebuffer.output_format
+                cur_fmt = self._normalized_format
+                format_ok = (
+                    pb_fmt.content_type == cur_fmt.content_type
+                    and pb_fmt.sample_rate == cur_fmt.sample_rate
+                    and pb_fmt.bit_depth == cur_fmt.bit_depth
+                )
+                if not format_ok:
+                    self.logger.warning(
+                        "Prebuffer format mismatch: %s/%dHz/%dbit vs expected %s/%dHz/%dbit"
+                        " — falling back to direct stream",
+                        pb_fmt.content_type.value,
+                        pb_fmt.sample_rate,
+                        pb_fmt.bit_depth,
+                        cur_fmt.content_type.value,
+                        cur_fmt.sample_rate,
+                        cur_fmt.bit_depth,
+                    )
                     await self._prebuffer.cancel()
-                self._prebuffer = self._next_prebuffer
-                self._next_prebuffer = None
-                seek_ms = 0
-                self._streaming_progress_ms = 0
-                # Update metadata now that this is the active track
-                if self._prebuffer.stream_details:
-                    await self._update_metadata_from_stream(self._prebuffer.stream_details, 0)
+                    self._prebuffer = None
+                    # Fall through to direct stream below
 
             if (
                 self._prebuffer
@@ -325,8 +448,18 @@ class YandexYnisonProvider(PluginProvider):
                 and not self._prebuffer.error
             ):
                 # Prebuffer hit — data is already loading/ready
-                self.logger.debug("Using prebuffer for track %s", track_id)
+                self.logger.debug(
+                    "Using prebuffer for track %s (fmt=%s/%dHz, queued=%d)",
+                    track_id,
+                    self._prebuffer.output_format.content_type.value,
+                    self._prebuffer.output_format.sample_rate,
+                    self._prebuffer.chunks_queued,
+                )
+                chunk_idx = 0
                 async for chunk in self._yield_from_prebuffer():
+                    if chunk_idx == 0:
+                        _log_first_chunk(self.logger, chunk, self._prebuffer.output_format)
+                    chunk_idx += 1
                     yield chunk
                     bytes_yielded += len(chunk)
                     now_mono = time.monotonic()
@@ -451,19 +584,25 @@ class YandexYnisonProvider(PluginProvider):
         if seek_ms > 0:
             extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 
+        # Fresh format copy so inner ffmpeg's mutation doesn't affect shared state
+        out_fmt = _make_pcm_format(self._normalized_params)
         self.logger.info(
             "Streaming track %s → %s: input=%s seek=%dms",
             track_id,
-            self._normalized_format.content_type.value,
+            out_fmt.content_type.value,
             stream_details.audio_format,
             seek_ms,
         )
+        chunk_idx = 0
         async for chunk in get_ffmpeg_stream(
             audio_input=self._yandex_provider.get_audio_stream(stream_details),
             input_format=stream_details.audio_format,
-            output_format=self._normalized_format,
+            output_format=out_fmt,
             extra_input_args=extra_input_args,
         ):
+            if chunk_idx == 0:
+                _log_first_chunk(self.logger, chunk, out_fmt)
+            chunk_idx += 1
             yield chunk
 
     # ------------------------------------------------------------------
@@ -480,7 +619,9 @@ class YandexYnisonProvider(PluginProvider):
         if self._prebuffer:
             await self._prebuffer.cancel()
 
-        prebuffer = PreBuffer(track_id=track_id, seek_ms=seek_ms)
+        # Snapshot the current normalized format — fresh copy for inner ffmpeg
+        fmt = _make_pcm_format(self._normalized_params)
+        prebuffer = PreBuffer(track_id=track_id, seek_ms=seek_ms, output_format=fmt)
         self._prebuffer = prebuffer
 
         async def _fill() -> None:
@@ -495,9 +636,10 @@ class YandexYnisonProvider(PluginProvider):
                 async for chunk in get_ffmpeg_stream(
                     audio_input=self._yandex_provider.get_audio_stream(sd),
                     input_format=sd.audio_format,
-                    output_format=self._normalized_format,
+                    output_format=fmt,
                     extra_input_args=extra_input_args,
                 ):
+                    prebuffer.chunks_queued += 1
                     await prebuffer.queue.put(chunk)
             except asyncio.CancelledError:
                 raise
@@ -505,6 +647,12 @@ class YandexYnisonProvider(PluginProvider):
                 prebuffer.error = err
                 self.logger.warning("Prebuffer failed for %s: %s", track_id, err)
             finally:
+                self.logger.debug(
+                    "Prebuffer fill done for %s: %d chunks queued, error=%s",
+                    track_id,
+                    prebuffer.chunks_queued,
+                    prebuffer.error,
+                )
                 # Guarantee EOF sentinel delivery — if the queue is full
                 # (consumer hasn't drained yet), discard one chunk to make room.
                 if prebuffer.queue.full():
@@ -534,7 +682,8 @@ class YandexYnisonProvider(PluginProvider):
         if self._next_prebuffer:
             await self._next_prebuffer.cancel()
 
-        prebuffer = PreBuffer(track_id=track_id, seek_ms=0)
+        fmt = _make_pcm_format(self._normalized_params)
+        prebuffer = PreBuffer(track_id=track_id, seek_ms=0, output_format=fmt)
         self._next_prebuffer = prebuffer
 
         async def _fill() -> None:
@@ -547,9 +696,10 @@ class YandexYnisonProvider(PluginProvider):
                 async for chunk in get_ffmpeg_stream(
                     audio_input=self._yandex_provider.get_audio_stream(sd),
                     input_format=sd.audio_format,
-                    output_format=self._normalized_format,
+                    output_format=fmt,
                     extra_input_args=extra_input_args,
                 ):
+                    prebuffer.chunks_queued += 1
                     await prebuffer.queue.put(chunk)
             except asyncio.CancelledError:
                 raise
@@ -557,6 +707,12 @@ class YandexYnisonProvider(PluginProvider):
                 prebuffer.error = err
                 self.logger.warning("Next-track prebuffer failed for %s: %s", track_id, err)
             finally:
+                self.logger.debug(
+                    "Next-prebuffer fill done for %s: %d chunks queued, error=%s",
+                    track_id,
+                    prebuffer.chunks_queued,
+                    prebuffer.error,
+                )
                 if prebuffer.queue.full():
                     with suppress(asyncio.QueueEmpty):
                         prebuffer.queue.get_nowait()
@@ -1044,15 +1200,21 @@ class YandexYnisonProvider(PluginProvider):
 
         superb/lossless → PCM s24le/48kHz (covers hi-res FLAC)
         high/balanced/efficient → PCM s16le/44.1kHz (exact match for lossy)
+
+        Creates fresh AudioFormat instances each time to prevent mutation by
+        MA's FFMpeg._log_reader_task (which sets input_format.codec_type
+        in-place on the object passed as input_format to the outer ffmpeg).
         """
         quality = ""
         if self._yandex_provider:
             quality = str(self._yandex_provider.config.get_value("quality") or "").strip().lower()
         if quality in ("superb", "lossless"):
-            self._normalized_format = _PCM_LOSSLESS
+            self._normalized_params = _PCM_LOSSLESS_PARAMS
         else:
-            self._normalized_format = _PCM_LOSSY
-        self._source_details.audio_format = self._normalized_format
+            self._normalized_params = _PCM_LOSSY_PARAMS
+        # Fresh copy for each caller so no shared mutable state
+        self._normalized_format = _make_pcm_format(self._normalized_params)
+        self._source_details.audio_format = _make_pcm_format(self._normalized_params)
         self.logger.debug(
             "Normalization format: %s/%dHz/%dbit",
             self._normalized_format.content_type.value,
