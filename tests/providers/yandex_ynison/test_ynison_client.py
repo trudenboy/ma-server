@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+from music_assistant_models.errors import LoginFailed
 from ya_passport_auth import SecretStr
 
 from music_assistant.providers.yandex_ynison.constants import (
     DEFAULT_APP_NAME,
     DEVICE_TYPE_WEB,
+    MAX_RECONNECT_ATTEMPTS,
     YNISON_ORIGIN,
 )
 from music_assistant.providers.yandex_ynison.ynison_client import (
@@ -414,3 +417,851 @@ class TestReconnectSessionOwnership:
 
         with pytest.raises(RuntimeError, match="closed"):
             await client.connect()
+
+
+# ------------------------------------------------------------------
+# connect() transient error → reconnect
+# ------------------------------------------------------------------
+
+
+class TestConnectTransientError:
+    """Tests for connect() scheduling reconnect on transient errors."""
+
+    async def test_connect_transient_schedules_reconnect(self) -> None:
+        """Non-auth error during connect schedules _reconnect task."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        client = YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+        )
+        with (
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("network down"),
+            ),
+            patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_reconnect,
+        ):
+            await client.connect()
+            await asyncio.sleep(0)  # let ensure_future task run
+
+        assert client._connected is False
+        assert client._ws is None
+        assert client._reconnect_task is not None
+        mock_reconnect.assert_awaited_once()
+
+    async def test_connect_transient_closes_ws_and_session(self) -> None:
+        """Transient connect error closes stale ws and owned session."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        client = YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+        )
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+
+        async def fake_redirect() -> None:
+            # Simulate ws being set before the error
+            client._ws = mock_ws
+            raise OSError("timeout")
+
+        with (
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=fake_redirect,
+            ),
+            patch.object(client, "_reconnect", new_callable=AsyncMock),
+        ):
+            await client.connect()
+
+        mock_ws.close.assert_awaited_once()
+        assert client._session is None
+
+
+# ------------------------------------------------------------------
+# disconnect() — reconnect task cancellation
+# ------------------------------------------------------------------
+
+
+class TestDisconnectReconnectCancellation:
+    """Tests for disconnect() cancelling a running reconnect task."""
+
+    async def test_disconnect_cancels_reconnect_task(self) -> None:
+        """disconnect() cancels and awaits pending reconnect task."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        client = YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+        )
+
+        async def _forever() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.ensure_future(_forever())
+        client._reconnect_task = task
+
+        await client.disconnect()
+
+        assert task.cancelled()
+
+
+# ------------------------------------------------------------------
+# Message building methods
+# ------------------------------------------------------------------
+
+
+class TestMessageBuildingMethods:
+    """Tests for sync_state_from_eov, update_player_state, send_full_state."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_ws(self, client: YnisonClient) -> None:
+        """Set up a mock WebSocket."""
+        self.mock_ws = AsyncMock()
+        self.mock_ws.closed = False
+        client._ws = self.mock_ws
+        client._connected = True
+
+    async def test_sync_state_from_eov(self, client: YnisonClient) -> None:
+        """sync_state_from_eov builds correct message structure."""
+        await client.sync_state_from_eov(actual_queue_id="q123")
+        call_data = json.loads(self.mock_ws.send_str.call_args[0][0])
+        assert call_data["sync_state_from_eov"]["actual_queue_id"] == "q123"
+        assert "rid" in call_data
+        assert call_data["activity_interception_type"] == "DO_NOT_INTERCEPT_BY_DEFAULT"
+        assert call_data["player_action_timestamp_ms"] == 0
+
+    async def test_update_player_state(self, client: YnisonClient) -> None:
+        """update_player_state builds correct message and logs queue info."""
+        ps = {
+            "player_queue": {
+                "current_playable_index": 2,
+                "playable_list": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+                "entity_type": "ALBUM",
+            }
+        }
+        await client.update_player_state(ps)
+        call_data = json.loads(self.mock_ws.send_str.call_args[0][0])
+        assert call_data["update_player_state"]["player_state"] == ps
+        assert "rid" in call_data
+        assert call_data["activity_interception_type"] == "DO_NOT_INTERCEPT_BY_DEFAULT"
+
+    async def test_send_full_state_default(self, client: YnisonClient) -> None:
+        """send_full_state with no args sends initial state and device dict."""
+        await client.send_full_state()
+        call_data = json.loads(self.mock_ws.send_str.call_args[0][0])
+        ufs = call_data["update_full_state"]
+        assert ufs["device"]["info"]["device_id"] == "test-device-id"
+        assert ufs["player_state"]["status"]["paused"] is True
+        assert ufs["is_currently_active"] is False
+        assert "rid" in call_data
+
+    async def test_send_full_state_custom(self, client: YnisonClient) -> None:
+        """send_full_state with custom player_state uses it."""
+        custom_state = {"status": {"paused": False, "progress_ms": 42}}
+        await client.send_full_state(player_state=custom_state)
+        call_data = json.loads(self.mock_ws.send_str.call_args[0][0])
+        assert call_data["update_full_state"]["player_state"] == custom_state
+
+
+# ------------------------------------------------------------------
+# _get_redirect_ticket
+# ------------------------------------------------------------------
+
+
+class TestGetRedirectTicket:
+    """Tests for _get_redirect_ticket."""
+
+    async def test_success(self, client: YnisonClient) -> None:
+        """Returns (host, ticket, session_id) on success."""
+        mock_msg = MagicMock()
+        mock_msg.type = aiohttp.WSMsgType.TEXT
+        mock_msg.data = json.dumps(
+            {
+                "host": "ynison-node.yandex.net",
+                "redirect_ticket": "ticket-abc",
+                "session_id": 42,
+            }
+        )
+
+        mock_ws = AsyncMock()
+        mock_ws.receive = AsyncMock(return_value=mock_msg)
+        mock_ws.close = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(return_value=mock_ws)
+        client._session = mock_session
+
+        host, ticket, sid = await client._get_redirect_ticket()
+
+        assert host == "ynison-node.yandex.net"
+        assert ticket == "ticket-abc"
+        assert sid == 42
+        mock_ws.close.assert_awaited_once()
+
+    async def test_auth_failure_401(self, client: YnisonClient) -> None:
+        """401 WSServerHandshakeError raises LoginFailed."""
+        err = aiohttp.WSServerHandshakeError(
+            request_info=MagicMock(),
+            history=(),
+            status=401,
+            message="Unauthorized",
+            headers=MagicMock(),
+        )
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(side_effect=err)
+        client._session = mock_session
+
+        with pytest.raises(LoginFailed):
+            await client._get_redirect_ticket()
+
+    async def test_auth_failure_403(self, client: YnisonClient) -> None:
+        """403 WSServerHandshakeError raises LoginFailed."""
+        err = aiohttp.WSServerHandshakeError(
+            request_info=MagicMock(),
+            history=(),
+            status=403,
+            message="Forbidden",
+            headers=MagicMock(),
+        )
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(side_effect=err)
+        client._session = mock_session
+
+        with pytest.raises(LoginFailed):
+            await client._get_redirect_ticket()
+
+    async def test_network_error_500(self, client: YnisonClient) -> None:
+        """500 WSServerHandshakeError re-raises (not LoginFailed)."""
+        err = aiohttp.WSServerHandshakeError(
+            request_info=MagicMock(),
+            history=(),
+            status=500,
+            message="Server Error",
+            headers=MagicMock(),
+        )
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(side_effect=err)
+        client._session = mock_session
+
+        with pytest.raises(aiohttp.WSServerHandshakeError):
+            await client._get_redirect_ticket()
+
+    async def test_missing_host_ticket(self, client: YnisonClient) -> None:
+        """Missing host/ticket in response raises ConnectionError."""
+        mock_msg = MagicMock()
+        mock_msg.type = aiohttp.WSMsgType.TEXT
+        mock_msg.data = json.dumps({"host": "", "redirect_ticket": ""})
+
+        mock_ws = AsyncMock()
+        mock_ws.receive = AsyncMock(return_value=mock_msg)
+        mock_ws.close = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(return_value=mock_ws)
+        client._session = mock_session
+
+        with pytest.raises(ConnectionError, match="missing host or ticket"):
+            await client._get_redirect_ticket()
+
+    async def test_unexpected_msg_type(self, client: YnisonClient) -> None:
+        """Non-TEXT/BINARY message type raises ConnectionError."""
+        mock_msg = MagicMock()
+        mock_msg.type = aiohttp.WSMsgType.CLOSE
+        mock_msg.data = None
+
+        mock_ws = AsyncMock()
+        mock_ws.receive = AsyncMock(return_value=mock_msg)
+        mock_ws.close = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(return_value=mock_ws)
+        client._session = mock_session
+
+        with pytest.raises(ConnectionError, match="Unexpected message type"):
+            await client._get_redirect_ticket()
+
+    async def test_no_session_raises_runtime_error(self, client: YnisonClient) -> None:
+        """Raises RuntimeError when session is None."""
+        client._session = None
+        with pytest.raises(RuntimeError, match="session not initialized"):
+            await client._get_redirect_ticket()
+
+
+# ------------------------------------------------------------------
+# _connect_state
+# ------------------------------------------------------------------
+
+
+class TestConnectState:
+    """Tests for _connect_state."""
+
+    async def test_success(self, client: YnisonClient) -> None:
+        """Successful connect sets _connected, calls send_full_state, starts loop."""
+        mock_ws = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(return_value=mock_ws)
+        client._session = mock_session
+
+        with patch.object(client, "send_full_state", new_callable=AsyncMock) as mock_sfs:
+            await client._connect_state("host.yandex.net", "ticket", 42)
+
+        assert client._connected is True
+        mock_sfs.assert_awaited_once()
+        assert client._message_task is not None
+        # Clean up the task
+        client._message_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await client._message_task
+
+    async def test_auth_failure_401(self, client: YnisonClient) -> None:
+        """401 during state connect raises LoginFailed."""
+        err = aiohttp.WSServerHandshakeError(
+            request_info=MagicMock(),
+            history=(),
+            status=401,
+            message="Unauthorized",
+            headers=MagicMock(),
+        )
+        mock_session = AsyncMock()
+        mock_session.ws_connect = AsyncMock(side_effect=err)
+        client._session = mock_session
+
+        with pytest.raises(LoginFailed):
+            await client._connect_state("host", "ticket", 1)
+
+    async def test_no_session_raises_runtime_error(self, client: YnisonClient) -> None:
+        """Raises RuntimeError when session is None."""
+        client._session = None
+        with pytest.raises(RuntimeError, match="session not initialized"):
+            await client._connect_state("host", "ticket", 1)
+
+
+# ------------------------------------------------------------------
+# _message_loop
+# ------------------------------------------------------------------
+
+
+def _make_ws_msg(
+    msg_type: aiohttp.WSMsgType,
+    data: str | bytes | None = None,
+    extra: Any = None,
+) -> MagicMock:
+    """Create a mock WS message."""
+    msg = MagicMock()
+    msg.type = msg_type
+    msg.data = data
+    msg.extra = extra
+    return msg
+
+
+class TestMessageLoop:
+    """Tests for _message_loop."""
+
+    async def _run_loop_with_messages(
+        self,
+        client: YnisonClient,
+        messages: list[MagicMock],
+    ) -> None:
+        """Set up mock ws and run _message_loop."""
+
+        async def _aiter(_self: Any) -> Any:
+            for m in messages:
+                yield m
+
+        mock_ws = MagicMock()
+        mock_ws.__aiter__ = _aiter
+        mock_ws.exception = MagicMock(return_value=None)
+        mock_ws.close_code = None
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock):
+            await client._message_loop()
+
+    async def test_text_message_parses_and_calls_callback(
+        self,
+        client: YnisonClient,
+        mock_callbacks: tuple[AsyncMock, AsyncMock],
+    ) -> None:
+        """TEXT message: parses JSON, updates state, invokes callback."""
+        on_state_update, _ = mock_callbacks
+        payload = {
+            "player_state": {
+                "status": {"paused": False, "progress_ms": 1000, "duration_ms": 5000},
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": "t1"}],
+                },
+            },
+            "active_device_id_optional": "dev1",
+        }
+        msg = _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(payload))
+        await self._run_loop_with_messages(client, [msg])
+
+        on_state_update.assert_awaited_once()
+        assert client.state.current_track_id == "t1"
+        assert client.state.is_paused is False
+
+    async def test_text_message_with_error_field(self, client: YnisonClient) -> None:
+        """TEXT message with 'error' key logs warning, continues."""
+        error_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"error": {"code": 500, "message": "server error"}}),
+        )
+        # Second valid message to confirm the loop continues
+        valid_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"player_state": {"status": {"paused": True}}}),
+        )
+        await self._run_loop_with_messages(client, [error_msg, valid_msg])
+
+        client._logger.warning.assert_called()
+
+    async def test_text_message_invalid_json(self, client: YnisonClient) -> None:
+        """TEXT message with invalid JSON logs warning, continues."""
+        bad_msg = _make_ws_msg(aiohttp.WSMsgType.TEXT, "not valid json{{{")
+        valid_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"player_state": {"status": {"paused": True}}}),
+        )
+        await self._run_loop_with_messages(client, [bad_msg, valid_msg])
+
+        client._logger.warning.assert_called()
+
+    async def test_callback_exception_continues(
+        self,
+        client: YnisonClient,
+        mock_callbacks: tuple[AsyncMock, AsyncMock],
+    ) -> None:
+        """Exception in state callback is caught, loop continues."""
+        on_state_update, _ = mock_callbacks
+        on_state_update.side_effect = [ValueError("boom"), None]
+
+        msg1 = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"player_state": {"status": {"paused": True}}}),
+        )
+        msg2 = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"player_state": {"status": {"paused": False}}}),
+        )
+        await self._run_loop_with_messages(client, [msg1, msg2])
+
+        assert on_state_update.await_count == 2
+
+    async def test_binary_message_logged(self, client: YnisonClient) -> None:
+        """BINARY message is logged, loop continues."""
+        bin_msg = _make_ws_msg(aiohttp.WSMsgType.BINARY, b"\x00\x01\x02")
+        valid_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"player_state": {"status": {"paused": True}}}),
+        )
+        await self._run_loop_with_messages(client, [bin_msg, valid_msg])
+
+        client._logger.debug.assert_called()
+
+    async def test_error_message_breaks_and_reconnects(self, client: YnisonClient) -> None:
+        """ERROR message breaks loop and schedules reconnect."""
+
+        async def _aiter(_self: Any) -> Any:
+            yield _make_ws_msg(aiohttp.WSMsgType.ERROR)
+
+        mock_ws = MagicMock()
+        mock_ws.__aiter__ = _aiter
+        mock_ws.exception = MagicMock(return_value=Exception("ws error"))
+        mock_ws.close_code = None
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._message_loop()
+            await asyncio.sleep(0)  # let ensure_future task run
+
+        assert client._connected is False
+        mock_rc.assert_awaited_once()
+
+    async def test_close_message_breaks_and_reconnects(self, client: YnisonClient) -> None:
+        """CLOSE message breaks loop and schedules reconnect."""
+
+        async def _aiter(_self: Any) -> Any:
+            yield _make_ws_msg(aiohttp.WSMsgType.CLOSE, extra="normal close")
+
+        mock_ws = MagicMock()
+        mock_ws.__aiter__ = _aiter
+        mock_ws.exception = MagicMock(return_value=None)
+        mock_ws.close_code = 1000
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._message_loop()
+            await asyncio.sleep(0)  # let ensure_future task run
+
+        assert client._connected is False
+        mock_rc.assert_awaited_once()
+
+    async def test_closing_message_breaks_loop(self, client: YnisonClient) -> None:
+        """CLOSING message breaks loop."""
+
+        async def _aiter(_self: Any) -> Any:
+            yield _make_ws_msg(aiohttp.WSMsgType.CLOSING)
+
+        mock_ws = MagicMock()
+        mock_ws.__aiter__ = _aiter
+        mock_ws.exception = MagicMock(return_value=None)
+        mock_ws.close_code = None
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock):
+            await client._message_loop()
+
+        assert client._connected is False
+
+    async def test_stop_event_breaks_loop(self, client: YnisonClient) -> None:
+        """stop_event set → breaks loop without reconnect."""
+        client._stop_event.set()
+
+        async def _aiter(_self: Any) -> Any:
+            yield _make_ws_msg(
+                aiohttp.WSMsgType.TEXT,
+                json.dumps({"player_state": {}}),
+            )
+
+        mock_ws = MagicMock()
+        mock_ws.__aiter__ = _aiter
+        mock_ws.exception = MagicMock(return_value=None)
+        mock_ws.close_code = None
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._message_loop()
+
+        mock_rc.assert_not_awaited()
+
+    async def test_cancelled_error_exits_cleanly(self, client: YnisonClient) -> None:
+        """CancelledError exits without reconnect."""
+
+        async def _aiter(_self: Any) -> Any:
+            raise asyncio.CancelledError
+            yield
+
+        mock_ws = MagicMock()
+        mock_ws.__aiter__ = _aiter
+        mock_ws.exception = MagicMock(return_value=None)
+        mock_ws.close_code = None
+        client._ws = mock_ws
+        client._connected = True
+
+        # CancelledError should be handled cleanly (no reconnect)
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._message_loop()
+
+        mock_rc.assert_not_awaited()
+
+    async def test_empty_data_message(self, client: YnisonClient) -> None:
+        """Message with empty data gets '<empty>' preview."""
+        msg = _make_ws_msg(aiohttp.WSMsgType.TEXT, "")
+        # Empty string → json.loads will fail → warning logged
+        await self._run_loop_with_messages(client, [msg])
+        client._logger.warning.assert_called()
+
+    async def test_no_ws_raises_runtime_error(self, client: YnisonClient) -> None:
+        """_message_loop raises RuntimeError when ws is None."""
+        client._ws = None
+        with pytest.raises(RuntimeError, match="not connected"):
+            await client._message_loop()
+
+
+# ------------------------------------------------------------------
+# _reconnect
+# ------------------------------------------------------------------
+
+SLEEP_PATH = "music_assistant.providers.yandex_ynison.ynison_client.asyncio.sleep"
+
+
+class TestReconnect:
+    """Tests for _reconnect."""
+
+    async def test_success_on_first_attempt(self, client: YnisonClient) -> None:
+        """Reconnect succeeds on first attempt."""
+        client._session = MagicMock()
+        client._session.closed = False
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                return_value=("host", "ticket", 1),
+            ),
+            patch.object(client, "_connect_state", new_callable=AsyncMock),
+        ):
+            await client._reconnect()
+
+        client._logger.info.assert_any_call("Ynison reconnected successfully")
+
+    async def test_all_attempts_fail(self, client: YnisonClient) -> None:
+        """All attempts fail → calls _on_disconnect, cleans up."""
+        client._session = MagicMock()
+        client._session.closed = False
+
+        on_disconnect = AsyncMock()
+        client._on_disconnect = on_disconnect
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("fail"),
+            ),
+        ):
+            await client._reconnect()
+
+        assert client._connected is False
+        assert client._stop_event.is_set()
+        on_disconnect.assert_awaited_once()
+        client._logger.error.assert_called_once_with(
+            "Ynison: all %d reconnect attempts failed",
+            MAX_RECONNECT_ATTEMPTS,
+        )
+
+    async def test_stop_event_before_attempt(self, client: YnisonClient) -> None:
+        """stop_event set before reconnect → exits immediately."""
+        client._stop_event.set()
+        await client._reconnect()
+
+    async def test_stop_event_after_sleep(self, client: YnisonClient) -> None:
+        """stop_event set during sleep → exits on next check."""
+
+        async def set_stop(*_args: Any, **_kwargs: Any) -> None:
+            client._stop_event.set()
+
+        client._session = MagicMock()
+        client._session.closed = False
+
+        with patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=set_stop):
+            await client._reconnect()
+
+        # Should exit without calling _get_redirect_ticket
+        assert client._stop_event.is_set()
+
+    async def test_cancelled_error_during_reconnect(self, client: YnisonClient) -> None:
+        """CancelledError during reconnect exits cleanly."""
+        client._session = MagicMock()
+        client._session.closed = False
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=asyncio.CancelledError,
+            ),
+        ):
+            await client._reconnect()
+
+    async def test_creates_new_session_when_none(self, client: YnisonClient) -> None:
+        """Creates new ClientSession when _session is None and no external."""
+        client._session = None
+        client._external_session = None
+
+        mock_new_session = MagicMock(spec=aiohttp.ClientSession)
+        mock_new_session.closed = False
+        mock_new_session.close = AsyncMock()
+
+        def stop_after_session(*_args: Any, **_kwargs: Any) -> None:
+            client._stop_event.set()
+            msg = "stop"
+            raise RuntimeError(msg)
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch(
+                "music_assistant.providers.yandex_ynison.ynison_client.aiohttp.ClientSession",
+                return_value=mock_new_session,
+            ),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=stop_after_session,
+            ),
+        ):
+            await client._reconnect()
+
+        assert client._session is mock_new_session
+
+    async def test_closes_stale_ws_on_reconnect(self, client: YnisonClient) -> None:
+        """Stale ws is closed before reconnect attempt."""
+        stale_ws = AsyncMock()
+        stale_ws.closed = False
+        client._ws = stale_ws
+        client._session = MagicMock()
+        client._session.closed = False
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                return_value=("host", "ticket", 1),
+            ),
+            patch.object(client, "_connect_state", new_callable=AsyncMock),
+        ):
+            await client._reconnect()
+
+        stale_ws.close.assert_awaited_once()
+
+
+# ------------------------------------------------------------------
+# _send() error handling
+# ------------------------------------------------------------------
+
+
+class TestSendErrorHandling:
+    """Tests for _send() error handling and reconnect scheduling."""
+
+    async def test_connection_error_triggers_reconnect(self, client: YnisonClient) -> None:
+        """ConnectionError during send sets _connected=False, schedules reconnect."""
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.send_str = AsyncMock(side_effect=ConnectionError("broken pipe"))
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._send({"test": True})
+            await asyncio.sleep(0)
+
+        assert client._connected is False
+        mock_rc.assert_awaited_once()
+
+    async def test_client_error_triggers_reconnect(self, client: YnisonClient) -> None:
+        """aiohttp.ClientError during send triggers reconnect."""
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.send_str = AsyncMock(side_effect=aiohttp.ClientError("connection lost"))
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._send({"test": True})
+            await asyncio.sleep(0)
+
+        assert client._connected is False
+        mock_rc.assert_awaited_once()
+
+    async def test_runtime_error_triggers_reconnect(self, client: YnisonClient) -> None:
+        """RuntimeError during send triggers reconnect."""
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.send_str = AsyncMock(side_effect=RuntimeError("ws closed"))
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._send({"test": True})
+            await asyncio.sleep(0)
+
+        assert client._connected is False
+        mock_rc.assert_awaited_once()
+
+    async def test_os_error_triggers_reconnect(self, client: YnisonClient) -> None:
+        """OSError during send triggers reconnect."""
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.send_str = AsyncMock(side_effect=OSError("network"))
+        client._ws = mock_ws
+        client._connected = True
+
+        with patch.object(client, "_reconnect", new_callable=AsyncMock) as mock_rc:
+            await client._send({"test": True})
+            await asyncio.sleep(0)
+
+        assert client._connected is False
+        mock_rc.assert_awaited_once()
+
+    async def test_send_skips_when_ws_closed(self, client: YnisonClient) -> None:
+        """_send skips when ws is present but closed."""
+        mock_ws = AsyncMock()
+        mock_ws.closed = True
+        client._ws = mock_ws
+        client._connected = True
+
+        await client._send({"test": True})
+        mock_ws.send_str.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# connect() creates session when none provided
+# ------------------------------------------------------------------
+
+
+class TestConnectSessionCreation:
+    """Tests for connect() creating an aiohttp session."""
+
+    async def test_connect_creates_session(self) -> None:
+        """connect() creates a new session when no external session given."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        client = YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+        )
+        with (
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                return_value=("host", "ticket", 1),
+            ),
+            patch.object(client, "_connect_state", new_callable=AsyncMock),
+        ):
+            await client.connect()
+
+        assert client._session is not None
+        # Clean up
+        await client.disconnect()
+
+    async def test_disconnect_does_not_close_external_session(self) -> None:
+        """disconnect() does not close an externally-provided session."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        ext_session = MagicMock(spec=aiohttp.ClientSession)
+        ext_session.closed = False
+        ext_session.close = AsyncMock()
+
+        client = YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+            http_session=ext_session,
+        )
+        client._session = ext_session
+
+        await client.disconnect()
+
+        ext_session.close.assert_not_called()

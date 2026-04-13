@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import random
-import string
+import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -196,6 +196,15 @@ class YnisonClient:
     # Send methods
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _message_meta() -> dict[str, Any]:
+        """Return common envelope fields for state-mutating messages."""
+        return {
+            "rid": str(uuid.uuid4()),
+            "player_action_timestamp_ms": 0,
+            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+        }
+
     async def update_playing_status(self, progress_ms: int, duration_ms: int, paused: bool) -> None:
         """Send playback status update to Ynison."""
         self._logger.debug(
@@ -238,9 +247,7 @@ class YnisonClient:
             "sync_state_from_eov": {
                 "actual_queue_id": actual_queue_id,
             },
-            "rid": str(uuid.uuid4()),
-            "player_action_timestamp_ms": 0,
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+            **self._message_meta(),
         }
         self._logger.info("→ sync_state_from_eov: queue_id=%r", actual_queue_id)
         await self._send(msg)
@@ -262,9 +269,7 @@ class YnisonClient:
             "update_player_state": {
                 "player_state": player_state,
             },
-            "rid": str(uuid.uuid4()),
-            "player_action_timestamp_ms": 0,
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+            **self._message_meta(),
         }
         self._logger.debug("Sending player state: %s", json.dumps(msg)[:500])
         await self._send(msg)
@@ -281,9 +286,7 @@ class YnisonClient:
                 "device": self._build_device_dict(),
                 "is_currently_active": False,
             },
-            "rid": str(uuid.uuid4()),
-            "player_action_timestamp_ms": 0,
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+            **self._message_meta(),
         }
         self._logger.debug("Sending full state: %s", json.dumps(msg)[:500])
         await self._send(msg)
@@ -369,7 +372,8 @@ class YnisonClient:
         :return: (host, redirect_ticket, session_id)
         :raises LoginFailed: If authentication fails.
         """
-        assert self._session is not None
+        if self._session is None:
+            raise RuntimeError("HTTP session not initialized — call connect() first")
         headers = self._build_headers()
 
         ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
@@ -405,7 +409,8 @@ class YnisonClient:
 
     async def _connect_state(self, host: str, ticket: str, session_id: int) -> None:
         """Connect to Ynison state service and start message loop."""
-        assert self._session is not None
+        if self._session is None:
+            raise RuntimeError("HTTP session not initialized — call connect() first")
         url = f"wss://{host}{YNISON_STATE_PATH}"
         headers = self._build_headers(redirect_ticket=ticket, session_id=session_id)
 
@@ -427,7 +432,8 @@ class YnisonClient:
 
     async def _message_loop(self) -> None:
         """Read messages from state service and dispatch callbacks."""
-        assert self._ws is not None
+        if self._ws is None:
+            raise RuntimeError("WebSocket not connected — call connect() first")
         try:
             async for msg in self._ws:
                 if self._stop_event.is_set():
@@ -512,8 +518,10 @@ class YnisonClient:
             "current_playable_index", -1
         )
 
-        # Deep-merge player_state so incremental updates (e.g. progress-only)
-        # don't drop previously-known player_queue data.
+        # One-level-deep merge of player_state: Ynison sends sub-objects like
+        # "player_queue" and "status" as complete replacements, so shallow
+        # dict-union at the first nesting level is sufficient. Deeper recursion
+        # would risk merging stale list items (e.g. playable_list entries).
         incoming_ps = data.get("player_state")
         if incoming_ps is not None:
             existing_ps = self.state.player_state
@@ -631,6 +639,5 @@ class YnisonClient:
 
 
 def generate_device_id() -> str:
-    """Generate a 16-character alphanumeric device ID for Ynison registration."""
-    chars = string.ascii_lowercase + string.digits
-    return "".join(random.choice(chars) for _ in range(16))
+    """Generate a 16-character hex device ID for Ynison registration."""
+    return secrets.token_hex(8)

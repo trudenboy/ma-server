@@ -16,11 +16,12 @@ YNISON_ORIGIN: Final[str] = "https://music.yandex.ru"
 # Configuration keys
 CONF_TOKEN: Final[str] = "token"
 CONF_X_TOKEN: Final[str] = "x_token"
-CONF_PLAYER: Final[str] = "player"
-CONF_DISPLAY_NAME: Final[str] = "display_name"
+CONF_MASS_PLAYER_ID: Final[str] = "mass_player_id"
+CONF_PUBLISH_NAME: Final[str] = "publish_name"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
 CONF_DEVICE_ID: Final[str] = "device_id"
 CONF_PREBUFFER_NEXT: Final[str] = "prebuffer_next_track"
+CONF_CROSSFADE_DURATION: Final[str] = "crossfade_duration"
 CONF_OUTPUT_SAMPLE_RATE: Final[str] = "output_sample_rate"
 CONF_OUTPUT_BIT_DEPTH: Final[str] = "output_bit_depth"
 
@@ -49,4 +50,3 @@ MAX_RECONNECT_ATTEMPTS: Final[int] = 5
 
 # WebSocket timeouts
 WS_CONNECT_TIMEOUT: Final[float] = 15.0
-WS_RECEIVE_TIMEOUT: Final[float] = 60.0

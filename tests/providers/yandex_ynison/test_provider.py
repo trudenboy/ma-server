@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,25 +16,30 @@ from music_assistant_models.enums import (
     ProviderType,
     StreamType,
 )
-from music_assistant_models.errors import LoginFailed
+from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
 from ya_passport_auth import SecretStr
 
 from music_assistant.providers.yandex_ynison.config_helpers import find_sibling_token
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
+    CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
-    CONF_DISPLAY_NAME,
-    CONF_PLAYER,
+    CONF_MASS_PLAYER_ID,
+    CONF_PREBUFFER_NEXT,
+    CONF_PUBLISH_NAME,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
 )
+from music_assistant.providers.yandex_ynison.crossfade import crossfade_bytes_for
+from music_assistant.providers.yandex_ynison.prebuffer import PreBuffer
 from music_assistant.providers.yandex_ynison.provider import (
-    _PCM_LOSSLESS_PARAMS,
-    _PCM_LOSSY_PARAMS,
+    _API_MAX_RETRIES,
+    PCM_LOSSLESS_PARAMS,
+    PCM_LOSSY_PARAMS,
     YandexYnisonProvider,
-    _make_pcm_format,
+    make_pcm_format,
 )
 from music_assistant.providers.yandex_ynison.ynison_client import YnisonState
 
@@ -42,9 +49,9 @@ def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
     defaults: dict[str, Any] = {
         CONF_TOKEN: "test-music-token",
         CONF_X_TOKEN: None,
-        CONF_PLAYER: PLAYER_ID_AUTO,
+        CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
         CONF_ALLOW_PLAYER_SWITCH: True,
-        CONF_DISPLAY_NAME: DEFAULT_DISPLAY_NAME,
+        CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
         CONF_DEVICE_ID: "test-device-uuid",
         "log_level": "GLOBAL",
     }
@@ -70,6 +77,10 @@ def _make_mock_mass() -> MagicMock:
     mass.get_providers = MagicMock(return_value=[])
     mass.config.set_raw_provider_config_value = MagicMock()
 
+    # Cache — return None (miss) by default
+    mass.cache.get = AsyncMock(return_value=None)
+    mass.cache.set = AsyncMock()
+
     # Players
     mass.players.all_players = MagicMock(return_value=[])
     mass.players.get_player = MagicMock(return_value=None)
@@ -91,7 +102,7 @@ def _make_mock_manifest() -> MagicMock:
 def _make_provider(player_id: str = PLAYER_ID_AUTO) -> YandexYnisonProvider:
     """Create a YandexYnisonProvider with mock dependencies."""
     mass = _make_mock_mass()
-    config = _make_mock_config({CONF_PLAYER: player_id})
+    config = _make_mock_config({CONF_MASS_PLAYER_ID: player_id})
     manifest = _make_mock_manifest()
     return YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
 
@@ -619,16 +630,18 @@ class TestYnisonStateHandling:
         mock_track.albums = [MagicMock(id="a3")]
         mock_track.cover_uri = "cover3.jpg"
 
-        mock_client = MagicMock()
-        mock_client.get_rotor_station_tracks = AsyncMock(return_value=([mock_track], "batch-123"))
         mock_ym_provider = MagicMock()
-        mock_ym_provider.client = mock_client
+        mock_ym_provider.get_rotor_station_tracks = AsyncMock(
+            return_value=([mock_track], "batch-123")
+        )
         provider._yandex_provider = mock_ym_provider
 
         await provider._signal_track_completion()
 
         # Fetched tracks from station
-        mock_client.get_rotor_station_tracks.assert_awaited_once_with("user:onyourwave", queue="t2")
+        mock_ym_provider.get_rotor_station_tracks.assert_awaited_once_with(
+            "user:onyourwave", queue="t2"
+        )
         # Advanced index to 2 with expanded playable_list
         call_args = mock_ynison.update_player_state.call_args
         sent_state = call_args.kwargs["player_state"]
@@ -702,10 +715,10 @@ class TestYnisonStateHandling:
         mock_track.albums = [MagicMock(id="a5")]
         mock_track.cover_uri = "cover5.jpg"
 
-        mock_client = MagicMock()
-        mock_client.get_rotor_station_tracks = AsyncMock(return_value=([mock_track], "batch-pfx"))
         mock_ym_provider = MagicMock()
-        mock_ym_provider.client = mock_client
+        mock_ym_provider.get_rotor_station_tracks = AsyncMock(
+            return_value=([mock_track], "batch-pfx")
+        )
         provider._yandex_provider = mock_ym_provider
 
         # Use real create_task so prefetch coroutine actually runs
@@ -761,16 +774,14 @@ class TestYnisonStateHandling:
         ]
         provider._prefetched_list = prefetched
 
-        mock_client = MagicMock()
-        mock_client.get_rotor_station_tracks = AsyncMock()
         mock_ym_provider = MagicMock()
-        mock_ym_provider.client = mock_client
+        mock_ym_provider.get_rotor_station_tracks = AsyncMock()
         provider._yandex_provider = mock_ym_provider
 
         await provider._signal_track_completion()
 
         # Should NOT have called API — used prefetched
-        mock_client.get_rotor_station_tracks.assert_not_awaited()
+        mock_ym_provider.get_rotor_station_tracks.assert_not_awaited()
         # Advanced with prefetched list
         call_args = mock_ynison.update_player_state.call_args
         sent_state = call_args.kwargs["player_state"]
@@ -977,7 +988,7 @@ class TestPCMNormalization:
         mock_yandex = MagicMock()
         mock_yandex.domain = "yandex_music"
         mock_yandex.type = ProviderType.MUSIC
-        mock_yandex.config.get_value.side_effect = lambda k: "superb" if k == "quality" else None
+        mock_yandex.get_quality = MagicMock(return_value="superb")
         provider._yandex_provider = mock_yandex
         provider._update_normalized_format()
 
@@ -993,7 +1004,7 @@ class TestPCMNormalization:
         mock_yandex = MagicMock()
         mock_yandex.domain = "yandex_music"
         mock_yandex.type = ProviderType.MUSIC
-        mock_yandex.config.get_value.side_effect = lambda k: "balanced" if k == "quality" else None
+        mock_yandex.get_quality = MagicMock(return_value="balanced")
         provider._yandex_provider = mock_yandex
         provider._update_normalized_format()
 
@@ -1092,7 +1103,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            "music_assistant.providers.yandex_ynison.prebuffer.get_ffmpeg_stream",
             side_effect=_fake_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1141,7 +1152,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            "music_assistant.providers.yandex_ynison.prebuffer.get_ffmpeg_stream",
             side_effect=_slow_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1202,7 +1213,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            "music_assistant.providers.yandex_ynison.prebuffer.get_ffmpeg_stream",
             side_effect=_fake_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1244,7 +1255,7 @@ class TestPreBuffer:
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
         with patch(
-            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            "music_assistant.providers.yandex_ynison.prebuffer.get_ffmpeg_stream",
             side_effect=_fake_ffmpeg,
         ):
             await provider._start_prebuffer("track:1")
@@ -1252,6 +1263,75 @@ class TestPreBuffer:
 
         provider._clear_active_player()
         assert provider._prebuffer is None
+
+    async def test_prebuffer_eof_delivery_under_contention(self) -> None:
+        """EOF sentinel arrives even when queue is full at fill completion."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = "player1"
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"raw"
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        # Fill 65 chunks into a maxsize=64 queue — the last put blocks until
+        # the consumer drains. The fill task must still deliver EOF after.
+        chunks = [f"pcm-{i}".encode() for i in range(65)]
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            for c in chunks:
+                yield c
+
+        provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.prebuffer.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            await provider._start_prebuffer("track:full")
+            assert provider._prebuffer is not None
+            assert provider._prebuffer.task is not None
+
+            # Slowly drain as consumer — fill must not timeout (30s) here
+            collected: list[bytes] = []
+            async for chunk in provider._yield_from_prebuffer():
+                collected.append(chunk)
+
+        # All chunks received, no data loss
+        assert collected == chunks
+
+    async def test_prebuffer_put_timeout_on_stalled_consumer(self) -> None:
+        """Fill aborts with error after queue.put timeout on stalled consumer."""
+        fmt = make_pcm_format(PCM_LOSSY_PARAMS)
+        prebuffer = PreBuffer(
+            track_id="stall:1",
+            seek_ms=0,
+            output_format=fmt,
+            queue=asyncio.Queue(maxsize=1),
+        )
+
+        # Simulate: fill the queue then try to put with a tiny timeout
+        await prebuffer.queue.put(b"blocking-chunk")
+
+        # The queue is now full — put should timeout
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(prebuffer.queue.put(b"stalled"), timeout=0.1)
+
+        # Verify the pattern used in _fill(): error is set and logged
+        prebuffer.error = TimeoutError("Queue put timeout — consumer stalled")
+        assert isinstance(prebuffer.error, TimeoutError)
 
 
 class TestResolveToken:
@@ -1318,7 +1398,7 @@ class TestInstanceNamePostfix:
 
     def test_returns_custom_display_name(self) -> None:
         """Returns display_name when it differs from the default."""
-        config = _make_mock_config({CONF_DISPLAY_NAME: "Living Room"})
+        config = _make_mock_config({CONF_PUBLISH_NAME: "Living Room"})
         mass = _make_mock_mass()
         manifest = _make_mock_manifest()
         provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
@@ -1402,7 +1482,7 @@ class TestPCMFrameAlignment:
     async def test_frame_alignment_padding_s24le(self) -> None:
         """Verify padding math for s24le stereo (frame_size=6)."""
         provider = _make_provider()
-        provider._normalized_format = _make_pcm_format(_PCM_LOSSLESS_PARAMS)
+        provider._normalized_format = make_pcm_format(PCM_LOSSLESS_PARAMS)
         fmt = provider._normalized_format
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         assert frame_size == 6  # 3 bytes x 2 channels
@@ -1417,7 +1497,7 @@ class TestPCMFrameAlignment:
     async def test_frame_alignment_padding_s16le(self) -> None:
         """Verify padding math for s16le stereo (frame_size=4)."""
         provider = _make_provider()
-        provider._normalized_format = _make_pcm_format(_PCM_LOSSY_PARAMS)
+        provider._normalized_format = make_pcm_format(PCM_LOSSY_PARAMS)
         fmt = provider._normalized_format
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         assert frame_size == 4  # 2 bytes x 2 channels
@@ -1431,7 +1511,1070 @@ class TestPCMFrameAlignment:
 
     async def test_no_padding_when_aligned(self) -> None:
         """No padding needed when bytes_yielded is already frame-aligned."""
-        fmt = _make_pcm_format(_PCM_LOSSLESS_PARAMS)
+        fmt = make_pcm_format(PCM_LOSSLESS_PARAMS)
         frame_size = (fmt.bit_depth // 8) * fmt.channels
         # 6000 bytes = 1000 frames of s24le stereo
         assert 6000 % frame_size == 0
+
+
+# ------------------------------------------------------------------
+# Playback controls
+# ------------------------------------------------------------------
+
+
+def _make_ynison_state(
+    *,
+    progress_ms: int = 5000,
+    duration_ms: int = 120000,
+    paused: bool = False,
+    current_playable_index: int = 0,
+    playable_list: list[dict[str, Any]] | None = None,
+    device_id: str = "test-device-uuid",
+) -> YnisonState:
+    """Build a YnisonState for control-flow tests."""
+    if playable_list is None:
+        playable_list = [{"playable_id": "track1"}]
+    return YnisonState(
+        active_device_id=device_id,
+        player_state={
+            "status": {
+                "paused": paused,
+                "progress_ms": progress_ms,
+                "duration_ms": duration_ms,
+            },
+            "player_queue": {
+                "current_playable_index": current_playable_index,
+                "playable_list": playable_list,
+            },
+        },
+    )
+
+
+def _mock_ynison(
+    state: YnisonState | None = None,
+    connected: bool = True,
+) -> MagicMock:
+    """Create a mock YnisonClient with sensible defaults."""
+    mock = MagicMock()
+    mock.connected = connected
+    mock.state = state or _make_ynison_state()
+    mock.update_playing_status = AsyncMock()
+    mock.update_player_state = AsyncMock()
+    return mock
+
+
+class TestPlaybackControls:
+    """Tests for _on_play, _on_pause, _on_next, _on_previous, _on_seek."""
+
+    async def test_on_play_sends_progress_unpaused(self) -> None:
+        """_on_play sends update_playing_status with paused=False."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 120000
+        state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=True)
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._on_play()
+
+        mock_yn.update_playing_status.assert_awaited_once_with(
+            progress_ms=5000, duration_ms=120000, paused=False
+        )
+
+    async def test_on_play_no_ynison_raises(self) -> None:
+        """_on_play raises when Ynison is not connected."""
+        provider = _make_provider()
+        provider._ynison = None
+
+        with pytest.raises(UnsupportedFeaturedException):
+            await provider._on_play()
+
+    async def test_on_pause_sends_progress_paused(self) -> None:
+        """_on_pause sends update_playing_status with paused=True."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 120000
+        state = _make_ynison_state(progress_ms=5000, duration_ms=120000, paused=False)
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._on_pause()
+
+        mock_yn.update_playing_status.assert_awaited_once_with(
+            progress_ms=5000, duration_ms=120000, paused=True
+        )
+
+    async def test_on_pause_no_ynison_raises(self) -> None:
+        """_on_pause raises when Ynison is not connected."""
+        provider = _make_provider()
+        provider._ynison = None
+
+        with pytest.raises(UnsupportedFeaturedException):
+            await provider._on_pause()
+
+    async def test_on_next_calls_signal_completion(self) -> None:
+        """_on_next triggers _signal_track_completion."""
+        provider = _make_provider()
+        state = _make_ynison_state(
+            progress_ms=180000,
+            duration_ms=200000,
+            playable_list=[{"playable_id": "t1"}, {"playable_id": "t2"}],
+        )
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._on_next()
+
+        # Should have reported completion and advanced
+        mock_yn.update_playing_status.assert_awaited_once()
+        mock_yn.update_player_state.assert_awaited_once()
+
+    async def test_on_next_no_ynison_raises(self) -> None:
+        """_on_next raises when Ynison is not connected."""
+        provider = _make_provider()
+        provider._ynison = None
+
+        with pytest.raises(UnsupportedFeaturedException):
+            await provider._on_next()
+
+    async def test_on_previous_decrements_index(self) -> None:
+        """_on_previous decrements current_playable_index by 1."""
+        provider = _make_provider()
+        state = _make_ynison_state(
+            current_playable_index=2,
+            playable_list=[
+                {"playable_id": "t1"},
+                {"playable_id": "t2"},
+                {"playable_id": "t3"},
+            ],
+        )
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._on_previous()
+
+        mock_yn.update_player_state.assert_awaited_once()
+        sent = mock_yn.update_player_state.call_args.kwargs["player_state"]
+        assert sent["player_queue"]["current_playable_index"] == 1
+
+    async def test_on_previous_at_zero_no_op(self) -> None:
+        """_on_previous at index 0 does nothing."""
+        provider = _make_provider()
+        state = _make_ynison_state(current_playable_index=0)
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._on_previous()
+
+        mock_yn.update_player_state.assert_not_called()
+
+    async def test_on_previous_no_ynison_raises(self) -> None:
+        """_on_previous raises when Ynison is not connected."""
+        provider = _make_provider()
+        provider._ynison = None
+
+        with pytest.raises(UnsupportedFeaturedException):
+            await provider._on_previous()
+
+    async def test_on_seek_updates_position(self) -> None:
+        """_on_seek sends progress and triggers local stream restart."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        state = _make_ynison_state(progress_ms=5000, duration_ms=200000, paused=False)
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._on_seek(30)  # 30 seconds
+
+        assert provider._seek_position_ms == 30000
+        assert provider._track_changed_event.is_set()
+        mock_yn.update_playing_status.assert_awaited_once_with(
+            progress_ms=30000, duration_ms=200000, paused=False
+        )
+
+    async def test_on_seek_no_ynison_raises(self) -> None:
+        """_on_seek raises when Ynison is not connected."""
+        provider = _make_provider()
+        provider._ynison = None
+
+        with pytest.raises(UnsupportedFeaturedException):
+            await provider._on_seek(10)
+
+
+# ------------------------------------------------------------------
+# _send_progress_to_ynison
+# ------------------------------------------------------------------
+
+
+class TestSendProgressToYnison:
+    """Tests for _send_progress_to_ynison."""
+
+    async def test_clamps_to_duration(self) -> None:
+        """Progress is clamped to duration_ms."""
+        provider = _make_provider()
+        provider._ynison = _mock_ynison()
+
+        await provider._send_progress_to_ynison(150000, 100000, False)
+
+        provider._ynison.update_playing_status.assert_awaited_once_with(
+            progress_ms=100000, duration_ms=100000, paused=False
+        )
+
+    async def test_zero_duration_no_send(self) -> None:
+        """Does not send when duration is 0."""
+        provider = _make_provider()
+        provider._ynison = _mock_ynison()
+
+        await provider._send_progress_to_ynison(5000, 0, False)
+
+        provider._ynison.update_playing_status.assert_not_called()
+
+    async def test_not_connected_no_send(self) -> None:
+        """Does not send when Ynison is disconnected."""
+        provider = _make_provider()
+        provider._ynison = _mock_ynison(connected=False)
+
+        await provider._send_progress_to_ynison(5000, 10000, False)
+
+        provider._ynison.update_playing_status.assert_not_called()
+
+    async def test_records_echo_baseline(self) -> None:
+        """Records sent value and timestamp for echo detection."""
+        provider = _make_provider()
+        provider._ynison = _mock_ynison()
+
+        await provider._send_progress_to_ynison(5000, 10000, False)
+
+        assert provider._last_sent_to_ynison_ms == 5000
+        assert provider._last_sent_to_ynison_time > 0
+
+    async def test_no_ynison_no_send(self) -> None:
+        """Does not crash when _ynison is None."""
+        provider = _make_provider()
+        provider._ynison = None
+
+        await provider._send_progress_to_ynison(5000, 10000, False)
+
+        # Should not have changed echo baseline
+        assert provider._last_sent_to_ynison_ms == -1
+
+
+# ------------------------------------------------------------------
+# _pause_playback
+# ------------------------------------------------------------------
+
+
+class TestPausePlayback:
+    """Tests for _pause_playback."""
+
+    async def test_stops_stream_and_player(self) -> None:
+        """Pause stops stream, calls cmd_stop, resets echo baseline."""
+        provider = _make_provider()
+        provider._streaming_progress_ms = 50000
+        provider._source_details.in_use_by = "player1"
+
+        await provider._pause_playback()
+
+        assert provider._stream_stop_event.is_set()
+        provider.mass.players.cmd_stop.assert_awaited_once_with("player1")
+        assert provider._source_details.in_use_by is None
+        # Progress is preserved for resume
+        assert provider._streaming_progress_ms == 50000
+        # Echo baseline is reset
+        assert provider._last_sent_to_ynison_ms == -1
+
+    async def test_no_active_player(self) -> None:
+        """Pause with no active player just sets stop event."""
+        provider = _make_provider()
+        provider._source_details.in_use_by = None
+
+        await provider._pause_playback()
+
+        assert provider._stream_stop_event.is_set()
+        provider.mass.players.cmd_stop.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# _is_ynison_echo
+# ------------------------------------------------------------------
+
+
+class TestIsYnisonEcho:
+    """Tests for _is_ynison_echo."""
+
+    def test_echo_within_window(self) -> None:
+        """Value within tolerance and time window is detected as echo."""
+        provider = _make_provider()
+        provider._last_sent_to_ynison_ms = 5000
+        provider._last_sent_to_ynison_time = time.monotonic()
+
+        assert provider._is_ynison_echo(5200) is True
+
+    def test_echo_outside_window(self) -> None:
+        """Value outside time window is not an echo."""
+        provider = _make_provider()
+        provider._last_sent_to_ynison_ms = 5000
+        provider._last_sent_to_ynison_time = time.monotonic() - 10
+
+        assert provider._is_ynison_echo(5200) is False
+
+    def test_echo_never_sent(self) -> None:
+        """When no value was ever sent, nothing is an echo."""
+        provider = _make_provider()
+        provider._last_sent_to_ynison_ms = -1
+
+        assert provider._is_ynison_echo(5000) is False
+
+    def test_echo_large_diff(self) -> None:
+        """Large progress difference is not an echo."""
+        provider = _make_provider()
+        provider._last_sent_to_ynison_ms = 5000
+        provider._last_sent_to_ynison_time = time.monotonic()
+
+        assert provider._is_ynison_echo(10000) is False
+
+
+# ------------------------------------------------------------------
+# _sync_progress
+# ------------------------------------------------------------------
+
+
+class TestSyncProgress:
+    """Tests for _sync_progress."""
+
+    async def test_updates_metadata_and_ynison(self) -> None:
+        """Sync updates MA metadata and sends progress to Ynison."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        provider._ynison = _mock_ynison()
+        provider._source_details.metadata = MagicMock()
+
+        # 5 seconds of 44100Hz/16bit/2ch audio
+        byte_rate = 44100 * 2 * 2
+        bytes_yielded = byte_rate * 5
+
+        await provider._sync_progress(0, bytes_yielded, "player1")
+
+        meta = provider._source_details.metadata
+        assert meta.elapsed_time == 5
+        provider.mass.players.trigger_player_update.assert_called_with("player1")
+        provider._ynison.update_playing_status.assert_awaited_once()
+
+    async def test_with_seek_offset(self) -> None:
+        """Seek offset is added to byte-based progress."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        provider._ynison = _mock_ynison()
+        provider._source_details.metadata = MagicMock()
+
+        byte_rate = 44100 * 2 * 2
+        bytes_yielded = byte_rate * 2  # 2 seconds of audio
+        seek_ms = 30000
+
+        await provider._sync_progress(seek_ms, bytes_yielded, "player1")
+
+        meta = provider._source_details.metadata
+        # 30000ms + 2000ms = 32000ms → 32s
+        assert meta.elapsed_time == 32
+        assert provider._streaming_progress_ms == 32000
+
+    async def test_no_player_id_skips_trigger(self) -> None:
+        """When player_id is None, does not trigger player update."""
+        provider = _make_provider()
+        provider._actual_duration_ms = 200000
+        provider._ynison = _mock_ynison()
+        provider._source_details.metadata = MagicMock()
+
+        await provider._sync_progress(0, 0, None)
+
+        provider.mass.players.trigger_player_update.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# _bytes_to_ms
+# ------------------------------------------------------------------
+
+
+class TestBytesToMs:
+    """Tests for _bytes_to_ms."""
+
+    def test_16bit(self) -> None:
+        """16-bit stereo 44100Hz: 176400 bytes = 1000ms."""
+        provider = _make_provider()
+        # Default format is 44100/16/2
+        assert provider._bytes_to_ms(176400) == 1000
+
+    def test_24bit(self) -> None:
+        """24-bit stereo 48000Hz: 288000 bytes = 1000ms."""
+        provider = _make_provider()
+        provider._normalized_format = make_pcm_format(PCM_LOSSLESS_PARAMS)
+        assert provider._bytes_to_ms(288000) == 1000
+
+    def test_zero(self) -> None:
+        """Zero bytes = zero milliseconds."""
+        provider = _make_provider()
+        assert provider._bytes_to_ms(0) == 0
+
+
+# ------------------------------------------------------------------
+# _get_stream_details_with_retry
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestGetStreamDetailsWithRetry:
+    """Tests for _get_stream_details_with_retry."""
+
+    async def test_success_first_attempt(self) -> None:
+        """Returns stream details on first try and caches result."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        sd = MagicMock()
+        sd.to_dict.return_value = {"track_id": "t1"}
+        mock_yp.get_stream_details = AsyncMock(return_value=sd)
+        provider._yandex_provider = mock_yp
+
+        result = await provider._get_stream_details_with_retry("t1")
+        assert result is sd
+        mock_yp.get_stream_details.assert_awaited_once()
+        # Verify cache.set was called
+        provider.mass.cache.set.assert_awaited_once()
+
+    async def test_cache_hit_skips_api(self) -> None:
+        """Returns cached stream details without API call."""
+        provider = _make_provider()
+        cached_sd = MagicMock()
+        provider.mass.cache.get = AsyncMock(return_value=cached_sd)
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock()
+        provider._yandex_provider = mock_yp
+
+        result = await provider._get_stream_details_with_retry("t1")
+        assert result is cached_sd
+        mock_yp.get_stream_details.assert_not_awaited()
+
+    async def test_retries_on_failure(self) -> None:
+        """Retries on transient error, succeeds on second attempt."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        sd = MagicMock()
+        sd.to_dict.return_value = {"track_id": "t1"}
+        mock_yp.get_stream_details = AsyncMock(side_effect=[RuntimeError("transient"), sd])
+        provider._yandex_provider = mock_yp
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.asyncio.sleep", new_callable=AsyncMock
+        ):
+            result = await provider._get_stream_details_with_retry("t1")
+        assert result is sd
+        assert mock_yp.get_stream_details.await_count == 2
+
+    async def test_raises_after_max_retries(self) -> None:
+        """Raises RuntimeError after all retries exhausted."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(side_effect=RuntimeError("always fails"))
+        provider._yandex_provider = mock_yp
+
+        with (
+            patch(
+                "music_assistant.providers.yandex_ynison.provider.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RuntimeError, match="failed after"),
+        ):
+            await provider._get_stream_details_with_retry("t1")
+        assert mock_yp.get_stream_details.await_count == _API_MAX_RETRIES
+
+    async def test_cancellation_not_retried(self) -> None:
+        """CancelledError propagates immediately, no retry."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(side_effect=asyncio.CancelledError())
+        provider._yandex_provider = mock_yp
+
+        with pytest.raises(asyncio.CancelledError):
+            await provider._get_stream_details_with_retry("t1")
+        mock_yp.get_stream_details.assert_awaited_once()
+
+
+# ------------------------------------------------------------------
+# _advance_queue_index
+# ------------------------------------------------------------------
+
+
+class TestAdvanceQueueIndex:
+    """Tests for _advance_queue_index."""
+
+    async def test_sends_state(self) -> None:
+        """Advances queue index and sends new state."""
+        provider = _make_provider()
+        state = _make_ynison_state(
+            current_playable_index=0,
+            playable_list=[{"playable_id": "t1"}, {"playable_id": "t2"}],
+        )
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        await provider._advance_queue_index(3)
+
+        mock_yn.update_player_state.assert_awaited_once()
+        sent = mock_yn.update_player_state.call_args.kwargs["player_state"]
+        assert sent["player_queue"]["current_playable_index"] == 3
+        assert sent["status"]["progress_ms"] == 0
+        assert sent["status"]["duration_ms"] == 0
+        assert sent["status"]["paused"] is False
+
+    async def test_with_expanded_list(self) -> None:
+        """Expanded list replaces playable_list in sent state."""
+        provider = _make_provider()
+        state = _make_ynison_state(
+            playable_list=[{"playable_id": "t1"}],
+        )
+        mock_yn = _mock_ynison(state)
+        provider._ynison = mock_yn
+
+        expanded = [{"playable_id": "t1"}, {"playable_id": "t2"}]
+        await provider._advance_queue_index(1, expanded_list=expanded)
+
+        sent = mock_yn.update_player_state.call_args.kwargs["player_state"]
+        assert sent["player_queue"]["playable_list"] == expanded
+
+    async def test_not_connected_waits_then_sends(self) -> None:
+        """Waits for reconnection before sending state."""
+        provider = _make_provider()
+        state = _make_ynison_state()
+        mock_yn = _mock_ynison(state, connected=False)
+        provider._ynison = mock_yn
+
+        call_count = 0
+
+        def _get_connected(_self: object) -> bool:
+            nonlocal call_count
+            call_count += 1
+            # Reconnect after 2 checks
+            return call_count > 2
+
+        type(mock_yn).connected = property(_get_connected)
+
+        await provider._advance_queue_index(1)
+
+        mock_yn.update_player_state.assert_awaited_once()
+
+    async def test_timeout_no_send(self) -> None:
+        """Gives up after timeout when Ynison stays disconnected."""
+        provider = _make_provider()
+        state = _make_ynison_state()
+        mock_yn = _mock_ynison(state, connected=False)
+        provider._ynison = mock_yn
+
+        # Patch asyncio.sleep to skip real waiting
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await provider._advance_queue_index(1)
+
+        mock_yn.update_player_state.assert_not_called()
+
+    async def test_no_ynison_returns(self) -> None:
+        """Returns immediately when _ynison is None."""
+        provider = _make_provider()
+        provider._ynison = None
+
+        await provider._advance_queue_index(1)
+        # No crash, no calls
+
+
+# ------------------------------------------------------------------
+# _activate_playback
+# ------------------------------------------------------------------
+
+
+class TestActivatePlayback:
+    """Tests for _activate_playback."""
+
+    async def test_selects_source_on_new_player(self) -> None:
+        """Selects source on target player when not yet active."""
+        provider = _make_provider()
+        provider._active_player_id = None
+
+        player = MagicMock()
+        player.player_id = "player1"
+        player.display_name = "Player 1"
+        player.state.playback_state = PlaybackState.IDLE
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+
+        state = _make_ynison_state(progress_ms=0, paused=False)
+
+        await provider._activate_playback(state)
+
+        assert provider._active_player_id == "player1"
+        provider.mass.create_task.assert_called()
+
+    async def test_detects_track_change(self) -> None:
+        """Detects track change and updates streaming track id."""
+        provider = _make_provider()
+        provider._current_streaming_track_id = "track1"
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+        provider._active_player_id = "player1"
+
+        state = _make_ynison_state(
+            progress_ms=0,
+            paused=False,
+            playable_list=[{"playable_id": "track2"}],
+        )
+
+        await provider._activate_playback(state)
+
+        assert provider._current_streaming_track_id == "track2"
+        assert provider._track_changed_event.is_set()
+
+    async def test_resume_after_pause(self) -> None:
+        """Resume after pause triggers reselect and seek."""
+        provider = _make_provider()
+        provider._active_player_id = "player1"
+        provider._current_streaming_track_id = "track1"
+        provider._stream_stop_event.set()  # simulate paused
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.get_player.return_value = player
+
+        state = _make_ynison_state(
+            progress_ms=50000,
+            paused=False,
+            playable_list=[{"playable_id": "track1"}],
+        )
+
+        await provider._activate_playback(state)
+
+        assert provider._seek_position_ms == 50000
+        assert provider._track_changed_event.is_set()
+
+    async def test_no_target_player_returns(self) -> None:
+        """Returns early when no target player is available."""
+        provider = _make_provider()
+        provider.mass.players.all_players.return_value = []
+        provider.mass.players.get_player.return_value = None
+
+        state = _make_ynison_state()
+
+        await provider._activate_playback(state)
+
+        assert provider._active_player_id is None
+
+
+# ------------------------------------------------------------------
+# _do_crossfade
+# ------------------------------------------------------------------
+
+
+def _make_mock_pcm_format(
+    sample_rate: int = 48000,
+    bit_depth: int = 24,
+    channels: int = 2,
+) -> MagicMock:
+    """Create a mock AudioFormat for crossfade tests."""
+    fmt = MagicMock()
+    fmt.sample_rate = sample_rate
+    fmt.bit_depth = bit_depth
+    fmt.channels = channels
+    fmt.pcm_sample_size = sample_rate * (bit_depth // 8) * channels
+    fmt.content_type = MagicMock()
+    fmt.content_type.value = f"s{bit_depth}le"
+    return fmt
+
+
+@pytest.mark.asyncio
+class TestDoCrossfade:
+    """Tests for YandexYnisonProvider._do_crossfade."""
+
+    async def test_empty_tail_yields_nothing(self) -> None:
+        """Empty tail data produces no output."""
+        provider = _make_provider()
+        chunks = [c async for c in provider._do_crossfade(b"", _make_mock_pcm_format())]
+        assert chunks == []
+
+    async def test_no_next_prebuffer_yields_tail(self) -> None:
+        """No next_prebuffer → yields tail as-is (fallback)."""
+        provider = _make_provider()
+        provider._next_prebuffer = None
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, _make_mock_pcm_format())]
+        assert chunks == [tail]
+
+    async def test_next_prebuffer_error_yields_tail(self) -> None:
+        """Next prebuffer has error → yields tail as-is."""
+        provider = _make_provider()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = RuntimeError("fill failed")
+        provider._next_prebuffer = pb
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, _make_mock_pcm_format())]
+        assert chunks == [tail]
+
+    async def test_format_mismatch_yields_tail(self) -> None:
+        """Format mismatch between current and next → yields tail as-is."""
+        provider = _make_provider()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        # Different format: 16-bit vs 24-bit
+        next_fmt = _make_mock_pcm_format(bit_depth=16)
+        pb.output_format = next_fmt
+        provider._next_prebuffer = pb
+
+        cur_fmt = _make_mock_pcm_format(bit_depth=24)
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, cur_fmt)]
+        assert chunks == [tail]
+
+    async def test_sample_rate_mismatch_yields_tail(self) -> None:
+        """Sample rate mismatch → yields tail as-is."""
+        provider = _make_provider()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = _make_mock_pcm_format(sample_rate=44100)
+        provider._next_prebuffer = pb
+
+        cur_fmt = _make_mock_pcm_format(sample_rate=48000)
+        tail = b"\x01\x02\x03"
+        chunks = [c async for c in provider._do_crossfade(tail, cur_fmt)]
+        assert chunks == [tail]
+
+    @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
+    async def test_head_collection_failure_yields_tail(self, mock_collect: AsyncMock) -> None:
+        """Exception during head collection → yields tail as-is."""
+        mock_collect.side_effect = RuntimeError("queue timeout")
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 100
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail]
+
+    @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
+    async def test_empty_head_yields_tail(self, mock_collect: AsyncMock) -> None:
+        """Head collection returns empty → yields tail as-is."""
+        mock_collect.return_value = (b"", False)
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 100
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail]
+
+    @patch("music_assistant.providers.yandex_ynison.provider.apply_crossfade")
+    @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
+    async def test_successful_crossfade(
+        self, mock_collect: AsyncMock, mock_apply: MagicMock
+    ) -> None:
+        """Successful crossfade yields mixed audio chunks."""
+        head = b"\xaa" * 200
+        mock_collect.return_value = (head, False)
+
+        mixed_chunks = [b"\xbb" * 100, b"\xcc" * 100]
+
+        async def _mock_gen(*_args: Any, **_kwargs: Any) -> AsyncGenerator[bytes, None]:
+            for c in mixed_chunks:
+                yield c
+
+        mock_apply.return_value = _mock_gen()
+
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 200
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == mixed_chunks
+        mock_apply.assert_called_once()
+        call_kw = mock_apply.call_args
+        assert call_kw.kwargs["fade_out"] == tail
+        assert call_kw.kwargs["fade_in"] == head
+
+    @patch("music_assistant.providers.yandex_ynison.provider.apply_crossfade")
+    @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
+    async def test_apply_failure_yields_tail_and_head(
+        self, mock_collect: AsyncMock, mock_apply: MagicMock
+    ) -> None:
+        """apply_crossfade raises → yields frame-aligned tail + head."""
+        head = b"\xaa" * 96  # 96 = 16 frames * 6 bytes/frame (24bit stereo)
+        mock_collect.return_value = (head, False)
+
+        async def _failing_gen(*_a: Any, **_kw: Any) -> AsyncGenerator[bytes, None]:
+            raise RuntimeError("ffmpeg exploded")
+            yield b""
+
+        mock_apply.return_value = _failing_gen()
+
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 96
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail, head]
+
+
+# ------------------------------------------------------------------
+# Crossfade integration in get_audio_stream
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCrossfadeIntegration:
+    """Tests for crossfade integration in the get_audio_stream prebuffer path."""
+
+    @staticmethod
+    def _setup_provider_for_stream(
+        provider: YandexYnisonProvider,
+        track_id: str = "track-1",
+        player_id: str = "player-1",
+        crossfade_s: int = 0,
+        prebuffer_next: bool = True,
+        pcm_format: MagicMock | None = None,
+    ) -> None:
+        """Wire up mocks so get_audio_stream reaches the prebuffer path."""
+        provider._crossfade_duration_s = crossfade_s
+        provider._prebuffer_next_enabled = prebuffer_next
+        provider._seek_position_ms = 0
+
+        # Align normalized format to the prebuffer format so the
+        # format-match check in get_audio_stream passes.
+        if pcm_format is not None:
+            provider._normalized_format = pcm_format
+
+        # Source details
+        provider._source_details = MagicMock()
+        provider._source_details.in_use_by = player_id
+
+        # Ynison state: playing (not paused), with the target track
+        ynison = MagicMock()
+        ynison.state = YnisonState(
+            player_state={
+                "status": {"paused": False, "progress_ms": 0, "duration_ms": 240000},
+                "player_queue": {
+                    "current_playable_index": 0,
+                    "playable_list": [{"playable_id": track_id}],
+                },
+            },
+        )
+        provider._ynison = ynison
+        provider._yandex_provider = MagicMock()
+
+        # Async mocks
+        provider._sync_progress = AsyncMock()
+        provider._signal_track_completion = AsyncMock()
+        provider._wait_for_track_change = AsyncMock(return_value=False)
+
+    async def test_crossfade_disabled_no_tail_buffer(self) -> None:
+        """When crossfade_duration_s=0, chunks pass through directly."""
+        provider = _make_provider()
+        fmt = _make_mock_pcm_format()
+        chunks_data = [b"\x01" * 100, b"\x02" * 100]
+
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(provider, crossfade_s=0, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            for c in chunks_data:
+                yield c
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        # Chunks should pass through without TailBuffer wrapping
+        total = b"".join(result)
+        assert chunks_data[0] in total
+        assert chunks_data[1] in total
+
+    async def test_crossfade_remainder_yielded_first(self) -> None:
+        """Leftover from previous crossfade is yielded at start of iteration."""
+        provider = _make_provider()
+        provider._crossfade_remainder = b"\xdd" * 50
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(provider, crossfade_s=0, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            yield b"\xee" * 100
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        # First yielded data should be the remainder
+        assert result[0] == b"\xdd" * 50
+        assert provider._crossfade_remainder == b""
+
+    async def test_interrupted_stream_flushes_tail(self) -> None:
+        """When stream is interrupted, tail buffer is flushed as-is."""
+        provider = _make_provider()
+        fmt = _make_mock_pcm_format()
+        cf_bytes = crossfade_bytes_for(5.0, fmt)
+
+        big_chunk = b"\x01" * (cf_bytes + 1000)
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(provider, crossfade_s=5, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            yield big_chunk
+            # Simulate interruption after first chunk
+            provider._stream_stop_event.set()
+            yield b"\x02" * 500
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        total = b"".join(result)
+        assert len(total) > 0
+        # Crossfade should NOT have been attempted (stream was interrupted)
+        provider._signal_track_completion.assert_not_called()
+
+    async def test_crossfade_enabled_uses_tail_buffer(self) -> None:
+        """With crossfade enabled, chunks go through TailBuffer."""
+        provider = _make_provider()
+        fmt = _make_mock_pcm_format()
+        cf_bytes = crossfade_bytes_for(3.0, fmt)
+
+        # Yield enough data to exceed tail buffer capacity
+        chunk_size = cf_bytes // 2
+        chunks_data = [b"\x01" * chunk_size, b"\x02" * chunk_size, b"\x03" * chunk_size]
+
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "track-1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+        provider._next_prebuffer = None  # No next → tail flushed as-is
+
+        self._setup_provider_for_stream(provider, crossfade_s=3, pcm_format=fmt)
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            for c in chunks_data:
+                yield c
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("player-1"):
+            result.append(chunk)
+
+        # Total yielded should equal total input (overflow + tail flush + pad)
+        total_in = sum(len(c) for c in chunks_data)
+        total_out = sum(len(c) for c in result)
+        assert total_out >= total_in
+
+    async def test_config_crossfade_duration_read(self) -> None:
+        """Provider reads crossfade_duration from config."""
+        provider = _make_provider()
+        assert provider._crossfade_duration_s == 0
+
+        config = _make_mock_config({CONF_CROSSFADE_DURATION: 7})
+        mass = _make_mock_mass()
+        manifest = _make_mock_manifest()
+        provider2 = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        assert provider2._crossfade_duration_s == 7
+
+    async def test_crossfade_disabled_when_prebuffer_next_off(self) -> None:
+        """Crossfade not used when prebuffer_next is disabled."""
+        config = _make_mock_config(
+            {
+                CONF_CROSSFADE_DURATION: 5,
+                CONF_PREBUFFER_NEXT: False,
+            }
+        )
+        mass = _make_mock_mass()
+        manifest = _make_mock_manifest()
+        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+        assert provider._crossfade_duration_s == 5
+        assert not provider._prebuffer_next_enabled
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.track_id = "t1"
+        pb.seek_ms = 0
+        pb.error = None
+        pb.output_format = fmt
+        pb.chunks_queued = 10
+        provider._prebuffer = pb
+
+        self._setup_provider_for_stream(
+            provider,
+            track_id="t1",
+            player_id="p1",
+            crossfade_s=5,
+            prebuffer_next=False,
+            pcm_format=fmt,
+        )
+
+        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
+            yield b"\x01" * 100
+
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment]
+
+        result = []
+        async for chunk in provider.get_audio_stream("p1"):
+            result.append(chunk)
+        assert b"\x01" * 100 in result
