@@ -37,6 +37,18 @@ PCM_LOSSY_PARAMS: dict[str, Any] = {
 _SIGNED_24BIT_MAX = 0x800000
 _SIGNED_24BIT_RANGE = 0x1000000
 
+# Override MA's default probesize (8096) and analyzeduration (500000).
+# Flac-MP4 containers can have moov/stsd atoms beyond 8KB, and slow CDN
+# responses over pipe input may cause analyseduration timeouts — both of
+# which result in ffmpeg failing to detect the container and producing
+# garbage PCM (white noise).
+PROBE_ARGS: list[str] = ["-probesize", "65536", "-analyzeduration", "5000000"]
+
+# RMS thresholds for first-chunk diagnostics (fraction of max amplitude).
+# Pure white noise ≈ max/√3 ≈ 57.7%; anything above ~45% is suspicious.
+_RMS_WARN_PCT = 45.0
+_RMS_CRIT_PCT = 55.0
+
 
 def make_pcm_format(params: dict[str, Any]) -> AudioFormat:
     """Create a fresh AudioFormat from stored params (safe from mutation)."""
@@ -102,9 +114,13 @@ def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
     max_val = (1 << (fmt.bit_depth - 1)) - 1
     rms_pct = (rms / max_val) * 100 if max_val else 0
 
-    # RMS > 70% of max for raw PCM almost certainly indicates garbage data
-    level = "WARNING" if rms_pct > 70 else "DEBUG"
-    log_fn = logger.warning if level == "WARNING" else logger.debug
+    if rms_pct > _RMS_CRIT_PCT:
+        log_fn = logger.critical
+    elif rms_pct > _RMS_WARN_PCT:
+        log_fn = logger.warning
+    else:
+        log_fn = logger.debug
+
     log_fn(
         "First chunk: %d bytes, RMS=%.0f (%.1f%% of max %d), fmt=%s/%dHz/%dbit",
         len(chunk),
@@ -115,3 +131,7 @@ def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
         fmt.sample_rate,
         fmt.bit_depth,
     )
+
+    if rms_pct > _RMS_WARN_PCT:
+        hex_preview = chunk[:32].hex(" ")
+        logger.warning("Suspect first chunk hex[0:32]: %s", hex_preview)

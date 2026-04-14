@@ -20,7 +20,7 @@ from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.util import close_async_generator
 
 from .constants import PACING_READRATE
-from .streaming import pacing_args
+from .streaming import PROBE_ARGS, pacing_args
 
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
@@ -100,7 +100,7 @@ async def run_fill(
         if on_stream_details is not None:
             await on_stream_details(sd, prebuffer.seek_ms)
 
-        extra_input_args = pacing_args(pacing_mode)
+        extra_input_args = PROBE_ARGS + pacing_args(pacing_mode)
         if prebuffer.seek_ms > 0:
             extra_input_args += ["-ss", f"{prebuffer.seek_ms / 1000.0:.3f}"]
 

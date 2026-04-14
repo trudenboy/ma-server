@@ -54,6 +54,7 @@ from .protocols import YandexMusicProviderLike
 from .streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,
+    PROBE_ARGS,
     log_first_chunk,
     make_pcm_format,
     pacing_args,
@@ -576,7 +577,7 @@ class YandexYnisonProvider(PluginProvider):
 
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
-        extra_input_args = pacing_args(self._ffmpeg_pacing)
+        extra_input_args = PROBE_ARGS + pacing_args(self._ffmpeg_pacing)
         if seek_ms > 0:
             extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 
