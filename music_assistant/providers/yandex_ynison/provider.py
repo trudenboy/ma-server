@@ -657,12 +657,17 @@ class YandexYnisonProvider(PluginProvider):
                 # the URL / decryption key needed by get_audio_stream().
                 cache_value = sd.to_dict()
                 cache_value["data"] = sd.data
-                await self.mass.cache.set(
-                    cache_key,
-                    cache_value,
-                    expiration=_STREAM_DETAILS_CACHE_TTL,
-                    provider=self.instance_id,
-                )
+                # Respect the provider's expiration (e.g. yandex_music sets
+                # 50 s because CDN URLs expire after ~60 s).  Fall back to
+                # our default TTL when the provider does not override.
+                cache_ttl = min(_STREAM_DETAILS_CACHE_TTL, sd.expiration)
+                if cache_ttl > 0:
+                    await self.mass.cache.set(
+                        cache_key,
+                        cache_value,
+                        expiration=cache_ttl,
+                        provider=self.instance_id,
+                    )
                 return sd
             except asyncio.CancelledError:
                 raise

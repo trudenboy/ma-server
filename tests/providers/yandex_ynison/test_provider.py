@@ -904,6 +904,7 @@ class TestPCMNormalization:
 
         mock_yandex = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -948,6 +949,7 @@ class TestPCMNormalization:
 
         mock_yandex = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -1028,6 +1030,7 @@ class TestPCMNormalization:
 
         mock_yandex = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()  # different format
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -1087,6 +1090,7 @@ class TestPreBuffer:
 
         mock_yandex = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -1142,6 +1146,7 @@ class TestPreBuffer:
                 yield f"chunk-{i}".encode()
 
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -1201,6 +1206,7 @@ class TestPreBuffer:
 
         mock_yandex = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -1243,6 +1249,7 @@ class TestPreBuffer:
 
         mock_yandex = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -1280,6 +1287,7 @@ class TestPreBuffer:
 
         mock_yandex = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         mock_yandex.get_stream_details = AsyncMock(return_value=sd)
@@ -1937,6 +1945,7 @@ class TestGetStreamDetailsWithRetry:
         provider = _make_provider()
         mock_yp = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.to_dict.return_value = {"track_id": "t1"}
         sd.data = {"url": "https://cdn.example.com/audio.mp3", "decryption_key": "abc"}
         mock_yp.get_stream_details = AsyncMock(return_value=sd)
@@ -1954,6 +1963,7 @@ class TestGetStreamDetailsWithRetry:
         """Returns cached stream details without API call."""
         provider = _make_provider()
         cached_sd = MagicMock()
+        cached_sd.expiration = 600
         provider.mass.cache.get = AsyncMock(return_value=cached_sd)  # type: ignore[method-assign]
         mock_yp = MagicMock()
         mock_yp.get_stream_details = AsyncMock()
@@ -1968,6 +1978,7 @@ class TestGetStreamDetailsWithRetry:
         provider = _make_provider()
         mock_yp = MagicMock()
         sd = MagicMock()
+        sd.expiration = 600
         sd.to_dict.return_value = {"track_id": "t1"}
         mock_yp.get_stream_details = AsyncMock(side_effect=[RuntimeError("transient"), sd])
         provider._yandex_provider = mock_yp
@@ -2716,6 +2727,7 @@ class TestGarbageDetectionRetry:
         )
 
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         get_sd = AsyncMock(return_value=sd)
@@ -2780,6 +2792,7 @@ class TestGarbageDetectionRetry:
         )
 
         sd = MagicMock()
+        sd.expiration = 600
         sd.duration = 200
         sd.audio_format = MagicMock()
         get_sd = AsyncMock(return_value=sd)
