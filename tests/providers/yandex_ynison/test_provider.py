@@ -266,7 +266,7 @@ class TestClearActivePlayer:
         provider._clear_active_player()
 
         assert provider._active_player_id is None
-        assert provider._source_details.in_use_by is None  # type: ignore[unreachable]
+        assert provider._source_details.in_use_by is None
         provider.mass.players.trigger_player_update.assert_called_with("some-player")  # type: ignore[attr-defined]
 
 
@@ -1782,7 +1782,7 @@ class TestPausePlayback:
         provider.mass.players.cmd_stop.assert_awaited_once_with("player1")  # type: ignore[attr-defined]
         assert provider._source_details.in_use_by is None
         # Progress is preserved for resume
-        assert provider._streaming_progress_ms == 50000
+        assert provider._streaming_progress_ms == 50000  # type: ignore[unreachable]
         # Echo baseline is reset
         assert provider._last_sent_to_ynison_ms == -1
 
@@ -2431,7 +2431,7 @@ class TestCrossfadeIntegration:
             for c in chunks_data:
                 yield c
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("player-1"):
@@ -2465,7 +2465,7 @@ class TestCrossfadeIntegration:
             provider._stream_stop_event.set()
             yield b"\x02" * 500
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("player-1"):
@@ -2501,7 +2501,7 @@ class TestCrossfadeIntegration:
             for c in chunks_data:
                 yield c
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("player-1"):
@@ -2558,7 +2558,7 @@ class TestCrossfadeIntegration:
         async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
             yield b"\x01" * 100
 
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
+        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[method-assign]
 
         result = []
         async for chunk in provider.get_audio_stream("p1"):
