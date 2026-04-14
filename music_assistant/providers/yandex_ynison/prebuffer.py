@@ -63,6 +63,7 @@ class PreBuffer:
                 self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        self.ready.set()
         with suppress(asyncio.QueueFull):
             self.queue.put_nowait(None)
 

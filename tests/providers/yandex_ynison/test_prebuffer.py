@@ -36,7 +36,7 @@ class TestPreBuffer:
         assert pb.queue.maxsize == 8
 
     async def test_cancel_drains_and_sends_eof(self) -> None:
-        """cancel() drains queue and puts EOF sentinel."""
+        """cancel() drains queue, sets ready, and puts EOF sentinel."""
         pb = PreBuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
         # Fill some data
         await pb.queue.put(b"chunk1")
@@ -47,6 +47,7 @@ class TestPreBuffer:
         # Queue should contain only EOF
         item = pb.queue.get_nowait()
         assert item is None
+        assert pb.ready.is_set()
 
     async def test_cancel_with_running_task(self) -> None:
         """cancel() cancels a running task before draining."""
@@ -403,3 +404,24 @@ class TestYieldFromPrebuffer:
         pb.ready.set()
         await task
         assert collected == [b"data"]
+
+    async def test_cancel_unblocks_waiting_consumer(self) -> None:
+        """cancel() sets ready and pushes EOF, unblocking yield_from_prebuffer."""
+        pb = PreBuffer(track_id="t:1", seek_ms=0, output_format=MagicMock())
+        # ready is NOT set — consumer will block on ready.wait()
+
+        collected: list[bytes] = []
+
+        async def _consume() -> None:
+            async for chunk in yield_from_prebuffer(pb):
+                collected.append(chunk)
+
+        task = asyncio.create_task(_consume())
+        await asyncio.sleep(0.05)
+        assert not task.done(), "Consumer should be blocked on ready"
+
+        await pb.cancel()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert collected == []
+        assert pb.ready.is_set()
