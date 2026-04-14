@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,6 +42,9 @@ from music_assistant.providers.yandex_ynison.provider import (
     make_pcm_format,
 )
 from music_assistant.providers.yandex_ynison.ynison_client import YnisonState
+
+if TYPE_CHECKING:
+    from music_assistant_models.media_items import AudioFormat
 
 
 def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
@@ -2177,16 +2180,17 @@ def _make_mock_pcm_format(
     sample_rate: int = 48000,
     bit_depth: int = 24,
     channels: int = 2,
-) -> MagicMock:
-    """Create a mock AudioFormat for crossfade tests."""
-    fmt = MagicMock()
-    fmt.sample_rate = sample_rate
-    fmt.bit_depth = bit_depth
-    fmt.channels = channels
-    fmt.pcm_sample_size = sample_rate * (bit_depth // 8) * channels
-    fmt.content_type = MagicMock()
-    fmt.content_type.value = f"s{bit_depth}le"
-    return fmt
+) -> AudioFormat:
+    """Create a real AudioFormat for crossfade/streaming tests."""
+    content_type = ContentType.PCM_S24LE if bit_depth == 24 else ContentType.PCM_S16LE
+    return make_pcm_format(
+        {
+            "content_type": content_type,
+            "sample_rate": sample_rate,
+            "bit_depth": bit_depth,
+            "channels": channels,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -2364,17 +2368,23 @@ class TestCrossfadeIntegration:
         player_id: str = "player-1",
         crossfade_s: int = 0,
         prebuffer_next: bool = True,
-        pcm_format: MagicMock | None = None,
+        pcm_format: AudioFormat | None = None,
     ) -> None:
         """Wire up mocks so get_audio_stream reaches the prebuffer path."""
         provider._crossfade_duration_s = crossfade_s
         provider._prebuffer_next_enabled = prebuffer_next
         provider._seek_position_ms = 0
 
-        # Align normalized format to the prebuffer format so the
-        # format-match check in get_audio_stream passes.
+        # Align normalized format AND params to the prebuffer format so the
+        # session-frozen format-match check in get_audio_stream passes.
         if pcm_format is not None:
             provider._normalized_format = pcm_format
+            provider._normalized_params = {
+                "content_type": pcm_format.content_type,
+                "sample_rate": pcm_format.sample_rate,
+                "bit_depth": pcm_format.bit_depth,
+                "channels": pcm_format.channels,
+            }
 
         # Source details
         provider._source_details = MagicMock()

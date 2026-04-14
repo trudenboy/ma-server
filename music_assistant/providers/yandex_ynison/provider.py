@@ -251,8 +251,19 @@ class YandexYnisonProvider(PluginProvider):
 
         Streams the current track, then waits for track changes and streams
         the next track automatically. Runs until the source is deselected.
+
+        The PCM format is frozen at session start to match what the outer
+        ffmpeg captured from ``_source_details.audio_format``.  If
+        ``_update_normalized_format()`` fires mid-session (e.g. a provider
+        reload), the new format takes effect only on the *next* session —
+        preventing bit-depth/sample-rate mismatches that cause noise.
         """
         self._stream_stop_event.clear()
+
+        # Freeze format for this streaming session so every inner ffmpeg
+        # produces data matching the outer ffmpeg's captured input_format.
+        session_params: dict[str, Any] = dict(self._normalized_params)
+        session_fmt: AudioFormat = make_pcm_format(session_params)
 
         while not self._stream_stop_event.is_set() and self._source_details.in_use_by == player_id:
             if not self._ynison or not self._ynison.state.current_track_id:
@@ -325,9 +336,9 @@ class YandexYnisonProvider(PluginProvider):
                 and self._next_prebuffer.seek_ms == 0
                 and not self._next_prebuffer.error
             ):
-                # Verify the prebuffer was encoded with the CURRENT format
+                # Verify the prebuffer was encoded with the SESSION format
                 pb_fmt = self._next_prebuffer.output_format
-                cur_fmt = self._normalized_format
+                cur_fmt = session_fmt
                 if (
                     pb_fmt.content_type != cur_fmt.content_type
                     or pb_fmt.sample_rate != cur_fmt.sample_rate
@@ -364,7 +375,7 @@ class YandexYnisonProvider(PluginProvider):
             ):
                 # Validate format even for direct prebuffer hits
                 pb_fmt = self._prebuffer.output_format
-                cur_fmt = self._normalized_format
+                cur_fmt = session_fmt
                 format_ok = (
                     pb_fmt.content_type == cur_fmt.content_type
                     and pb_fmt.sample_rate == cur_fmt.sample_rate
@@ -427,7 +438,7 @@ class YandexYnisonProvider(PluginProvider):
                     now_mono = time.monotonic()
                     if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
                         last_progress_sync = now_mono
-                        await self._sync_progress(seek_ms, bytes_yielded, player_id)
+                        await self._sync_progress(seek_ms, bytes_yielded, player_id, session_fmt)
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
@@ -450,20 +461,22 @@ class YandexYnisonProvider(PluginProvider):
                         bytes_yielded += len(tail_data)
             else:
                 # Prebuffer miss — stream directly (fallback)
-                track_fmt = make_pcm_format(self._normalized_params)
+                track_fmt = make_pcm_format(session_params)
                 if self._prebuffer and self._prebuffer.track_id != track_id:
                     self.logger.debug(
                         "Prebuffer miss: have %s, need %s",
                         self._prebuffer.track_id,
                         track_id,
                     )
-                async for chunk in self._stream_track(track_id, seek_ms=seek_ms):
+                async for chunk in self._stream_track(
+                    track_id, seek_ms=seek_ms, session_params=session_params
+                ):
                     yield chunk
                     bytes_yielded += len(chunk)
                     now_mono = time.monotonic()
                     if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
                         last_progress_sync = now_mono
-                        await self._sync_progress(seek_ms, bytes_yielded, player_id)
+                        await self._sync_progress(seek_ms, bytes_yielded, player_id, session_fmt)
                     if (
                         self._track_changed_event.is_set()
                         or self._stream_stop_event.is_set()
@@ -536,13 +549,22 @@ class YandexYnisonProvider(PluginProvider):
         self.logger.info("No new track from Ynison after completion, stopping stream")
         return False
 
-    async def _stream_track(self, track_id: str, seek_ms: int = 0) -> AsyncGenerator[bytes, None]:
+    async def _stream_track(
+        self,
+        track_id: str,
+        seek_ms: int = 0,
+        session_params: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[bytes, None]:
         """Stream a single track, normalizing to fixed PCM via per-track ffmpeg.
 
         Every track is decoded through its own ffmpeg process to produce a
         fixed PCM output (s16le or s24le based on YM quality setting). This
         ensures MA's single ffmpeg process never encounters mid-stream format
         changes (codec, bit depth, sample rate).
+
+        *session_params* — frozen format dict from the enclosing
+        ``get_audio_stream()`` session.  Falls back to the current
+        ``_normalized_params`` when called outside a session (e.g. prebuffer).
         """
         try:
             stream_details = await self._get_stream_details_with_retry(track_id)
@@ -557,8 +579,9 @@ class YandexYnisonProvider(PluginProvider):
         if seek_ms > 0:
             extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 
-        # Fresh format copy so inner ffmpeg's mutation doesn't affect shared state
-        out_fmt = make_pcm_format(self._normalized_params)
+        # Use session format when available, otherwise current normalized params
+        params = session_params if session_params is not None else self._normalized_params
+        out_fmt = make_pcm_format(params)
         self.logger.info(
             "Streaming track %s → %s: input=%s seek=%dms",
             track_id,
@@ -1100,16 +1123,22 @@ class YandexYnisonProvider(PluginProvider):
         self._last_sent_to_ynison_ms = progress_ms
         self._last_sent_to_ynison_time = time.monotonic()
 
-    def _bytes_to_ms(self, byte_count: int) -> int:
-        """Convert PCM byte count to milliseconds using the normalized format."""
-        bps = self._normalized_format.pcm_sample_size
+    def _bytes_to_ms(self, byte_count: int, fmt: AudioFormat | None = None) -> int:
+        """Convert PCM byte count to milliseconds using the given format."""
+        bps = (fmt or self._normalized_format).pcm_sample_size
         if bps == 0:
             return 0
         return (byte_count * 1000) // bps
 
-    async def _sync_progress(self, seek_ms: int, bytes_yielded: int, player_id: str | None) -> None:
+    async def _sync_progress(
+        self,
+        seek_ms: int,
+        bytes_yielded: int,
+        player_id: str | None,
+        fmt: AudioFormat | None = None,
+    ) -> None:
         """Push real playback progress to MA metadata and Ynison."""
-        elapsed_ms = seek_ms + self._bytes_to_ms(bytes_yielded)
+        elapsed_ms = seek_ms + self._bytes_to_ms(bytes_yielded, fmt)
         self._streaming_progress_ms = elapsed_ms
         # Update MA metadata
         meta = self._source_details.metadata
@@ -1311,12 +1340,31 @@ class YandexYnisonProvider(PluginProvider):
             bit_depth = int(self._cfg_bit_depth)
 
         content_type = ContentType.PCM_S24LE if bit_depth == 24 else ContentType.PCM_S16LE
-        self._normalized_params = {
+        new_params: dict[str, Any] = {
             "content_type": content_type,
             "sample_rate": sample_rate,
             "bit_depth": bit_depth,
             "channels": 2,
         }
+
+        # Warn if format changes while a player is actively streaming — the
+        # active session keeps using its frozen snapshot; the new format takes
+        # effect on the next session.
+        old = self._normalized_params
+        if self._source_details.in_use_by and (
+            old.get("content_type") != content_type
+            or old.get("sample_rate") != sample_rate
+            or old.get("bit_depth") != bit_depth
+        ):
+            self.logger.warning(
+                "Normalization format changed while streaming — new format "
+                "(%s/%dHz/%dbit) will apply on next session",
+                content_type.value,
+                sample_rate,
+                bit_depth,
+            )
+
+        self._normalized_params = new_params
         # Fresh copy for each caller so no shared mutable state
         self._normalized_format = make_pcm_format(self._normalized_params)
         self._source_details.audio_format = make_pcm_format(self._normalized_params)
