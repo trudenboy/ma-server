@@ -828,7 +828,7 @@ class TestMessageLoop:
         )
         await self._run_loop_with_messages(client, [error_msg, valid_msg])
 
-        client._logger.warning.assert_called()
+        client._logger.warning.assert_called()  # type: ignore[attr-defined]
 
     async def test_text_message_invalid_json(self, client: YnisonClient) -> None:
         """TEXT message with invalid JSON logs warning, continues."""
@@ -839,7 +839,7 @@ class TestMessageLoop:
         )
         await self._run_loop_with_messages(client, [bad_msg, valid_msg])
 
-        client._logger.warning.assert_called()
+        client._logger.warning.assert_called()  # type: ignore[attr-defined]
 
     async def test_callback_exception_continues(
         self,
@@ -871,7 +871,7 @@ class TestMessageLoop:
         )
         await self._run_loop_with_messages(client, [bin_msg, valid_msg])
 
-        client._logger.debug.assert_called()
+        client._logger.debug.assert_called()  # type: ignore[attr-defined]
 
     async def test_error_message_breaks_and_reconnects(self, client: YnisonClient) -> None:
         """ERROR message breaks loop and schedules reconnect."""
@@ -958,7 +958,7 @@ class TestMessageLoop:
 
         async def _aiter(_self: Any) -> Any:
             raise asyncio.CancelledError
-            yield
+            yield  # type: ignore[unreachable]
 
         mock_ws = MagicMock()
         mock_ws.__aiter__ = _aiter
@@ -978,7 +978,7 @@ class TestMessageLoop:
         msg = _make_ws_msg(aiohttp.WSMsgType.TEXT, "")
         # Empty string → json.loads will fail → warning logged
         await self._run_loop_with_messages(client, [msg])
-        client._logger.warning.assert_called()
+        client._logger.warning.assert_called()  # type: ignore[attr-defined]
 
     async def test_no_ws_raises_runtime_error(self, client: YnisonClient) -> None:
         """_message_loop raises RuntimeError when ws is None."""
@@ -1014,7 +1014,7 @@ class TestReconnect:
         ):
             await client._reconnect()
 
-        client._logger.info.assert_any_call("Ynison reconnected successfully")
+        client._logger.info.assert_any_call("Ynison reconnected successfully")  # type: ignore[attr-defined]
 
     async def test_all_attempts_fail(self, client: YnisonClient) -> None:
         """All attempts fail → calls _on_disconnect, cleans up."""
@@ -1038,7 +1038,7 @@ class TestReconnect:
         assert client._connected is False
         assert client._stop_event.is_set()
         on_disconnect.assert_awaited_once()
-        client._logger.error.assert_called_once_with(
+        client._logger.error.assert_called_once_with(  # type: ignore[attr-defined]
             "Ynison: all %d reconnect attempts failed",
             MAX_RECONNECT_ATTEMPTS,
         )
