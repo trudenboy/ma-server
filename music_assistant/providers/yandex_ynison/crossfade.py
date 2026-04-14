@@ -21,12 +21,17 @@ from music_assistant.helpers.audio import (
     strip_silence,
 )
 
+from .streaming import compute_rms_pct
+
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
 
     from .prebuffer import PreBuffer
 
 _HEAD_COLLECT_TIMEOUT = 10.0
+
+# Crossfade output with RMS above this is likely garbage (white noise ≈ 57.7 %).
+_CROSSFADE_NOISE_RMS_PCT = 50.0
 
 
 class TailBuffer:
@@ -124,14 +129,25 @@ async def apply_crossfade(
     frame alignment on the fade-out part (same preprocessing as
     ``SmartFadesMixer.mix`` uses for ``STANDARD_CROSSFADE`` mode).
 
+    If the crossfade ffmpeg produces garbage (RMS above threshold), the
+    crossfade is aborted and ``fade_in`` is yielded raw as a fallback.
+
     :param fade_out: Raw PCM bytes for the outgoing track's tail.
     :param fade_in: Raw PCM bytes or async generator for the incoming track.
     :param pcm_format: Audio format of both inputs and the output.
     :param duration_s: Crossfade duration in seconds.
     :param logger: Logger instance.
     """
+    original_len = len(fade_out)
     fade_out = await strip_silence(fade_out, pcm_format=pcm_format, reverse=True)
     fade_out = align_audio_to_frame_boundary(fade_out, pcm_format)
+    stripped_s = (original_len - len(fade_out)) / max(1, pcm_format.pcm_sample_size)
+    logger.debug(
+        "Crossfade strip_silence: %d→%d bytes (stripped %.2fs from tail)",
+        original_len,
+        len(fade_out),
+        stripped_s,
+    )
 
     if len(fade_out) == 0:
         # Nothing left after stripping — yield fade_in in frame-aligned slices
@@ -145,6 +161,16 @@ async def apply_crossfade(
         return
 
     crossfader = StandardCrossFade(logger=logger, crossfade_duration=duration_s)
+    noise_detected = False
     async for chunk in crossfader.apply(fade_out, fade_in, pcm_format):
-        for sl in iter_pcm_slices(chunk, pcm_format):
-            yield sl
+        if not noise_detected:
+            rms = compute_rms_pct(chunk, pcm_format)
+            if rms > _CROSSFADE_NOISE_RMS_PCT:
+                logger.warning(
+                    "Crossfade output noise detected (RMS=%.1f%%), aborting crossfade",
+                    rms,
+                )
+                noise_detected = True
+        if not noise_detected:
+            for sl in iter_pcm_slices(chunk, pcm_format):
+                yield sl

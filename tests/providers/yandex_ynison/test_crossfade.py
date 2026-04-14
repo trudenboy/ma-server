@@ -203,6 +203,10 @@ class TestApplyCrossfade:
                 "music_assistant.controllers.streams.smart_fades.fades.StandardCrossFade.apply",
                 _mock_apply,
             ),
+            patch(
+                "music_assistant.providers.yandex_ynison.crossfade.compute_rms_pct",
+                return_value=0.0,
+            ),
         ):
             collected: list[bytes] = []
             async for chunk in apply_crossfade(fade_out, fade_in, fmt, 5.0, logger):
@@ -280,6 +284,10 @@ class TestApplyCrossfade:
                 "music_assistant.controllers.streams.smart_fades.fades.StandardCrossFade.apply",
                 _mock_apply,
             ),
+            patch(
+                "music_assistant.providers.yandex_ynison.crossfade.compute_rms_pct",
+                return_value=0.0,
+            ),
         ):
             collected: list[bytes] = []
             async for chunk in apply_crossfade(b"raw_tail", b"head", fmt, 5.0, logger):
@@ -288,3 +296,40 @@ class TestApplyCrossfade:
         mock_strip.assert_awaited_once_with(b"raw_tail", pcm_format=fmt, reverse=True)
         mock_align.assert_called_once_with(b"stripped", fmt)
         assert collected == [b"out"]
+
+    async def test_noise_detection_aborts_crossfade(self) -> None:
+        """If crossfade output has high RMS (noise), nothing is yielded."""
+        fmt = _make_pcm_format()
+        logger = logging.getLogger("test")
+
+        fade_out = b"\x00" * 100
+        fade_in = b"\x00" * 100
+
+        async def _mock_apply(_self: Any, _fo: bytes, _fi: Any, _pf: Any) -> Any:
+            yield b"noisy_chunk"
+            yield b"more_noise"
+
+        with (
+            patch(
+                "music_assistant.providers.yandex_ynison.crossfade.strip_silence",
+                new_callable=AsyncMock,
+                return_value=fade_out,
+            ),
+            patch(
+                "music_assistant.providers.yandex_ynison.crossfade.align_audio_to_frame_boundary",
+                return_value=fade_out,
+            ),
+            patch(
+                "music_assistant.controllers.streams.smart_fades.fades.StandardCrossFade.apply",
+                _mock_apply,
+            ),
+            patch(
+                "music_assistant.providers.yandex_ynison.crossfade.compute_rms_pct",
+                return_value=60.0,
+            ),
+        ):
+            collected: list[bytes] = []
+            async for chunk in apply_crossfade(fade_out, fade_in, fmt, 5.0, logger):
+                collected.append(chunk)
+
+        assert collected == [], "No data should be yielded when noise is detected"

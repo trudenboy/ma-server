@@ -752,6 +752,7 @@ class YandexYnisonProvider(PluginProvider):
             crossfade_s,
         )
 
+        crossfade_yielded = False
         try:
             async for chunk in apply_crossfade(
                 fade_out=tail_data,
@@ -760,13 +761,19 @@ class YandexYnisonProvider(PluginProvider):
                 duration_s=crossfade_s,
                 logger=self.logger,
             ):
+                crossfade_yielded = True
                 yield chunk
         except Exception:
             self.logger.warning(
                 "Crossfade: mixing failed, yielding tail + head separately",
                 exc_info=True,
             )
-            yield _pad_to_frame_boundary(tail_data, pcm_format)
+            crossfade_yielded = False
+
+        if not crossfade_yielded:
+            self.logger.warning(
+                "Crossfade produced no output (noise?), yielding head data as fallback"
+            )
             yield _pad_to_frame_boundary(head_data, pcm_format)
             return
 

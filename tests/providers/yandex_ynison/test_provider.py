@@ -2333,7 +2333,7 @@ class TestDoCrossfade:
     async def test_apply_failure_yields_tail_and_head(
         self, mock_collect: AsyncMock, mock_apply: MagicMock
     ) -> None:
-        """apply_crossfade raises → yields frame-aligned tail + head."""
+        """apply_crossfade raises → yields head only (tail may be corrupted)."""
         head = b"\xaa" * 96  # 96 = 16 frames * 6 bytes/frame (24bit stereo)
         mock_collect.return_value = (head, False)
 
@@ -2355,7 +2355,7 @@ class TestDoCrossfade:
 
         tail = b"\xff" * 96
         chunks = [c async for c in provider._do_crossfade(tail, fmt)]
-        assert chunks == [tail, head]
+        assert chunks == [head]
 
 
 # ------------------------------------------------------------------
