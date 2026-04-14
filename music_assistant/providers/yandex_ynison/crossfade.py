@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from music_assistant.controllers.streams.smart_fades.fades import StandardCrossFade
@@ -101,6 +102,8 @@ async def collect_crossfade_head(
                 chunk = await prebuffer.queue.get()
                 if chunk is None:
                     eof = True
+                    with suppress(asyncio.QueueFull):
+                        prebuffer.queue.put_nowait(None)
                     break
                 buf.extend(chunk)
     except TimeoutError:

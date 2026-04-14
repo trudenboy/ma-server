@@ -128,6 +128,8 @@ async def run_fill(
                     _QUEUE_PUT_TIMEOUT,
                     prebuffer.track_id,
                 )
+                await close_async_generator(audio_gen)
+                prebuffer._audio_gen = None
                 return
     except asyncio.CancelledError:
         raise
