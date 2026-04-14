@@ -73,6 +73,12 @@ if TYPE_CHECKING:
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
 
+# Start prebuffering next track 60 s before end (MA server: audio.py:1370)
+_PREBUFFER_LEAD_MS = 60_000
+
+# Crossfade guardrails matching MA server (audio.py:1488-1496)
+_MIN_CROSSFADE_S = 5
+
 # Retry settings for transient Yandex API failures
 _API_MAX_RETRIES = 3
 _API_INITIAL_BACKOFF = 2.0
@@ -418,10 +424,22 @@ class YandexYnisonProvider(PluginProvider):
 
                 use_crossfade = self._crossfade_duration_s > 0 and self._prebuffer_next_enabled
                 tail_buf: TailBuffer | None = None
+                effective_cf_s = 0.0
                 if use_crossfade:
-                    cf_bytes = crossfade_bytes_for(self._crossfade_duration_s, track_fmt)
-                    if cf_bytes > 0:
-                        tail_buf = TailBuffer(cf_bytes)
+                    # Apply MA guardrails: cap at half the track duration,
+                    # skip if the effective value is too short to be meaningful.
+                    effective_cf_s = float(self._crossfade_duration_s)
+                    sd = self._prebuffer.stream_details
+                    if sd and sd.duration and isinstance(sd.duration, (int, float)):
+                        effective_cf_s = min(effective_cf_s, sd.duration / 2.0)
+                    if effective_cf_s < _MIN_CROSSFADE_S:
+                        effective_cf_s = 0.0
+                    if effective_cf_s < _MIN_CROSSFADE_S:
+                        effective_cf_s = 0.0
+                    if effective_cf_s > 0:
+                        cf_bytes = crossfade_bytes_for(effective_cf_s, track_fmt)
+                        if cf_bytes > 0:
+                            tail_buf = TailBuffer(cf_bytes)
 
                 interrupted = False
                 chunk_idx = 0
@@ -454,7 +472,7 @@ class YandexYnisonProvider(PluginProvider):
                 # Crossfade: mix tail with head of next track
                 if tail_buf is not None and not interrupted:
                     tail_data = tail_buf.flush()
-                    async for chunk in self._do_crossfade(tail_data, track_fmt):
+                    async for chunk in self._do_crossfade(tail_data, track_fmt, effective_cf_s):
                         yield chunk
                         bytes_yielded += len(chunk)
                 elif tail_buf is not None:
@@ -675,6 +693,7 @@ class YandexYnisonProvider(PluginProvider):
         self,
         tail_data: bytes,
         pcm_format: AudioFormat,
+        crossfade_s: float = 0.0,
     ) -> AsyncGenerator[bytes, None]:
         """Attempt crossfade between tail of current track and head of next.
 
@@ -684,6 +703,9 @@ class YandexYnisonProvider(PluginProvider):
         """
         if not tail_data:
             return
+
+        if crossfade_s <= 0:
+            crossfade_s = float(self._crossfade_duration_s)
 
         next_pb = self._next_prebuffer
         if not next_pb or next_pb.error:
@@ -706,7 +728,7 @@ class YandexYnisonProvider(PluginProvider):
             yield tail_data
             return
 
-        target_bytes = crossfade_bytes_for(self._crossfade_duration_s, pcm_format)
+        target_bytes = crossfade_bytes_for(crossfade_s, pcm_format)
         self.logger.debug(
             "Crossfade: collecting %d head bytes from next prebuffer %s",
             target_bytes,
@@ -729,7 +751,7 @@ class YandexYnisonProvider(PluginProvider):
             "Crossfade: mixing %d tail + %d head bytes (%.1fs)",
             len(tail_data),
             len(head_data),
-            self._crossfade_duration_s,
+            crossfade_s,
         )
 
         try:
@@ -737,7 +759,7 @@ class YandexYnisonProvider(PluginProvider):
                 fade_out=tail_data,
                 fade_in=head_data,
                 pcm_format=pcm_format,
-                duration_s=float(self._crossfade_duration_s),
+                duration_s=crossfade_s,
                 logger=self.logger,
             ):
                 yield chunk
@@ -830,11 +852,14 @@ class YandexYnisonProvider(PluginProvider):
         playable_list: list[dict[str, Any]],
         state: YnisonState,
     ) -> None:
-        """Start pre-buffering next track's audio at ~80% of current track."""
+        """Start pre-buffering next track 60 s before end (MA convention)."""
         if not self._yandex_provider or not self._current_streaming_track_id:
             return
         duration = self._best_duration_ms()
-        if duration <= 0 or state.progress_ms < duration * 0.8:
+        if duration <= 0:
+            return
+        threshold_ms = max(0, duration - _PREBUFFER_LEAD_MS)
+        if state.progress_ms < threshold_ms:
             return
         next_index = current_index + 1
         if next_index >= len(playable_list):
@@ -846,9 +871,9 @@ class YandexYnisonProvider(PluginProvider):
         if self._next_prebuffer and self._next_prebuffer.track_id == next_track_id:
             return
         self.logger.info(
-            "Pre-buffering audio for next track %s (at %.0f%% of current)",
+            "Pre-buffering audio for next track %s (%.0fs before end)",
             next_track_id,
-            state.progress_ms * 100.0 / duration,
+            (duration - state.progress_ms) / 1000.0,
         )
         self.mass.create_task(self._start_next_prebuffer(next_track_id))
 

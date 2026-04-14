@@ -25,7 +25,6 @@ from .streaming import PROBE_ARGS, compute_rms_pct, pacing_args
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
 
-_QUEUE_PUT_TIMEOUT = 30.0
 _EOF_PUT_TIMEOUT = 5.0
 _GARBAGE_RMS_PCT = 55.0  # RMS > this → likely garbage (white noise ≈ 57.7%)
 _GARBAGE_RETRY_DELAY = 0.5  # seconds to wait before retry
@@ -80,7 +79,6 @@ async def _feed_chunks(
     prebuffer: PreBuffer,
     audio_gen: AsyncGenerator[bytes, None],
     output_format: AudioFormat,
-    logger: logging.Logger,
     *,
     check_garbage: bool,
 ) -> None:
@@ -99,18 +97,11 @@ async def _feed_chunks(
         prebuffer.chunks_queued += 1
         if not prebuffer.ready.is_set() and prebuffer.chunks_queued >= prebuffer.ready_threshold:
             prebuffer.ready.set()
-        try:
-            await asyncio.wait_for(prebuffer.queue.put(chunk), timeout=_QUEUE_PUT_TIMEOUT)
-        except TimeoutError:
-            prebuffer.error = TimeoutError("Queue put timeout — consumer stalled")
-            logger.warning(
-                "Prebuffer queue full for %.0fs, aborting for %s",
-                _QUEUE_PUT_TIMEOUT,
-                prebuffer.track_id,
-            )
-            await close_async_generator(audio_gen)
-            prebuffer._audio_gen = None
-            return
+        # Blocking put — backpressure pauses the producer until the consumer
+        # drains the queue.  No timeout: matches MA server's AudioBuffer
+        # behaviour and avoids the data-loss bug where a 30 s timeout expired
+        # before the consumer started reading the next-track prebuffer.
+        await prebuffer.queue.put(chunk)
 
 
 async def run_fill(
@@ -159,7 +150,6 @@ async def run_fill(
                     prebuffer,
                     audio_gen,
                     output_format,
-                    logger,
                     check_garbage=(attempt == 0),
                 )
                 break  # success or natural end

@@ -206,8 +206,9 @@ async def get_config_entries(
             key=CONF_PREBUFFER_NEXT,
             type=ConfigEntryType.BOOLEAN,
             label="Pre-buffer next track",
-            description="When enabled, the next track in the queue is pre-buffered at ~80% "
-            "progress for near-gapless transition. May increase network and memory usage.",
+            description="When enabled, the next track in the queue is pre-buffered "
+            "60 seconds before the current track ends for near-gapless transition. "
+            "May increase network and memory usage.",
             default_value=False,
         ),
         # Crossfade duration between tracks (0 = disabled)
