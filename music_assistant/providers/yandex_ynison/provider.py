@@ -31,6 +31,7 @@ from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
+    CONF_FFMPEG_PACING,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
@@ -40,6 +41,7 @@ from .constants import (
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
     OUTPUT_AUTO,
+    PACING_READRATE,
     PLAYER_ID_AUTO,
 )
 from .crossfade import (
@@ -55,6 +57,7 @@ from .streaming import (
     PCM_LOSSY_PARAMS,
     log_first_chunk,
     make_pcm_format,
+    pacing_args,
 )
 from .yandex_auth import refresh_music_token
 from .ynison_client import YnisonClient, YnisonDeviceInfo, YnisonState, generate_device_id
@@ -122,6 +125,9 @@ class YandexYnisonProvider(PluginProvider):
         )
         self._display_name: str = (
             cast("str", self.config.get_value(CONF_PUBLISH_NAME)) or DEFAULT_DISPLAY_NAME
+        )
+        self._ffmpeg_pacing: str = (
+            cast("str", self.config.get_value(CONF_FFMPEG_PACING)) or PACING_READRATE
         )
 
         # Device ID — persist in config so re-registration uses the same ID
@@ -547,10 +553,7 @@ class YandexYnisonProvider(PluginProvider):
 
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
-        # Throttle input reading to ~1.1x realtime so our PCM output arrives
-        # at near-realtime rate — compatible with MA's -re flag on the outer
-        # ffmpeg. Initial burst of 5s eliminates startup latency.
-        extra_input_args = ["-readrate", "1.1", "-readrate_initial_burst", "5"]
+        extra_input_args = pacing_args(self._ffmpeg_pacing)
         if seek_ms > 0:
             extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 
@@ -750,6 +753,7 @@ class YandexYnisonProvider(PluginProvider):
                 output_format=fmt,
                 logger=self.logger,
                 on_stream_details=self._update_metadata_from_stream,
+                pacing_mode=self._ffmpeg_pacing,
             )
         )
 
@@ -784,6 +788,7 @@ class YandexYnisonProvider(PluginProvider):
                 get_audio_stream=self._yandex_provider.get_audio_stream,
                 output_format=fmt,
                 logger=self.logger,
+                pacing_mode=self._ffmpeg_pacing,
             )
         )
 

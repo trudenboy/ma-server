@@ -19,6 +19,9 @@ from music_assistant_models.streamdetails import StreamDetails
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.util import close_async_generator
 
+from .constants import PACING_READRATE
+from .streaming import pacing_args
+
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
 
@@ -73,6 +76,7 @@ async def run_fill(
     output_format: AudioFormat,
     logger: logging.Logger,
     on_stream_details: OnStreamDetails | None = None,
+    pacing_mode: str = PACING_READRATE,
 ) -> None:
     """Fill a PreBuffer queue from a Yandex Music stream via ffmpeg.
 
@@ -87,6 +91,7 @@ async def run_fill(
     :param logger: Logger instance.
     :param on_stream_details: Optional callback after stream details are fetched
                               (e.g. to update metadata).  Receives (sd, seek_ms).
+    :param pacing_mode: FFmpeg pacing mode (readrate / realtime / unlimited).
     """
     try:
         sd = await get_stream_details(prebuffer.track_id, MediaType.TRACK)
@@ -95,7 +100,7 @@ async def run_fill(
         if on_stream_details is not None:
             await on_stream_details(sd, prebuffer.seek_ms)
 
-        extra_input_args = ["-readrate", "1.1", "-readrate_initial_burst", "5"]
+        extra_input_args = pacing_args(pacing_mode)
         if prebuffer.seek_ms > 0:
             extra_input_args += ["-ss", f"{prebuffer.seek_ms / 1000.0:.3f}"]
 

@@ -1,7 +1,8 @@
 """PCM normalization helpers for Yandex Music audio streams.
 
-Contains format profiles, the AudioFormat factory, and first-chunk
-diagnostics used by both the direct streaming path and pre-buffering.
+Contains format profiles, the AudioFormat factory, pacing-args builder,
+and first-chunk diagnostics used by both the direct streaming path and
+pre-buffering.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from typing import Any
 
 from music_assistant_models.enums import ContentType
 from music_assistant_models.media_items import AudioFormat
+
+from .constants import PACING_REALTIME, PACING_UNLIMITED
 
 # PCM normalization profiles by YM quality tier.
 # Ensures MA's single ffmpeg receives a consistent format between tracks.
@@ -38,6 +41,21 @@ _SIGNED_24BIT_RANGE = 0x1000000
 def make_pcm_format(params: dict[str, Any]) -> AudioFormat:
     """Create a fresh AudioFormat from stored params (safe from mutation)."""
     return AudioFormat(**params)
+
+
+def pacing_args(mode: str) -> list[str]:
+    """Return ffmpeg extra-input args for the chosen pacing mode.
+
+    readrate  - soft 1.1x throttle with 5 s burst (default)
+    realtime  - strict 1x via -re
+    unlimited - no rate limiting
+    """
+    if mode == PACING_REALTIME:
+        return ["-re"]
+    if mode == PACING_UNLIMITED:
+        return []
+    # default: readrate
+    return ["-readrate", "1.1", "-readrate_initial_burst", "5"]
 
 
 def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
