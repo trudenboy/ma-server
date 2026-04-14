@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from music_assistant.providers.yandex_ynison.crossfade import (
+    CrossfadeNoiseError,
     TailBuffer,
     apply_crossfade,
     collect_crossfade_head,
@@ -298,7 +299,7 @@ class TestApplyCrossfade:
         assert collected == [b"out"]
 
     async def test_noise_detection_aborts_crossfade(self) -> None:
-        """If crossfade output has high RMS (noise), nothing is yielded."""
+        """If crossfade output has high RMS (noise), CrossfadeNoiseError is raised."""
         fmt = _make_pcm_format()
         logger = logging.getLogger("test")
 
@@ -327,9 +328,7 @@ class TestApplyCrossfade:
                 "music_assistant.providers.yandex_ynison.crossfade.compute_rms_pct",
                 return_value=60.0,
             ),
+            pytest.raises(CrossfadeNoiseError, match=r"RMS=60\.0%"),
         ):
-            collected: list[bytes] = []
-            async for chunk in apply_crossfade(fade_out, fade_in, fmt, 5.0, logger):
-                collected.append(chunk)
-
-        assert collected == [], "No data should be yielded when noise is detected"
+            async for _ in apply_crossfade(fade_out, fade_in, fmt, 5.0, logger):
+                pass

@@ -34,6 +34,10 @@ _HEAD_COLLECT_TIMEOUT = 10.0
 _CROSSFADE_NOISE_RMS_PCT = 50.0
 
 
+class CrossfadeNoiseError(Exception):
+    """Raised when crossfade output contains noise (high RMS)."""
+
+
 class TailBuffer:
     """Rolling buffer that keeps the last *capacity* bytes of PCM audio.
 
@@ -129,8 +133,9 @@ async def apply_crossfade(
     frame alignment on the fade-out part (same preprocessing as
     ``SmartFadesMixer.mix`` uses for ``STANDARD_CROSSFADE`` mode).
 
-    If the crossfade ffmpeg produces garbage (RMS above threshold), the
-    crossfade is aborted and ``fade_in`` is yielded raw as a fallback.
+    Raises :class:`CrossfadeNoiseError` if the first crossfade output
+    chunk has RMS above the noise threshold, so the caller can fall
+    back to non-crossfaded playback.
 
     :param fade_out: Raw PCM bytes for the outgoing track's tail.
     :param fade_in: Raw PCM bytes or async generator for the incoming track.
@@ -161,16 +166,14 @@ async def apply_crossfade(
         return
 
     crossfader = StandardCrossFade(logger=logger, crossfade_duration=duration_s)
-    noise_detected = False
+    checked = False
     async for chunk in crossfader.apply(fade_out, fade_in, pcm_format):
-        if not noise_detected:
+        if not checked:
+            checked = True
             rms = compute_rms_pct(chunk, pcm_format)
             if rms > _CROSSFADE_NOISE_RMS_PCT:
-                logger.warning(
-                    "Crossfade output noise detected (RMS=%.1f%%), aborting crossfade",
-                    rms,
+                raise CrossfadeNoiseError(
+                    f"Crossfade output RMS={rms:.1f}% exceeds threshold {_CROSSFADE_NOISE_RMS_PCT}%"
                 )
-                noise_detected = True
-        if not noise_detected:
-            for sl in iter_pcm_slices(chunk, pcm_format):
-                yield sl
+        for sl in iter_pcm_slices(chunk, pcm_format):
+            yield sl
