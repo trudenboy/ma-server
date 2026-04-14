@@ -434,8 +434,6 @@ class YandexYnisonProvider(PluginProvider):
                         effective_cf_s = min(effective_cf_s, sd.duration / 2.0)
                     if effective_cf_s < _MIN_CROSSFADE_S:
                         effective_cf_s = 0.0
-                    if effective_cf_s < _MIN_CROSSFADE_S:
-                        effective_cf_s = 0.0
                     if effective_cf_s > 0:
                         cf_bytes = crossfade_bytes_for(effective_cf_s, track_fmt)
                         if cf_bytes > 0:

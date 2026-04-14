@@ -25,7 +25,6 @@ from .streaming import PROBE_ARGS, compute_rms_pct, pacing_args
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
 
-_EOF_PUT_TIMEOUT = 5.0
 _GARBAGE_RMS_PCT = 55.0  # RMS > this → likely garbage (white noise ≈ 57.7%)
 _GARBAGE_RETRY_DELAY = 0.5  # seconds to wait before retry
 
@@ -175,8 +174,8 @@ async def run_fill(
             prebuffer.error,
         )
         try:
-            await asyncio.wait_for(prebuffer.queue.put(None), timeout=_EOF_PUT_TIMEOUT)
-        except (TimeoutError, asyncio.CancelledError):
+            prebuffer.queue.put_nowait(None)
+        except asyncio.QueueFull:
             with suppress(asyncio.QueueEmpty):
                 prebuffer.queue.get_nowait()
             with suppress(asyncio.QueueFull):
