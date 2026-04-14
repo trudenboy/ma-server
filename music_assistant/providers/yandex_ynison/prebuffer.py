@@ -20,13 +20,15 @@ from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.util import close_async_generator
 
 from .constants import PACING_READRATE
-from .streaming import PROBE_ARGS, pacing_args
+from .streaming import PROBE_ARGS, compute_rms_pct, pacing_args
 
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
 
 _QUEUE_PUT_TIMEOUT = 30.0
 _EOF_PUT_TIMEOUT = 5.0
+_GARBAGE_RMS_PCT = 55.0  # RMS > this → likely garbage (white noise ≈ 57.7%)
+_GARBAGE_RETRY_DELAY = 0.5  # seconds to wait before retry
 
 
 @dataclass
@@ -69,6 +71,47 @@ class PreBuffer:
 OnStreamDetails = Callable[[StreamDetails, int], Awaitable[None]]
 
 
+class _GarbageDetected(Exception):
+    """Raised internally when the first PCM chunk looks like garbage."""
+
+
+async def _feed_chunks(
+    prebuffer: PreBuffer,
+    audio_gen: AsyncGenerator[bytes, None],
+    output_format: AudioFormat,
+    logger: logging.Logger,
+    *,
+    check_garbage: bool,
+) -> None:
+    """Read chunks from *audio_gen* into the prebuffer queue.
+
+    Raises _GarbageDetected on the first chunk if *check_garbage* is True and
+    the RMS exceeds the threshold.  The caller is responsible for tearing down
+    the generator and retrying.
+    """
+    async for chunk in audio_gen:
+        if check_garbage and prebuffer.chunks_queued == 0:
+            rms_pct = compute_rms_pct(chunk, output_format)
+            if rms_pct > _GARBAGE_RMS_PCT:
+                raise _GarbageDetected(f"RMS={rms_pct:.1f}% for {prebuffer.track_id}")
+
+        prebuffer.chunks_queued += 1
+        if not prebuffer.ready.is_set() and prebuffer.chunks_queued >= prebuffer.ready_threshold:
+            prebuffer.ready.set()
+        try:
+            await asyncio.wait_for(prebuffer.queue.put(chunk), timeout=_QUEUE_PUT_TIMEOUT)
+        except TimeoutError:
+            prebuffer.error = TimeoutError("Queue put timeout — consumer stalled")
+            logger.warning(
+                "Prebuffer queue full for %.0fs, aborting for %s",
+                _QUEUE_PUT_TIMEOUT,
+                prebuffer.track_id,
+            )
+            await close_async_generator(audio_gen)
+            prebuffer._audio_gen = None
+            return
+
+
 async def run_fill(
     prebuffer: PreBuffer,
     get_stream_details: Callable[[str, MediaType], Awaitable[StreamDetails]],
@@ -77,6 +120,7 @@ async def run_fill(
     logger: logging.Logger,
     on_stream_details: OnStreamDetails | None = None,
     pacing_mode: str = PACING_READRATE,
+    invalidate_cache: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """Fill a PreBuffer queue from a Yandex Music stream via ffmpeg.
 
@@ -84,53 +128,47 @@ async def run_fill(
     next-track prebuffering.  The caller provides callbacks for fetching
     stream details and audio data.
 
-    :param prebuffer: The PreBuffer to fill.
-    :param get_stream_details: Async callable to resolve stream details.
-    :param get_audio_stream: Async generator factory for raw audio data.
-    :param output_format: Target PCM format for ffmpeg transcoding.
-    :param logger: Logger instance.
-    :param on_stream_details: Optional callback after stream details are fetched
-                              (e.g. to update metadata).  Receives (sd, seek_ms).
-    :param pacing_mode: FFmpeg pacing mode (readrate / realtime / unlimited).
+    If the first PCM chunk looks like garbage (RMS > 55 %), the ffmpeg
+    process is torn down and one retry is attempted with fresh stream
+    details (cache invalidated).  This guards against intermittent
+    container-detection failures in ffmpeg.
     """
     try:
-        sd = await get_stream_details(prebuffer.track_id, MediaType.TRACK)
-        prebuffer.stream_details = sd
+        for attempt in range(2):
+            sd = await get_stream_details(prebuffer.track_id, MediaType.TRACK)
+            prebuffer.stream_details = sd
 
-        if on_stream_details is not None:
-            await on_stream_details(sd, prebuffer.seek_ms)
+            if on_stream_details is not None:
+                await on_stream_details(sd, prebuffer.seek_ms)
 
-        extra_input_args = PROBE_ARGS + pacing_args(pacing_mode)
-        if prebuffer.seek_ms > 0:
-            extra_input_args += ["-ss", f"{prebuffer.seek_ms / 1000.0:.3f}"]
+            extra_input_args = PROBE_ARGS + pacing_args(pacing_mode)
+            if prebuffer.seek_ms > 0:
+                extra_input_args += ["-ss", f"{prebuffer.seek_ms / 1000.0:.3f}"]
 
-        audio_gen = get_ffmpeg_stream(
-            audio_input=get_audio_stream(sd),
-            input_format=sd.audio_format,
-            output_format=output_format,
-            extra_input_args=extra_input_args,
-        )
-        prebuffer._audio_gen = audio_gen
+            audio_gen = get_ffmpeg_stream(
+                audio_input=get_audio_stream(sd),
+                input_format=sd.audio_format,
+                output_format=output_format,
+                extra_input_args=extra_input_args,
+            )
+            prebuffer._audio_gen = audio_gen
 
-        async for chunk in audio_gen:
-            prebuffer.chunks_queued += 1
-            if (
-                not prebuffer.ready.is_set()
-                and prebuffer.chunks_queued >= prebuffer.ready_threshold
-            ):
-                prebuffer.ready.set()
             try:
-                await asyncio.wait_for(prebuffer.queue.put(chunk), timeout=_QUEUE_PUT_TIMEOUT)
-            except TimeoutError:
-                prebuffer.error = TimeoutError("Queue put timeout — consumer stalled")
-                logger.warning(
-                    "Prebuffer queue full for %.0fs, aborting for %s",
-                    _QUEUE_PUT_TIMEOUT,
-                    prebuffer.track_id,
+                await _feed_chunks(
+                    prebuffer,
+                    audio_gen,
+                    output_format,
+                    logger,
+                    check_garbage=(attempt == 0),
                 )
+                break  # success or natural end
+            except _GarbageDetected as gd:
+                logger.warning("Garbage detected (%s), retrying with fresh stream", gd)
                 await close_async_generator(audio_gen)
                 prebuffer._audio_gen = None
-                return
+                if invalidate_cache:
+                    await invalidate_cache(prebuffer.track_id)
+                await asyncio.sleep(_GARBAGE_RETRY_DELAY)
     except asyncio.CancelledError:
         raise
     except Exception as err:

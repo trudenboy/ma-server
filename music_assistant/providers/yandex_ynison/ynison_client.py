@@ -82,6 +82,8 @@ class YnisonState:
 # Type alias for the state update callback
 StateUpdateCallback = Callable[[YnisonState], Awaitable[None]]
 DisconnectCallback = Callable[[], Awaitable[None]]
+# Callback invoked on auth failure; should return a fresh token (or raise).
+AuthRefreshCallback = Callable[[], Awaitable["SecretStr"]]
 
 
 class YnisonClient:
@@ -99,6 +101,7 @@ class YnisonClient:
         on_disconnect: DisconnectCallback,
         logger: logging.Logger,
         http_session: aiohttp.ClientSession | None = None,
+        on_auth_failure: AuthRefreshCallback | None = None,
     ) -> None:
         """Initialize Ynison client.
 
@@ -108,6 +111,9 @@ class YnisonClient:
         :param on_disconnect: Callback when connection is permanently lost.
         :param logger: Logger instance.
         :param http_session: Optional shared aiohttp session.
+        :param on_auth_failure: Optional callback invoked on auth failure during
+            reconnect. Should return a fresh SecretStr token. If not provided or
+            if the callback raises, reconnect proceeds with the current token.
         """
         self._token = token
         self._device_info = device_info
@@ -115,6 +121,7 @@ class YnisonClient:
         self._on_disconnect = on_disconnect
         self._logger = logger
         self._external_session = http_session
+        self._on_auth_failure = on_auth_failure
 
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
@@ -191,6 +198,10 @@ class YnisonClient:
         if self._session and not self._external_session:
             await self._session.close()
         self._session = None
+
+    def update_token(self, token: SecretStr) -> None:
+        """Replace the stored OAuth token (e.g. after a refresh)."""
+        self._token = token
 
     # ------------------------------------------------------------------
     # Send methods
@@ -561,7 +572,11 @@ class YnisonClient:
             )
 
     async def _reconnect(self) -> None:
-        """Reconnect with exponential backoff."""
+        """Reconnect with exponential backoff.
+
+        On authentication failure (LoginFailed), attempts to refresh the token
+        via the on_auth_failure callback before the next retry.
+        """
         for attempt in range(MAX_RECONNECT_ATTEMPTS):
             if self._stop_event.is_set():
                 return
@@ -601,6 +616,15 @@ class YnisonClient:
                 await self._connect_state(host, ticket, session_id)
                 self._logger.info("Ynison reconnected successfully")
                 return
+            except LoginFailed:
+                self._logger.warning("Ynison reconnect attempt %d failed: auth error", attempt + 1)
+                if self._on_auth_failure:
+                    try:
+                        new_token = await self._on_auth_failure()
+                        self._token = new_token
+                        self._logger.info("Token refreshed, will retry with new token")
+                    except Exception:
+                        self._logger.warning("Token refresh failed", exc_info=True)
             except asyncio.CancelledError:
                 return
             except Exception:

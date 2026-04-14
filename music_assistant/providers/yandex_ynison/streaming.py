@@ -70,31 +70,25 @@ def pacing_args(mode: str) -> list[str]:
     return ["-readrate", "1.1", "-readrate_initial_burst", "5"]
 
 
-def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
-    """Log diagnostic info about the first chunk of a track stream.
+def compute_rms_pct(chunk: bytes, fmt: AudioFormat) -> float:
+    """Compute RMS amplitude of the first 1024 samples as a percentage of max.
 
-    Computes RMS amplitude of the first 1024 samples to help detect garbage
-    data (which appears as near-maximum amplitude white noise / hissing).
+    Returns a value in [0, 100].  Pure white noise ≈ 57.7%.
+    Returns -1.0 if the format is unsupported or the chunk is too small.
     """
     if not chunk:
-        return
+        return -1.0
     sample_width = fmt.bit_depth // 8
     if sample_width == 2:
         pack_fmt = "<h"
     elif sample_width == 3:
         pack_fmt = None  # 24-bit needs manual unpacking
     else:
-        logger.debug(
-            "First chunk: %d bytes (unsupported bit_depth=%d for RMS)",
-            len(chunk),
-            fmt.bit_depth,
-        )
-        return
+        return -1.0
 
     n_samples = min(1024, len(chunk) // sample_width)
     if n_samples == 0:
-        logger.debug("First chunk: %d bytes (too small for RMS)", len(chunk))
-        return
+        return -1.0
 
     sum_sq = 0.0
     for i in range(n_samples):
@@ -102,7 +96,6 @@ def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
         if pack_fmt:
             (sample,) = struct.unpack_from(pack_fmt, chunk, offset)
         else:
-            # 24-bit little-endian signed
             b = chunk[offset : offset + 3]
             val = int.from_bytes(b, "little", signed=False)
             if val >= _SIGNED_24BIT_MAX:
@@ -112,7 +105,26 @@ def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
 
     rms = (sum_sq / n_samples) ** 0.5
     max_val = (1 << (fmt.bit_depth - 1)) - 1
-    rms_pct = (rms / max_val) * 100 if max_val else 0
+    return (rms / max_val) * 100 if max_val else 0.0
+
+
+def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
+    """Log diagnostic info about the first chunk of a track stream.
+
+    Computes RMS amplitude of the first 1024 samples to help detect garbage
+    data (which appears as near-maximum amplitude white noise / hissing).
+    """
+    rms_pct = compute_rms_pct(chunk, fmt)
+    if rms_pct < 0:
+        logger.debug(
+            "First chunk: %d bytes (unsupported or too small for RMS, bit_depth=%d)",
+            len(chunk),
+            fmt.bit_depth,
+        )
+        return
+
+    max_val = (1 << (fmt.bit_depth - 1)) - 1
+    rms = rms_pct / 100 * max_val
 
     if rms_pct > _RMS_CRIT_PCT:
         log_fn = logger.critical

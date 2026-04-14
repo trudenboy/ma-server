@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import struct
 import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
@@ -33,7 +35,7 @@ from music_assistant.providers.yandex_ynison.constants import (
     PLAYER_ID_AUTO,
 )
 from music_assistant.providers.yandex_ynison.crossfade import crossfade_bytes_for
-from music_assistant.providers.yandex_ynison.prebuffer import PreBuffer
+from music_assistant.providers.yandex_ynison.prebuffer import PreBuffer, run_fill
 from music_assistant.providers.yandex_ynison.provider import (
     _API_MAX_RETRIES,
     YandexYnisonProvider,
@@ -41,6 +43,7 @@ from music_assistant.providers.yandex_ynison.provider import (
 from music_assistant.providers.yandex_ynison.streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,
+    compute_rms_pct,
     make_pcm_format,
 )
 from music_assistant.providers.yandex_ynison.ynison_client import YnisonState
@@ -85,6 +88,7 @@ def _make_mock_mass() -> MagicMock:
     # Cache — return None (miss) by default
     mass.cache.get = AsyncMock(return_value=None)
     mass.cache.set = AsyncMock()
+    mass.cache.delete = AsyncMock()
 
     # Players
     mass.players.all_players = MagicMock(return_value=[])
@@ -1098,7 +1102,7 @@ class TestPreBuffer:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
-        pcm_chunks = [b"pcm-1", b"pcm-2", b"pcm-3"]
+        pcm_chunks = [b"\x00" * 100, b"\x00" * 80, b"\x00" * 60]
 
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
             for c in pcm_chunks:
@@ -1152,7 +1156,7 @@ class TestPreBuffer:
         async def _slow_ffmpeg(**_kwargs: object) -> Any:
             for i in range(100):
                 await asyncio.sleep(0.1)
-                yield f"pcm-{i}".encode()
+                yield b"\x00" * 64
 
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
@@ -1213,7 +1217,7 @@ class TestPreBuffer:
         provider._ynison = mock_ynison
 
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
-            yield b"pcm"
+            yield b"\x00" * 64
 
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
@@ -1255,7 +1259,7 @@ class TestPreBuffer:
         provider._ynison = mock_ynison
 
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
-            yield b"pcm"
+            yield b"\x00" * 64
 
         provider.mass.create_task = lambda coro: asyncio.get_event_loop().create_task(coro)  # type: ignore[method-assign, assignment, misc]
 
@@ -1293,7 +1297,7 @@ class TestPreBuffer:
 
         # Fill 65 chunks into a maxsize=64 queue — the last put blocks until
         # the consumer drains. The fill task must still deliver EOF after.
-        chunks = [f"pcm-{i}".encode() for i in range(65)]
+        chunks = [b"\x00" * 64 for _ in range(65)]
 
         async def _fake_ffmpeg(**_kwargs: object) -> Any:
             for c in chunks:
@@ -2564,3 +2568,166 @@ class TestCrossfadeIntegration:
         async for chunk in provider.get_audio_stream("p1"):
             result.append(chunk)
         assert b"\x01" * 100 in result
+
+
+class TestComputeRmsPct:
+    """Tests for compute_rms_pct helper."""
+
+    def test_silence_returns_zero(self) -> None:
+        """All-zero samples should give 0% RMS."""
+        fmt = make_pcm_format(PCM_LOSSY_PARAMS)
+        chunk = b"\x00" * (2 * 1024)  # 1024 16-bit samples
+        assert compute_rms_pct(chunk, fmt) == pytest.approx(0.0, abs=0.01)
+
+    def test_white_noise_high_rms(self) -> None:
+        """Pseudo-random data should give RMS near 57% (white noise)."""
+        fmt = make_pcm_format(PCM_LOSSY_PARAMS)
+        # Generate pseudo-random 16-bit signed samples using a simple LCG
+        samples: list[bytes] = []
+        x = 42
+        for _ in range(1024):
+            x = (x * 1103515245 + 12345) & 0xFFFF
+            val = x - 0x8000  # center around 0
+            samples.append(struct.pack("<h", val))
+        chunk = b"".join(samples)
+        rms = compute_rms_pct(chunk, fmt)
+        assert rms > 50.0, f"Expected high RMS for noise, got {rms:.1f}%"
+
+    def test_empty_chunk_returns_negative(self) -> None:
+        """Empty input returns -1."""
+        fmt = make_pcm_format(PCM_LOSSY_PARAMS)
+        assert compute_rms_pct(b"", fmt) == -1.0
+
+    def test_24bit_silence(self) -> None:
+        """24-bit all-zero samples should give 0% RMS."""
+        fmt = make_pcm_format(PCM_LOSSLESS_PARAMS)
+        chunk = b"\x00" * (3 * 1024)  # 1024 24-bit samples
+        assert compute_rms_pct(chunk, fmt) == pytest.approx(0.0, abs=0.01)
+
+
+class TestGarbageDetectionRetry:
+    """Tests for garbage detection + retry in run_fill."""
+
+    async def test_garbage_triggers_retry(self) -> None:
+        """First chunk garbage → retry with fresh stream details."""
+        fmt = make_pcm_format(PCM_LOSSY_PARAMS)
+        prebuffer = PreBuffer(
+            track_id="garbage:1",
+            seek_ms=0,
+            output_format=fmt,
+            queue=asyncio.Queue(maxsize=64),
+        )
+
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        get_sd = AsyncMock(return_value=sd)
+        invalidate = AsyncMock()
+
+        call_count = 0
+        # Generate 16-bit white noise chunk for attempt 0
+        noise_samples = []
+        x = 42
+        for _ in range(1024):
+            x = (x * 1103515245 + 12345) & 0xFFFF
+            noise_samples.append(struct.pack("<h", x - 0x8000))
+        noise_chunk = b"".join(noise_samples)
+        good_chunk = b"\x00" * 2048
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"raw-cdn"
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield noise_chunk  # garbage
+            else:
+                yield good_chunk  # clean
+
+        logger = logging.getLogger("test_garbage")
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.prebuffer.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            await run_fill(
+                prebuffer=prebuffer,
+                get_stream_details=get_sd,
+                get_audio_stream=_fake_audio_stream,
+                output_format=fmt,
+                logger=logger,
+                invalidate_cache=invalidate,
+            )
+
+        # Should have retried: 2 ffmpeg calls, 2 get_stream_details calls
+        assert call_count == 2
+        assert get_sd.call_count == 2
+        invalidate.assert_called_once_with("garbage:1")
+        # Only the good chunk in queue (garbage was discarded)
+        assert prebuffer.chunks_queued == 1
+        chunk = prebuffer.queue.get_nowait()
+        assert chunk == good_chunk
+        # EOF sentinel
+        eof = prebuffer.queue.get_nowait()
+        assert eof is None
+
+    async def test_no_retry_on_clean_audio(self) -> None:
+        """Clean first chunk → no retry."""
+        fmt = make_pcm_format(PCM_LOSSY_PARAMS)
+        prebuffer = PreBuffer(
+            track_id="clean:1",
+            seek_ms=0,
+            output_format=fmt,
+            queue=asyncio.Queue(maxsize=64),
+        )
+
+        sd = MagicMock()
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        get_sd = AsyncMock(return_value=sd)
+        invalidate = AsyncMock()
+        good_chunk = b"\x00" * 2048
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"raw"
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield good_chunk
+
+        logger = logging.getLogger("test_clean")
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.prebuffer.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            await run_fill(
+                prebuffer=prebuffer,
+                get_stream_details=get_sd,
+                get_audio_stream=_fake_audio_stream,
+                output_format=fmt,
+                logger=logger,
+                invalidate_cache=invalidate,
+            )
+
+        # Only 1 call — no retry
+        assert get_sd.call_count == 1
+        invalidate.assert_not_called()
+        assert prebuffer.chunks_queued == 1
+
+
+class TestInvalidateStreamCache:
+    """Tests for _invalidate_stream_cache method."""
+
+    async def test_deletes_cache_entry(self) -> None:
+        """_invalidate_stream_cache calls mass.cache.delete."""
+        provider = _make_provider()
+        provider.mass.cache = MagicMock()
+        provider.mass.cache.delete = AsyncMock()
+
+        await provider._invalidate_stream_cache("track:42")
+
+        provider.mass.cache.delete.assert_called_once_with(
+            "ynison_sd_track:42",
+            provider=provider.instance_id,
+        )

@@ -1265,3 +1265,136 @@ class TestConnectSessionCreation:
         await client.disconnect()
 
         ext_session.close.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# Token refresh on auth failure during reconnect
+# ------------------------------------------------------------------
+
+
+class TestTokenRefreshOnReconnect:
+    """Tests for on_auth_failure callback in _reconnect."""
+
+    async def test_auth_failure_triggers_token_refresh(self) -> None:
+        """LoginFailed during reconnect invokes on_auth_failure callback."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_auth_failure = AsyncMock(return_value=SecretStr("new-token"))
+
+        client = YnisonClient(
+            token=SecretStr("old-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+            on_auth_failure=on_auth_failure,
+        )
+        client._session = MagicMock()
+        client._session.closed = False
+
+        # First attempt: LoginFailed → refresh → second attempt: success
+        attempt_count = 0
+
+        async def redirect_side_effect() -> tuple[str, str, int]:
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count == 1:
+                raise LoginFailed("expired")
+            return ("host", "ticket", 1)
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=redirect_side_effect,
+            ),
+            patch.object(client, "_connect_state", new_callable=AsyncMock),
+        ):
+            await client._reconnect()
+
+        on_auth_failure.assert_awaited_once()
+        assert client._token == SecretStr("new-token")
+        client._logger.info.assert_any_call(  # type: ignore[attr-defined]
+            "Token refreshed, will retry with new token"
+        )
+
+    async def test_auth_failure_no_callback(self) -> None:
+        """LoginFailed without on_auth_failure retries with same token."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+
+        client = YnisonClient(
+            token=SecretStr("old-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+        )
+        client._session = MagicMock()
+        client._session.closed = False
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=LoginFailed("expired"),
+            ),
+        ):
+            await client._reconnect()
+
+        # All attempts fail → disconnect
+        on_disconnect.assert_awaited_once()
+        assert client._token == SecretStr("old-token")
+
+    async def test_auth_failure_callback_raises(self) -> None:
+        """on_auth_failure raises → logs warning, continues retry."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        on_auth_failure = AsyncMock(side_effect=RuntimeError("refresh failed"))
+
+        client = YnisonClient(
+            token=SecretStr("old-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+            on_auth_failure=on_auth_failure,
+        )
+        client._session = MagicMock()
+        client._session.closed = False
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=LoginFailed("expired"),
+            ),
+        ):
+            await client._reconnect()
+
+        # Callback was called on every attempt
+        assert on_auth_failure.await_count == MAX_RECONNECT_ATTEMPTS
+        # Token unchanged since callback always fails
+        assert client._token == SecretStr("old-token")
+        on_disconnect.assert_awaited_once()
+
+
+class TestUpdateToken:
+    """Tests for update_token method."""
+
+    def test_update_token_replaces_stored_token(self) -> None:
+        """update_token swaps the internal _token."""
+        on_state, on_disconnect = AsyncMock(), AsyncMock()
+        client = YnisonClient(
+            token=SecretStr("old-token"),
+            device_info=YnisonDeviceInfo(device_id="d1", title="T"),
+            on_state_update=on_state,
+            on_disconnect=on_disconnect,
+            logger=MagicMock(),
+        )
+        assert client._token == SecretStr("old-token")
+        client.update_token(SecretStr("new-token"))
+        assert client._token == SecretStr("new-token")

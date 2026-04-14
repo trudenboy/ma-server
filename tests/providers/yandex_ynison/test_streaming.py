@@ -83,16 +83,17 @@ class TestLogFirstChunk16Bit:
         return make_pcm_format(PCM_LOSSY_PARAMS)
 
     def test_empty_chunk_returns_early(self, logger: MagicMock, fmt_16: AudioFormat) -> None:
-        """Empty chunk produces no log output."""
+        """Empty chunk logs debug about unsupported/too small."""
         log_first_chunk(logger, b"", fmt_16)
-        logger.debug.assert_not_called()
+        logger.debug.assert_called_once()
+        assert "unsupported or too small" in logger.debug.call_args[0][0]
         logger.warning.assert_not_called()
 
     def test_small_chunk_debug_message(self, logger: MagicMock, fmt_16: AudioFormat) -> None:
         """Chunk smaller than one sample → logged as too small."""
         log_first_chunk(logger, b"\x01", fmt_16)
         logger.debug.assert_called_once()
-        assert "too small" in logger.debug.call_args[0][0]
+        assert "unsupported or too small" in logger.debug.call_args[0][0]
 
     def test_silent_16bit(self, logger: MagicMock, fmt_16: AudioFormat) -> None:
         """All-zero samples → RMS 0, debug level."""
@@ -179,10 +180,8 @@ class TestLogFirstChunkUnsupported:
         fmt = AudioFormat(content_type=ContentType.PCM_S16LE, bit_depth=8, sample_rate=44100)
         log_first_chunk(logger, b"\x42" * 100, fmt)
         logger.debug.assert_called_once()
-        assert (
-            "unsupported bit_depth=8"
-            in logger.debug.call_args[0][0] % logger.debug.call_args[0][1:]
-        )
+        msg = logger.debug.call_args[0][0] % logger.debug.call_args[0][1:]
+        assert "bit_depth=8" in msg
 
     def test_32bit_unsupported(self, logger: MagicMock) -> None:
         """32-bit audio logs unsupported message."""
@@ -193,10 +192,8 @@ class TestLogFirstChunkUnsupported:
         )
         log_first_chunk(logger, b"\x42" * 100, fmt)
         logger.debug.assert_called_once()
-        assert (
-            "unsupported bit_depth=32"
-            in logger.debug.call_args[0][0] % logger.debug.call_args[0][1:]
-        )
+        msg = logger.debug.call_args[0][0] % logger.debug.call_args[0][1:]
+        assert "bit_depth=32" in msg
 
 
 # ---------------------------------------------------------------
