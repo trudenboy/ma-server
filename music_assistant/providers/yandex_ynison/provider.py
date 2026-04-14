@@ -22,7 +22,6 @@ from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedExcept
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
 
-from music_assistant.helpers.audio import align_audio_to_frame_boundary
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.throttle_retry import ThrottlerManager
 from music_assistant.models.plugin import PluginProvider, PluginSource
@@ -80,6 +79,17 @@ _API_MAX_BACKOFF = 30.0
 
 # Cache TTL for stream details (seconds)
 _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
+
+
+def _pad_to_frame_boundary(data: bytes, pcm_format: AudioFormat) -> bytes:
+    """Pad *data* with silence to the next PCM frame boundary."""
+    frame_size = (pcm_format.bit_depth // 8) * pcm_format.channels
+    if frame_size <= 0:
+        return data
+    excess = len(data) % frame_size
+    if excess:
+        return data + b"\x00" * (frame_size - excess)
+    return data
 
 
 class YandexYnisonProvider(PluginProvider):
@@ -152,7 +162,6 @@ class YandexYnisonProvider(PluginProvider):
         self._actual_duration_ms: int = 0
         self._prebuffer: PreBuffer | None = None
         self._next_prebuffer: PreBuffer | None = None
-        self._crossfade_remainder: bytes = b""
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
         self._normalized_params: dict[str, Any] = PCM_LOSSY_PARAMS
@@ -321,13 +330,6 @@ class YandexYnisonProvider(PluginProvider):
             self._streaming_progress_ms = seek_ms
             last_progress_sync = time.monotonic()
 
-            # Yield any leftover head bytes from previous crossfade
-            if self._crossfade_remainder:
-                remainder = self._crossfade_remainder
-                self._crossfade_remainder = b""
-                yield remainder
-                bytes_yielded += len(remainder)
-
             # Promote next-track prebuffer if it matches
             if (
                 self._next_prebuffer
@@ -486,8 +488,7 @@ class YandexYnisonProvider(PluginProvider):
 
             # Align to PCM frame boundary — prevents misalignment in MA's
             # downstream ffmpeg when a track stream is interrupted mid-chunk.
-            # We pad with zeros (MA's align_audio_to_frame_boundary truncates,
-            # but we can't un-yield bytes already sent downstream).
+            # We pad with zeros (can't un-yield bytes already sent downstream).
             frame_size = (track_fmt.bit_depth // 8) * track_fmt.channels
             if frame_size > 0:
                 excess = bytes_yielded % frame_size
@@ -737,14 +738,12 @@ class YandexYnisonProvider(PluginProvider):
                 "Crossfade: mixing failed, yielding tail + head separately",
                 exc_info=True,
             )
-            yield align_audio_to_frame_boundary(tail_data, pcm_format)
-            yield align_audio_to_frame_boundary(head_data, pcm_format)
+            yield _pad_to_frame_boundary(tail_data, pcm_format)
+            yield _pad_to_frame_boundary(head_data, pcm_format)
             return
 
-        # Any head bytes beyond the crossfade overlap will be yielded
-        # at the start of the next track iteration via _crossfade_remainder.
         # StandardCrossFade already yields post-crossfade bytes, so we
-        # only need to store remaining queue data from next_prebuffer.
+        # only need the remaining queue data from next_prebuffer.
         # The queue still has unconsumed chunks — they'll be picked up
         # when next_prebuffer is promoted to _prebuffer in the next
         # loop iteration.

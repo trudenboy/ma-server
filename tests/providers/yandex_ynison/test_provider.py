@@ -2442,35 +2442,6 @@ class TestCrossfadeIntegration:
         assert chunks_data[0] in total
         assert chunks_data[1] in total
 
-    async def test_crossfade_remainder_yielded_first(self) -> None:
-        """Leftover from previous crossfade is yielded at start of iteration."""
-        provider = _make_provider()
-        provider._crossfade_remainder = b"\xdd" * 50
-
-        fmt = _make_mock_pcm_format()
-        pb = MagicMock(spec=PreBuffer)
-        pb.track_id = "track-1"
-        pb.seek_ms = 0
-        pb.error = None
-        pb.output_format = fmt
-        pb.chunks_queued = 10
-        provider._prebuffer = pb
-
-        self._setup_provider_for_stream(provider, crossfade_s=0, pcm_format=fmt)
-
-        async def _yield_prebuffer() -> AsyncGenerator[bytes, None]:
-            yield b"\xee" * 100
-
-        provider._yield_from_prebuffer = _yield_prebuffer  # type: ignore[assignment,method-assign]
-
-        result = []
-        async for chunk in provider.get_audio_stream("player-1"):
-            result.append(chunk)
-
-        # First yielded data should be the remainder
-        assert result[0] == b"\xdd" * 50
-        assert provider._crossfade_remainder == b""
-
     async def test_interrupted_stream_flushes_tail(self) -> None:
         """When stream is interrupted, tail buffer is flushed as-is."""
         provider = _make_provider()

@@ -20,11 +20,10 @@ from music_assistant.helpers.audio import (
     strip_silence,
 )
 
-# isort: off
 if TYPE_CHECKING:
     from music_assistant_models.media_items import AudioFormat
-    from provider.prebuffer import PreBuffer
-# isort: on
+
+    from .prebuffer import PreBuffer
 
 _HEAD_COLLECT_TIMEOUT = 10.0
 
