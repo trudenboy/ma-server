@@ -126,12 +126,18 @@ async def apply_crossfade(
     pcm_format: AudioFormat,
     duration_s: float,
     logger: logging.Logger,
+    *,
+    pre_stripped: bool = False,
 ) -> AsyncGenerator[bytes, None]:
     """Apply crossfade between outgoing tail and incoming head.
 
     Wraps MA's :class:`StandardCrossFade` with silence stripping and
     frame alignment on the fade-out part (same preprocessing as
     ``SmartFadesMixer.mix`` uses for ``STANDARD_CROSSFADE`` mode).
+
+    When *pre_stripped* is True the caller has already run ``strip_silence``
+    and ``align_audio_to_frame_boundary`` on *fade_out* — this avoids the
+    duplicate ffmpeg call.
 
     Raises :class:`CrossfadeNoiseError` if the first crossfade output
     chunk has RMS above the noise threshold, so the caller can fall
@@ -142,17 +148,19 @@ async def apply_crossfade(
     :param pcm_format: Audio format of both inputs and the output.
     :param duration_s: Crossfade duration in seconds.
     :param logger: Logger instance.
+    :param pre_stripped: Skip strip_silence if already done by the caller.
     """
-    original_len = len(fade_out)
-    fade_out = await strip_silence(fade_out, pcm_format=pcm_format, reverse=True)
-    fade_out = align_audio_to_frame_boundary(fade_out, pcm_format)
-    stripped_s = (original_len - len(fade_out)) / max(1, pcm_format.pcm_sample_size)
-    logger.debug(
-        "Crossfade strip_silence: %d→%d bytes (stripped %.2fs from tail)",
-        original_len,
-        len(fade_out),
-        stripped_s,
-    )
+    if not pre_stripped:
+        original_len = len(fade_out)
+        fade_out = await strip_silence(fade_out, pcm_format=pcm_format, reverse=True)
+        fade_out = align_audio_to_frame_boundary(fade_out, pcm_format)
+        stripped_s = (original_len - len(fade_out)) / max(1, pcm_format.pcm_sample_size)
+        logger.debug(
+            "Crossfade strip_silence: %d→%d bytes (stripped %.2fs from tail)",
+            original_len,
+            len(fade_out),
+            stripped_s,
+        )
 
     if len(fade_out) == 0:
         # Nothing left after stripping — yield fade_in in frame-aligned slices

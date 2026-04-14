@@ -22,6 +22,7 @@ from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedExcept
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
 
+from music_assistant.helpers.audio import align_audio_to_frame_boundary, strip_silence
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.throttle_retry import ThrottlerManager
 from music_assistant.models.plugin import PluginProvider, PluginSource
@@ -55,6 +56,7 @@ from .streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,
     PROBE_ARGS,
+    compute_rms_pct,
     log_first_chunk,
     make_pcm_format,
     pacing_args,
@@ -78,6 +80,9 @@ _PREBUFFER_LEAD_MS = 60_000
 
 # Crossfade guardrails matching MA server (audio.py:1488-1496)
 _MIN_CROSSFADE_S = 5
+
+# Head data (from prebuffer) with RMS above this is noise (white noise ≈ 57.7 %).
+_HEAD_NOISE_RMS_PCT = 50.0
 
 # Retry settings for transient Yandex API failures
 _API_MAX_RETRIES = 3
@@ -698,6 +703,9 @@ class YandexYnisonProvider(PluginProvider):
         If next_prebuffer is available and healthy, collects crossfade-
         duration worth of head bytes and mixes via MA's StandardCrossFade.
         Falls back to yielding tail as-is on any failure.
+
+        Silence is stripped from the tail BEFORE head collection so that
+        prebuffer data is not wasted when the tail is entirely silent.
         """
         if not tail_data:
             return
@@ -726,6 +734,32 @@ class YandexYnisonProvider(PluginProvider):
             yield tail_data
             return
 
+        # Strip trailing silence BEFORE collecting head bytes.
+        # If the tail is entirely silent, skip head collection to avoid
+        # wasting prebuffer data that would be yielded raw (noise risk).
+        original_len = len(tail_data)
+        stripped_tail = await strip_silence(tail_data, pcm_format=pcm_format, reverse=True)
+        stripped_tail = align_audio_to_frame_boundary(stripped_tail, pcm_format)
+        stripped_s = (original_len - len(stripped_tail)) / max(1, pcm_format.pcm_sample_size)
+        self.logger.debug(
+            "Crossfade: strip_silence %d→%d bytes (stripped %.2fs from tail)",
+            original_len,
+            len(stripped_tail),
+            stripped_s,
+        )
+
+        if len(stripped_tail) == 0:
+            self.logger.info(
+                "Crossfade: tail entirely silent after strip — skipping crossfade, "
+                "yielding original tail to preserve prebuffer data"
+            )
+            yield tail_data
+            return
+
+        # Cap crossfade at stripped tail duration
+        stripped_tail_s = len(stripped_tail) / max(1, pcm_format.pcm_sample_size)
+        crossfade_s = min(crossfade_s, stripped_tail_s)
+
         target_bytes = crossfade_bytes_for(crossfade_s, pcm_format)
         self.logger.debug(
             "Crossfade: collecting %d head bytes from next prebuffer %s",
@@ -745,20 +779,34 @@ class YandexYnisonProvider(PluginProvider):
             yield tail_data
             return
 
+        # Validate head_data is not noise (e.g. ffmpeg init garbage)
+        head_rms = compute_rms_pct(head_data, pcm_format)
+        if head_rms > _HEAD_NOISE_RMS_PCT:
+            self.logger.warning(
+                "Crossfade: head RMS=%.1f%% exceeds threshold %.0f%% — "
+                "discarding noisy head, yielding tail as-is",
+                head_rms,
+                _HEAD_NOISE_RMS_PCT,
+            )
+            yield tail_data
+            return
+
         self.logger.info(
-            "Crossfade: mixing %d tail + %d head bytes (%.1fs)",
-            len(tail_data),
+            "Crossfade: mixing %d tail + %d head bytes (%.1fs, head_rms=%.1f%%)",
+            len(stripped_tail),
             len(head_data),
             crossfade_s,
+            head_rms,
         )
 
         try:
             async for chunk in apply_crossfade(
-                fade_out=tail_data,
+                fade_out=stripped_tail,
                 fade_in=head_data,
                 pcm_format=pcm_format,
                 duration_s=crossfade_s,
                 logger=self.logger,
+                pre_stripped=True,
             ):
                 yield chunk
         except Exception:
@@ -766,7 +814,7 @@ class YandexYnisonProvider(PluginProvider):
                 "Crossfade failed, yielding tail + head separately",
                 exc_info=True,
             )
-            yield _pad_to_frame_boundary(tail_data, pcm_format)
+            yield _pad_to_frame_boundary(stripped_tail, pcm_format)
             yield _pad_to_frame_boundary(head_data, pcm_format)
             return
 

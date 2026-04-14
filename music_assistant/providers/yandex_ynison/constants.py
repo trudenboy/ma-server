@@ -56,3 +56,4 @@ MAX_RECONNECT_ATTEMPTS: Final[int] = 5
 
 # WebSocket timeouts
 WS_CONNECT_TIMEOUT: Final[float] = 15.0
+WS_HEARTBEAT: Final[float] = 30.0

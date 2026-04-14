@@ -2199,6 +2199,11 @@ def _make_mock_pcm_format(
     )
 
 
+def _align_passthrough(data: bytes, _fmt: Any) -> bytes:
+    """No-op stand-in for align_audio_to_frame_boundary in tests."""
+    return data
+
+
 @pytest.mark.asyncio
 class TestDoCrossfade:
     """Tests for YandexYnisonProvider._do_crossfade."""
@@ -2257,8 +2262,15 @@ class TestDoCrossfade:
         chunks = [c async for c in provider._do_crossfade(tail, cur_fmt)]
         assert chunks == [tail]
 
+    @patch(
+        "music_assistant.providers.yandex_ynison.provider.align_audio_to_frame_boundary",
+        side_effect=_align_passthrough,
+    )
+    @patch("music_assistant.providers.yandex_ynison.provider.strip_silence", new_callable=AsyncMock)
     @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
-    async def test_head_collection_failure_yields_tail(self, mock_collect: AsyncMock) -> None:
+    async def test_head_collection_failure_yields_tail(
+        self, mock_collect: AsyncMock, mock_strip: AsyncMock, mock_align: MagicMock
+    ) -> None:
         """Exception during head collection → yields tail as-is."""
         mock_collect.side_effect = RuntimeError("queue timeout")
         provider = _make_provider()
@@ -2272,11 +2284,19 @@ class TestDoCrossfade:
         provider._next_prebuffer = pb
 
         tail = b"\xff" * 100
+        mock_strip.return_value = tail
         chunks = [c async for c in provider._do_crossfade(tail, fmt)]
         assert chunks == [tail]
 
+    @patch(
+        "music_assistant.providers.yandex_ynison.provider.align_audio_to_frame_boundary",
+        side_effect=_align_passthrough,
+    )
+    @patch("music_assistant.providers.yandex_ynison.provider.strip_silence", new_callable=AsyncMock)
     @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
-    async def test_empty_head_yields_tail(self, mock_collect: AsyncMock) -> None:
+    async def test_empty_head_yields_tail(
+        self, mock_collect: AsyncMock, mock_strip: AsyncMock, mock_align: MagicMock
+    ) -> None:
         """Head collection returns empty → yields tail as-is."""
         mock_collect.return_value = (b"", False)
         provider = _make_provider()
@@ -2290,13 +2310,25 @@ class TestDoCrossfade:
         provider._next_prebuffer = pb
 
         tail = b"\xff" * 100
+        mock_strip.return_value = tail
         chunks = [c async for c in provider._do_crossfade(tail, fmt)]
         assert chunks == [tail]
 
+    @patch("music_assistant.providers.yandex_ynison.provider.compute_rms_pct", return_value=10.0)
+    @patch(
+        "music_assistant.providers.yandex_ynison.provider.align_audio_to_frame_boundary",
+        side_effect=_align_passthrough,
+    )
+    @patch("music_assistant.providers.yandex_ynison.provider.strip_silence", new_callable=AsyncMock)
     @patch("music_assistant.providers.yandex_ynison.provider.apply_crossfade")
     @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
     async def test_successful_crossfade(
-        self, mock_collect: AsyncMock, mock_apply: MagicMock
+        self,
+        mock_collect: AsyncMock,
+        mock_apply: MagicMock,
+        mock_strip: AsyncMock,
+        mock_align: MagicMock,
+        mock_rms: MagicMock,
     ) -> None:
         """Successful crossfade yields mixed audio chunks."""
         head = b"\xaa" * 200
@@ -2321,17 +2353,30 @@ class TestDoCrossfade:
         provider._next_prebuffer = pb
 
         tail = b"\xff" * 200
+        mock_strip.return_value = tail
         chunks = [c async for c in provider._do_crossfade(tail, fmt)]
         assert chunks == mixed_chunks
         mock_apply.assert_called_once()
         call_kw = mock_apply.call_args
         assert call_kw.kwargs["fade_out"] == tail
         assert call_kw.kwargs["fade_in"] == head
+        assert call_kw.kwargs["pre_stripped"] is True
 
+    @patch("music_assistant.providers.yandex_ynison.provider.compute_rms_pct", return_value=10.0)
+    @patch(
+        "music_assistant.providers.yandex_ynison.provider.align_audio_to_frame_boundary",
+        side_effect=_align_passthrough,
+    )
+    @patch("music_assistant.providers.yandex_ynison.provider.strip_silence", new_callable=AsyncMock)
     @patch("music_assistant.providers.yandex_ynison.provider.apply_crossfade")
     @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
     async def test_apply_failure_yields_tail_and_head(
-        self, mock_collect: AsyncMock, mock_apply: MagicMock
+        self,
+        mock_collect: AsyncMock,
+        mock_apply: MagicMock,
+        mock_strip: AsyncMock,
+        mock_align: MagicMock,
+        mock_rms: MagicMock,
     ) -> None:
         """apply_crossfade raises → yields frame-aligned tail + head."""
         head = b"\xaa" * 96  # 96 = 16 frames * 6 bytes/frame (24bit stereo)
@@ -2354,8 +2399,60 @@ class TestDoCrossfade:
         provider._next_prebuffer = pb
 
         tail = b"\xff" * 96
+        mock_strip.return_value = tail
         chunks = [c async for c in provider._do_crossfade(tail, fmt)]
         assert chunks == [tail, head]
+
+    async def test_tail_silent_after_strip_skips_head(self) -> None:
+        """When strip_silence removes all tail, skip head collection."""
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 100
+        # Real strip_silence removes synthetic data entirely
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail]
+
+    @patch("music_assistant.providers.yandex_ynison.provider.compute_rms_pct", return_value=60.0)
+    @patch(
+        "music_assistant.providers.yandex_ynison.provider.align_audio_to_frame_boundary",
+        side_effect=_align_passthrough,
+    )
+    @patch("music_assistant.providers.yandex_ynison.provider.strip_silence", new_callable=AsyncMock)
+    @patch("music_assistant.providers.yandex_ynison.provider.collect_crossfade_head")
+    async def test_noisy_head_rejected(
+        self,
+        mock_collect: AsyncMock,
+        mock_strip: AsyncMock,
+        mock_align: MagicMock,
+        mock_rms: MagicMock,
+    ) -> None:
+        """Head data with noise-level RMS → yields tail as-is."""
+        head = b"\xaa" * 200
+        mock_collect.return_value = (head, False)
+
+        provider = _make_provider()
+        provider._crossfade_duration_s = 5
+
+        fmt = _make_mock_pcm_format()
+        pb = MagicMock(spec=PreBuffer)
+        pb.error = None
+        pb.track_id = "next-track"
+        pb.output_format = fmt
+        provider._next_prebuffer = pb
+
+        tail = b"\xff" * 200
+        mock_strip.return_value = tail
+        chunks = [c async for c in provider._do_crossfade(tail, fmt)]
+        assert chunks == [tail]
+        mock_collect.assert_called_once()
 
 
 # ------------------------------------------------------------------

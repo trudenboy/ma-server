@@ -26,6 +26,7 @@ from .constants import (
     MAX_RECONNECT_ATTEMPTS,
     RECONNECT_DELAYS,
     WS_CONNECT_TIMEOUT,
+    WS_HEARTBEAT,
     YNISON_ORIGIN,
     YNISON_REDIRECT_URL,
     YNISON_STATE_PATH,
@@ -427,7 +428,9 @@ class YnisonClient:
 
         ws_timeout = aiohttp.ClientWSTimeout(ws_close=WS_CONNECT_TIMEOUT)
         try:
-            self._ws = await self._session.ws_connect(url, headers=headers, timeout=ws_timeout)
+            self._ws = await self._session.ws_connect(
+                url, headers=headers, timeout=ws_timeout, heartbeat=WS_HEARTBEAT
+            )
         except aiohttp.WSServerHandshakeError as err:
             if err.status in (401, 403):
                 raise LoginFailed("Ynison authentication failed — invalid token") from err
