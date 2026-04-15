@@ -1,19 +1,16 @@
 """PCM normalization helpers for Yandex Music audio streams.
 
-Contains format profiles, the AudioFormat factory, pacing-args builder,
-and first-chunk diagnostics used by both the direct streaming path and
-pre-buffering.
+Contains format profiles, the AudioFormat factory, and pacing-args builder.
 """
 
 from __future__ import annotations
 
-import struct
 from typing import Any
 
 from music_assistant_models.enums import ContentType
 from music_assistant_models.media_items import AudioFormat
 
-from .constants import PACING_REALTIME, PACING_UNLIMITED
+from .constants import PACING_UNLIMITED
 
 # PCM normalization profiles by YM quality tier.
 # Ensures MA's single ffmpeg receives a consistent format between tracks.
@@ -34,20 +31,12 @@ PCM_LOSSY_PARAMS: dict[str, Any] = {
     "channels": 2,
 }
 
-_SIGNED_24BIT_MAX = 0x800000
-_SIGNED_24BIT_RANGE = 0x1000000
-
 # Override MA's default probesize (8096) and analyzeduration (500000).
 # Flac-MP4 containers can have moov/stsd atoms beyond 8KB, and slow CDN
 # responses over pipe input may cause analyseduration timeouts — both of
 # which result in ffmpeg failing to detect the container and producing
 # garbage PCM (white noise).
 PROBE_ARGS: list[str] = ["-probesize", "65536", "-analyzeduration", "5000000"]
-
-# RMS thresholds for first-chunk diagnostics (fraction of max amplitude).
-# Pure white noise ≈ max/√3 ≈ 57.7%; anything above ~45% is suspicious.
-_RMS_WARN_PCT = 45.0
-_RMS_CRIT_PCT = 55.0
 
 
 def make_pcm_format(params: dict[str, Any]) -> AudioFormat:
@@ -58,92 +47,10 @@ def make_pcm_format(params: dict[str, Any]) -> AudioFormat:
 def pacing_args(mode: str) -> list[str]:
     """Return ffmpeg extra-input args for the chosen pacing mode.
 
-    readrate  - soft 1.1x throttle with 5 s burst (default)
-    realtime  - strict 1x via -re
+    realtime  - strict 1x via -re (default)
     unlimited - no rate limiting
     """
-    if mode == PACING_REALTIME:
-        return ["-re"]
     if mode == PACING_UNLIMITED:
         return []
-    # default: readrate
-    return ["-readrate", "1.1", "-readrate_initial_burst", "5"]
-
-
-def compute_rms_pct(chunk: bytes, fmt: AudioFormat) -> float:
-    """Compute RMS amplitude of the first 1024 samples as a percentage of max.
-
-    Returns a value in [0, 100].  Pure white noise ≈ 57.7%.
-    Returns -1.0 if the format is unsupported or the chunk is too small.
-    """
-    if not chunk:
-        return -1.0
-    sample_width = fmt.bit_depth // 8
-    if sample_width == 2:
-        pack_fmt = "<h"
-    elif sample_width == 3:
-        pack_fmt = None  # 24-bit needs manual unpacking
-    else:
-        return -1.0
-
-    n_samples = min(1024, len(chunk) // sample_width)
-    if n_samples == 0:
-        return -1.0
-
-    sum_sq = 0.0
-    for i in range(n_samples):
-        offset = i * sample_width
-        if pack_fmt:
-            (sample,) = struct.unpack_from(pack_fmt, chunk, offset)
-        else:
-            b = chunk[offset : offset + 3]
-            val = int.from_bytes(b, "little", signed=False)
-            if val >= _SIGNED_24BIT_MAX:
-                val -= _SIGNED_24BIT_RANGE
-            sample = val
-        sum_sq += sample * sample
-
-    rms = (sum_sq / n_samples) ** 0.5
-    max_val = (1 << (fmt.bit_depth - 1)) - 1
-    return (rms / max_val) * 100 if max_val else 0.0
-
-
-def log_first_chunk(logger: Any, chunk: bytes, fmt: AudioFormat) -> None:
-    """Log diagnostic info about the first chunk of a track stream.
-
-    Computes RMS amplitude of the first 1024 samples to help detect garbage
-    data (which appears as near-maximum amplitude white noise / hissing).
-    """
-    rms_pct = compute_rms_pct(chunk, fmt)
-    if rms_pct < 0:
-        logger.debug(
-            "First chunk: %d bytes (unsupported or too small for RMS, bit_depth=%d)",
-            len(chunk),
-            fmt.bit_depth,
-        )
-        return
-
-    max_val = (1 << (fmt.bit_depth - 1)) - 1
-    rms = rms_pct / 100 * max_val
-
-    if rms_pct > _RMS_CRIT_PCT:
-        log_fn = logger.critical
-    elif rms_pct > _RMS_WARN_PCT:
-        log_fn = logger.warning
-    else:
-        log_fn = logger.debug
-
-    log_fn(
-        "First chunk: %d bytes, RMS=%.0f (%.1f%% of max %d), fmt=%s/%dHz/%dbit",
-        len(chunk),
-        rms,
-        rms_pct,
-        max_val,
-        fmt.content_type.value,
-        fmt.sample_rate,
-        fmt.bit_depth,
-    )
-
-    if rms_pct > _RMS_WARN_PCT:
-        hex_preview = chunk[:32].hex(" ")
-        logger.warning("Suspect first chunk hex[0:32]: %s", hex_preview)
+    # default: realtime
+    return ["-re"]

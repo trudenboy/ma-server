@@ -20,14 +20,11 @@ CONF_MASS_PLAYER_ID: Final[str] = "mass_player_id"
 CONF_PUBLISH_NAME: Final[str] = "publish_name"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
 CONF_DEVICE_ID: Final[str] = "device_id"
-CONF_PREBUFFER_NEXT: Final[str] = "prebuffer_next_track"
-CONF_CROSSFADE_DURATION: Final[str] = "crossfade_duration"
 CONF_OUTPUT_SAMPLE_RATE: Final[str] = "output_sample_rate"
 CONF_OUTPUT_BIT_DEPTH: Final[str] = "output_bit_depth"
 CONF_FFMPEG_PACING: Final[str] = "ffmpeg_pacing"
 
 # ffmpeg pacing mode values
-PACING_READRATE: Final[str] = "readrate"
 PACING_REALTIME: Final[str] = "realtime"
 PACING_UNLIMITED: Final[str] = "unlimited"
 

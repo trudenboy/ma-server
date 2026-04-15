@@ -13,20 +13,17 @@ from .constants import (
     CONF_ACTION_AUTH_QR,
     CONF_ACTION_CLEAR_AUTH,
     CONF_ALLOW_PLAYER_SWITCH,
-    CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
     CONF_FFMPEG_PACING,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
-    CONF_PREBUFFER_NEXT,
     CONF_PUBLISH_NAME,
     CONF_REMEMBER_SESSION,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
     OUTPUT_AUTO,
-    PACING_READRATE,
     PACING_REALTIME,
     PACING_UNLIMITED,
     PLAYER_ID_AUTO,
@@ -201,27 +198,6 @@ async def get_config_entries(
             "configured default player.",
             default_value=True,
         ),
-        # Pre-buffer next track for gapless transition
-        ConfigEntry(
-            key=CONF_PREBUFFER_NEXT,
-            type=ConfigEntryType.BOOLEAN,
-            label="Pre-buffer next track",
-            description="When enabled, the next track in the queue is pre-buffered "
-            "60 seconds before the current track ends for near-gapless transition. "
-            "May increase network and memory usage.",
-            default_value=False,
-        ),
-        # Crossfade duration between tracks (0 = disabled)
-        ConfigEntry(
-            key=CONF_CROSSFADE_DURATION,
-            type=ConfigEntryType.INTEGER,
-            label="Crossfade duration (seconds)",
-            description="Duration of the crossfade between tracks in seconds. "
-            "Set to 0 to disable crossfade. Requires pre-buffering to be enabled.",
-            default_value=0,
-            range=(0, 10),
-            depends_on=CONF_PREBUFFER_NEXT,
-        ),
         # ffmpeg pacing mode for the inner per-track transcoder
         ConfigEntry(
             key=CONF_FFMPEG_PACING,
@@ -229,15 +205,12 @@ async def get_config_entries(
             label="FFmpeg pacing mode",
             description=(
                 "Controls how fast the inner per-track ffmpeg reads the source.\n"
-                "'Readrate 1.1x' - soft 1.1x throttle with 5 s burst (default, "
-                "recommended for most setups).\n"
-                "'Realtime (-re)' - strict 1x pacing, may add latency.\n"
+                "'Realtime (-re)' - strict 1x pacing (default, recommended).\n"
                 "'Unlimited' - no rate limiting, lowest latency but higher memory use."
             ),
-            default_value=PACING_READRATE,
+            default_value=PACING_REALTIME,
             options=[
-                ConfigValueOption("Readrate 1.1x + burst (recommended)", PACING_READRATE),
-                ConfigValueOption("Realtime (-re)", PACING_REALTIME),
+                ConfigValueOption("Realtime (-re) (recommended)", PACING_REALTIME),
                 ConfigValueOption("Unlimited", PACING_UNLIMITED),
             ],
             advanced=True,

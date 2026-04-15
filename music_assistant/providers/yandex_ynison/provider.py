@@ -22,42 +22,30 @@ from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedExcept
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
 
-from music_assistant.helpers.audio import align_audio_to_frame_boundary, strip_silence
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.throttle_retry import ThrottlerManager
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
 from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
-    CONF_CROSSFADE_DURATION,
     CONF_DEVICE_ID,
     CONF_FFMPEG_PACING,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
-    CONF_PREBUFFER_NEXT,
     CONF_PUBLISH_NAME,
     CONF_TOKEN,
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
     OUTPUT_AUTO,
-    PACING_READRATE,
+    PACING_REALTIME,
     PLAYER_ID_AUTO,
 )
-from .crossfade import (
-    TailBuffer,
-    apply_crossfade,
-    collect_crossfade_head,
-    crossfade_bytes_for,
-)
-from .prebuffer import PreBuffer, make_prebuffer, run_fill, yield_from_prebuffer
 from .protocols import YandexMusicProviderLike
 from .streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,
     PROBE_ARGS,
-    compute_rms_pct,
-    log_first_chunk,
     make_pcm_format,
     pacing_args,
 )
@@ -75,15 +63,6 @@ if TYPE_CHECKING:
 # How often (seconds) to sync progress to MA UI and Ynison.
 _PROGRESS_SYNC_INTERVAL = 5.0
 
-# Start prebuffering next track 60 s before end (MA server: audio.py:1370)
-_PREBUFFER_LEAD_MS = 60_000
-
-# Crossfade guardrails matching MA server (audio.py:1488-1496)
-_MIN_CROSSFADE_S = 5
-
-# Head data (from prebuffer) with RMS above this is noise (white noise ≈ 57.7 %).
-_HEAD_NOISE_RMS_PCT = 50.0
-
 # Retry settings for transient Yandex API failures
 _API_MAX_RETRIES = 3
 _API_INITIAL_BACKOFF = 2.0
@@ -91,17 +70,6 @@ _API_MAX_BACKOFF = 30.0
 
 # Cache TTL for stream details (seconds)
 _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
-
-
-def _pad_to_frame_boundary(data: bytes, pcm_format: AudioFormat) -> bytes:
-    """Pad *data* with silence to the next PCM frame boundary."""
-    frame_size = (pcm_format.bit_depth // 8) * pcm_format.channels
-    if frame_size <= 0:
-        return data
-    excess = len(data) % frame_size
-    if excess:
-        return data + b"\x00" * (frame_size - excess)
-    return data
 
 
 class YandexYnisonProvider(PluginProvider):
@@ -131,14 +99,6 @@ class YandexYnisonProvider(PluginProvider):
         self._allow_player_switch: bool = (
             cast("bool", allow_switch_value) if allow_switch_value is not None else True
         )
-        prebuffer_next_value = self.config.get_value(CONF_PREBUFFER_NEXT)
-        self._prebuffer_next_enabled: bool = (
-            cast("bool", prebuffer_next_value) if prebuffer_next_value is not None else False
-        )
-        crossfade_value = self.config.get_value(CONF_CROSSFADE_DURATION)
-        self._crossfade_duration_s: int = (
-            cast("int", crossfade_value) if crossfade_value is not None else 0
-        )
         self._cfg_sample_rate: str = (
             cast("str", self.config.get_value(CONF_OUTPUT_SAMPLE_RATE)) or OUTPUT_AUTO
         )
@@ -149,7 +109,7 @@ class YandexYnisonProvider(PluginProvider):
             cast("str", self.config.get_value(CONF_PUBLISH_NAME)) or DEFAULT_DISPLAY_NAME
         )
         self._ffmpeg_pacing: str = (
-            cast("str", self.config.get_value(CONF_FFMPEG_PACING)) or PACING_READRATE
+            cast("str", self.config.get_value(CONF_FFMPEG_PACING)) or PACING_REALTIME
         )
 
         # Device ID — persist in config so re-registration uses the same ID
@@ -172,8 +132,6 @@ class YandexYnisonProvider(PluginProvider):
         self._seek_grace_until: float = 0.0
         self._last_player_update_time: float = 0.0
         self._actual_duration_ms: int = 0
-        self._prebuffer: PreBuffer | None = None
-        self._next_prebuffer: PreBuffer | None = None
         self._prefetched_list: list[dict[str, Any]] | None = None
         self._prefetch_task: asyncio.Task[Any] | None = None
         self._normalized_params: dict[str, Any] = PCM_LOSSY_PARAMS
@@ -240,13 +198,6 @@ class YandexYnisonProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
-        if self._next_prebuffer:
-            await self._next_prebuffer.cancel()
-            self._next_prebuffer = None
-        if self._prebuffer:
-            await self._prebuffer.cancel()
-            self._prebuffer = None
-
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -336,178 +287,29 @@ class YandexYnisonProvider(PluginProvider):
                     await self.mass.players.cmd_stop(player_id)
                 return
 
-            # Stream the current track — use prebuffer if available
+            # Stream the current track
             seek_ms = self._seek_position_ms
             self._seek_position_ms = 0
             bytes_yielded = 0
             self._streaming_progress_ms = seek_ms
             last_progress_sync = time.monotonic()
 
-            # Promote next-track prebuffer if it matches
-            if (
-                self._next_prebuffer
-                and self._next_prebuffer.track_id == track_id
-                and seek_ms <= 1000
-                and self._next_prebuffer.seek_ms == 0
-                and not self._next_prebuffer.error
+            track_fmt = make_pcm_format(session_params)
+            async for chunk in self._stream_track(
+                track_id, seek_ms=seek_ms, session_params=session_params
             ):
-                # Verify the prebuffer was encoded with the SESSION format
-                pb_fmt = self._next_prebuffer.output_format
-                cur_fmt = session_fmt
+                yield chunk
+                bytes_yielded += len(chunk)
+                now_mono = time.monotonic()
+                if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
+                    last_progress_sync = now_mono
+                    await self._sync_progress(seek_ms, bytes_yielded, player_id, session_fmt)
                 if (
-                    pb_fmt.content_type != cur_fmt.content_type
-                    or pb_fmt.sample_rate != cur_fmt.sample_rate
-                    or pb_fmt.bit_depth != cur_fmt.bit_depth
+                    self._track_changed_event.is_set()
+                    or self._stream_stop_event.is_set()
+                    or self._source_details.in_use_by != player_id
                 ):
-                    self.logger.warning(
-                        "Next-prebuffer format mismatch: %s/%dHz/%dbit vs expected %s/%dHz/%dbit"
-                        " — discarding prebuffer",
-                        pb_fmt.content_type.value,
-                        pb_fmt.sample_rate,
-                        pb_fmt.bit_depth,
-                        cur_fmt.content_type.value,
-                        cur_fmt.sample_rate,
-                        cur_fmt.bit_depth,
-                    )
-                    await self._next_prebuffer.cancel()
-                    self._next_prebuffer = None
-                else:
-                    if self._prebuffer:
-                        await self._prebuffer.cancel()
-                    self._prebuffer = self._next_prebuffer
-                    self._next_prebuffer = None
-                    seek_ms = 0
-                    self._streaming_progress_ms = 0
-                    # Update metadata now that this is the active track
-                    if self._prebuffer.stream_details:
-                        await self._update_metadata_from_stream(self._prebuffer.stream_details, 0)
-
-            if (
-                self._prebuffer
-                and self._prebuffer.track_id == track_id
-                and self._prebuffer.seek_ms == seek_ms
-                and not self._prebuffer.error
-            ):
-                # Validate format even for direct prebuffer hits
-                pb_fmt = self._prebuffer.output_format
-                cur_fmt = session_fmt
-                format_ok = (
-                    pb_fmt.content_type == cur_fmt.content_type
-                    and pb_fmt.sample_rate == cur_fmt.sample_rate
-                    and pb_fmt.bit_depth == cur_fmt.bit_depth
-                )
-                if not format_ok:
-                    self.logger.warning(
-                        "Prebuffer format mismatch: %s/%dHz/%dbit vs expected %s/%dHz/%dbit"
-                        " — falling back to direct stream",
-                        pb_fmt.content_type.value,
-                        pb_fmt.sample_rate,
-                        pb_fmt.bit_depth,
-                        cur_fmt.content_type.value,
-                        cur_fmt.sample_rate,
-                        cur_fmt.bit_depth,
-                    )
-                    await self._prebuffer.cancel()
-                    self._prebuffer = None
-                    # Fall through to direct stream below
-
-            if (
-                self._prebuffer
-                and self._prebuffer.track_id == track_id
-                and self._prebuffer.seek_ms == seek_ms
-                and not self._prebuffer.error
-            ):
-                # Prebuffer hit — data is already loading/ready
-                track_fmt = self._prebuffer.output_format
-                self.logger.debug(
-                    "Using prebuffer for track %s (fmt=%s/%dHz, queued=%d)",
-                    track_id,
-                    self._prebuffer.output_format.content_type.value,
-                    self._prebuffer.output_format.sample_rate,
-                    self._prebuffer.chunks_queued,
-                )
-
-                use_crossfade = self._crossfade_duration_s > 0 and self._prebuffer_next_enabled
-                tail_buf: TailBuffer | None = None
-                effective_cf_s = 0.0
-                if use_crossfade:
-                    # Apply MA guardrails: cap at half the track duration,
-                    # skip if the effective value is too short to be meaningful.
-                    effective_cf_s = float(self._crossfade_duration_s)
-                    sd = self._prebuffer.stream_details
-                    if sd and sd.duration and isinstance(sd.duration, (int, float)):
-                        effective_cf_s = min(effective_cf_s, sd.duration / 2.0)
-                    if effective_cf_s < _MIN_CROSSFADE_S:
-                        effective_cf_s = 0.0
-                    if effective_cf_s > 0:
-                        cf_bytes = crossfade_bytes_for(effective_cf_s, track_fmt)
-                        if cf_bytes > 0:
-                            tail_buf = TailBuffer(cf_bytes)
-
-                interrupted = False
-                chunk_idx = 0
-                async for chunk in self._yield_from_prebuffer():
-                    if chunk_idx == 0:
-                        log_first_chunk(self.logger, chunk, self._prebuffer.output_format)
-                    chunk_idx += 1
-
-                    if tail_buf is not None:
-                        overflow = tail_buf.push(chunk)
-                        if overflow:
-                            yield overflow
-                            bytes_yielded += len(overflow)
-                    else:
-                        yield chunk
-                        bytes_yielded += len(chunk)
-
-                    now_mono = time.monotonic()
-                    if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
-                        last_progress_sync = now_mono
-                        await self._sync_progress(seek_ms, bytes_yielded, player_id, session_fmt)
-                    if (
-                        self._track_changed_event.is_set()
-                        or self._stream_stop_event.is_set()
-                        or self._source_details.in_use_by != player_id
-                    ):
-                        interrupted = True
-                        break
-
-                # Crossfade: mix tail with head of next track
-                if tail_buf is not None and not interrupted:
-                    tail_data = tail_buf.flush()
-                    async for chunk in self._do_crossfade(tail_data, track_fmt, effective_cf_s):
-                        yield chunk
-                        bytes_yielded += len(chunk)
-                elif tail_buf is not None:
-                    # Interrupted — flush tail as-is (no crossfade)
-                    tail_data = tail_buf.flush()
-                    if tail_data:
-                        yield tail_data
-                        bytes_yielded += len(tail_data)
-            else:
-                # Prebuffer miss — stream directly (fallback)
-                track_fmt = make_pcm_format(session_params)
-                if self._prebuffer and self._prebuffer.track_id != track_id:
-                    self.logger.debug(
-                        "Prebuffer miss: have %s, need %s",
-                        self._prebuffer.track_id,
-                        track_id,
-                    )
-                async for chunk in self._stream_track(
-                    track_id, seek_ms=seek_ms, session_params=session_params
-                ):
-                    yield chunk
-                    bytes_yielded += len(chunk)
-                    now_mono = time.monotonic()
-                    if now_mono - last_progress_sync >= _PROGRESS_SYNC_INTERVAL:
-                        last_progress_sync = now_mono
-                        await self._sync_progress(seek_ms, bytes_yielded, player_id, session_fmt)
-                    if (
-                        self._track_changed_event.is_set()
-                        or self._stream_stop_event.is_set()
-                        or self._source_details.in_use_by != player_id
-                    ):
-                        break
+                    break
 
             # Align to PCM frame boundary — prevents misalignment in MA's
             # downstream ffmpeg when a track stream is interrupted mid-chunk.
@@ -523,17 +325,6 @@ class YandexYnisonProvider(PluginProvider):
             # trigger a false track-change detection in _activate_playback.
 
             if self._stream_stop_event.is_set():
-                self._current_streaming_track_id = None
-                break
-
-            # If prebuffer ended due to an error, don't treat as natural
-            # track end — abort instead of desyncing Ynison queue state.
-            if self._prebuffer and self._prebuffer.error:
-                self.logger.warning(
-                    "Stream aborted for track %s: prebuffer error: %s",
-                    track_id,
-                    self._prebuffer.error,
-                )
                 self._current_streaming_track_id = None
                 break
 
@@ -588,7 +379,7 @@ class YandexYnisonProvider(PluginProvider):
 
         *session_params* — frozen format dict from the enclosing
         ``get_audio_stream()`` session.  Falls back to the current
-        ``_normalized_params`` when called outside a session (e.g. prebuffer).
+        ``_normalized_params`` when called outside a session.
         """
         try:
             stream_details = await self._get_stream_details_with_retry(track_id)
@@ -613,7 +404,6 @@ class YandexYnisonProvider(PluginProvider):
             stream_details.audio_format,
             seek_ms,
         )
-        chunk_idx = 0
         assert self._yandex_provider is not None  # guarded by _ensure_yandex_provider
         async for chunk in get_ffmpeg_stream(
             audio_input=self._yandex_provider.get_audio_stream(stream_details),
@@ -621,9 +411,6 @@ class YandexYnisonProvider(PluginProvider):
             output_format=out_fmt,
             extra_input_args=extra_input_args,
         ):
-            if chunk_idx == 0:
-                log_first_chunk(self.logger, chunk, out_fmt)
-            chunk_idx += 1
             yield chunk
 
     async def _get_stream_details_with_retry(
@@ -692,241 +479,6 @@ class YandexYnisonProvider(PluginProvider):
         cache_key = f"ynison_sd_{track_id}"
         await self.mass.cache.delete(cache_key, provider=self.instance_id)
         self.logger.debug("Invalidated stream cache for %s", track_id)
-
-    # ------------------------------------------------------------------
-    # Crossfade
-    # ------------------------------------------------------------------
-
-    async def _do_crossfade(
-        self,
-        tail_data: bytes,
-        pcm_format: AudioFormat,
-        crossfade_s: float = 0.0,
-    ) -> AsyncGenerator[bytes, None]:
-        """Attempt crossfade between tail of current track and head of next.
-
-        If next_prebuffer is available and healthy, collects crossfade-
-        duration worth of head bytes and mixes via MA's StandardCrossFade.
-        Falls back to yielding tail as-is on any failure.
-
-        Silence is stripped from the tail BEFORE head collection so that
-        prebuffer data is not wasted when the tail is entirely silent.
-        """
-        if not tail_data:
-            return
-
-        if crossfade_s <= 0:
-            crossfade_s = float(self._crossfade_duration_s)
-
-        next_pb = self._next_prebuffer
-        if not next_pb or next_pb.error:
-            self.logger.debug("Crossfade: no next prebuffer, yielding tail as-is")
-            yield tail_data
-            return
-
-        # Verify format compatibility
-        nf = next_pb.output_format
-        if (
-            nf.content_type != pcm_format.content_type
-            or nf.sample_rate != pcm_format.sample_rate
-            or nf.bit_depth != pcm_format.bit_depth
-        ):
-            self.logger.debug(
-                "Crossfade: format mismatch (%s vs %s), yielding tail as-is",
-                pcm_format.content_type.value,
-                nf.content_type.value,
-            )
-            yield tail_data
-            return
-
-        # Strip trailing silence BEFORE collecting head bytes.
-        # If the tail is entirely silent, skip head collection to avoid
-        # wasting prebuffer data that would be yielded raw (noise risk).
-        original_len = len(tail_data)
-        stripped_tail = await strip_silence(tail_data, pcm_format=pcm_format, reverse=True)
-        stripped_tail = align_audio_to_frame_boundary(stripped_tail, pcm_format)
-        stripped_s = (original_len - len(stripped_tail)) / max(1, pcm_format.pcm_sample_size)
-        self.logger.debug(
-            "Crossfade: strip_silence %d→%d bytes (stripped %.2fs from tail)",
-            original_len,
-            len(stripped_tail),
-            stripped_s,
-        )
-
-        if len(stripped_tail) == 0:
-            self.logger.info(
-                "Crossfade: tail entirely silent after strip — skipping crossfade, "
-                "yielding original tail to preserve prebuffer data"
-            )
-            yield tail_data
-            return
-
-        # Cap crossfade at stripped tail duration
-        stripped_tail_s = len(stripped_tail) / max(1, pcm_format.pcm_sample_size)
-        crossfade_s = min(crossfade_s, stripped_tail_s)
-
-        target_bytes = crossfade_bytes_for(crossfade_s, pcm_format)
-        self.logger.debug(
-            "Crossfade: collecting %d head bytes from next prebuffer %s",
-            target_bytes,
-            next_pb.track_id,
-        )
-
-        try:
-            head_data, _eof = await collect_crossfade_head(next_pb, target_bytes=target_bytes)
-        except Exception:
-            self.logger.warning("Crossfade: head collection failed", exc_info=True)
-            yield tail_data
-            return
-
-        if len(head_data) == 0:
-            self.logger.debug("Crossfade: no head data available, yielding tail as-is")
-            yield tail_data
-            return
-
-        # Validate head_data is not noise (e.g. ffmpeg init garbage)
-        head_rms = compute_rms_pct(head_data, pcm_format)
-        if head_rms > _HEAD_NOISE_RMS_PCT:
-            self.logger.warning(
-                "Crossfade: head RMS=%.1f%% exceeds threshold %.0f%% — "
-                "discarding noisy head, yielding tail as-is",
-                head_rms,
-                _HEAD_NOISE_RMS_PCT,
-            )
-            yield tail_data
-            return
-
-        self.logger.info(
-            "Crossfade: mixing %d tail + %d head bytes (%.1fs, head_rms=%.1f%%)",
-            len(stripped_tail),
-            len(head_data),
-            crossfade_s,
-            head_rms,
-        )
-
-        try:
-            async for chunk in apply_crossfade(
-                fade_out=stripped_tail,
-                fade_in=head_data,
-                pcm_format=pcm_format,
-                duration_s=crossfade_s,
-                logger=self.logger,
-                pre_stripped=True,
-            ):
-                yield chunk
-        except Exception:
-            self.logger.warning(
-                "Crossfade failed, yielding tail + head separately",
-                exc_info=True,
-            )
-            yield _pad_to_frame_boundary(stripped_tail, pcm_format)
-            yield _pad_to_frame_boundary(head_data, pcm_format)
-            return
-
-        # StandardCrossFade already yields post-crossfade bytes, so we
-        # only need the remaining queue data from next_prebuffer.
-        # The queue still has unconsumed chunks — they'll be picked up
-        # when next_prebuffer is promoted to _prebuffer in the next
-        # loop iteration.
-
-    # ------------------------------------------------------------------
-    # Pre-buffer
-    # ------------------------------------------------------------------
-
-    async def _start_prebuffer(self, track_id: str, seek_ms: int = 0) -> None:
-        """Start pre-buffering a track into an asyncio.Queue.
-
-        Called immediately on track change from Ynison — before the player
-        HTTP GET arrives. When get_audio_stream runs, it checks if a matching
-        prebuffer exists and yields from the queue instead of calling the API.
-        """
-        if self._prebuffer:
-            await self._prebuffer.cancel()
-
-        fmt = make_pcm_format(self._normalized_params)
-        prebuffer = make_prebuffer(track_id=track_id, seek_ms=seek_ms, output_format=fmt)
-        self._prebuffer = prebuffer
-
-        assert self._yandex_provider is not None  # guarded by _ensure_yandex_provider
-        prebuffer.task = self.mass.create_task(
-            run_fill(
-                prebuffer=prebuffer,
-                get_stream_details=self._get_stream_details_with_retry,
-                get_audio_stream=self._yandex_provider.get_audio_stream,
-                output_format=fmt,
-                logger=self.logger,
-                on_stream_details=self._update_metadata_from_stream,
-                pacing_mode=self._ffmpeg_pacing,
-                invalidate_cache=self._invalidate_stream_cache,
-            )
-        )
-
-    async def _yield_from_prebuffer(self) -> AsyncGenerator[bytes, None]:
-        """Yield chunks from the active prebuffer queue until EOF sentinel."""
-        prebuffer = self._prebuffer
-        assert prebuffer is not None
-        async for chunk in yield_from_prebuffer(prebuffer):
-            yield chunk
-
-    async def _start_next_prebuffer(self, track_id: str) -> None:
-        """Pre-buffer the NEXT track while the current one is still playing.
-
-        Uses a separate _next_prebuffer slot so the current track's prebuffer
-        is not interrupted.  Promoted to _prebuffer in get_audio_stream when
-        the track transition actually happens.
-        """
-        if self._next_prebuffer:
-            await self._next_prebuffer.cancel()
-
-        if self._yandex_provider is None:
-            raise RuntimeError("Yandex Music provider not available")
-
-        fmt = make_pcm_format(self._normalized_params)
-        prebuffer = make_prebuffer(track_id=track_id, seek_ms=0, output_format=fmt)
-        self._next_prebuffer = prebuffer
-
-        prebuffer.task = self.mass.create_task(
-            run_fill(
-                prebuffer=prebuffer,
-                get_stream_details=self._get_stream_details_with_retry,
-                get_audio_stream=self._yandex_provider.get_audio_stream,
-                output_format=fmt,
-                logger=self.logger,
-                pacing_mode=self._ffmpeg_pacing,
-                invalidate_cache=self._invalidate_stream_cache,
-            )
-        )
-
-    def _maybe_prebuffer_next(
-        self,
-        current_index: int,
-        playable_list: list[dict[str, Any]],
-        state: YnisonState,
-    ) -> None:
-        """Start pre-buffering next track 60 s before end (MA convention)."""
-        if not self._yandex_provider or not self._current_streaming_track_id:
-            return
-        duration = self._best_duration_ms()
-        if duration <= 0:
-            return
-        threshold_ms = max(0, duration - _PREBUFFER_LEAD_MS)
-        if state.progress_ms < threshold_ms:
-            return
-        next_index = current_index + 1
-        if next_index >= len(playable_list):
-            return
-        next_track_id = playable_list[next_index].get("playable_id", "")
-        if not next_track_id:
-            return
-        # Already have a next-prebuffer for this track
-        if self._next_prebuffer and self._next_prebuffer.track_id == next_track_id:
-            return
-        self.logger.info(
-            "Pre-buffering audio for next track %s (%.0fs before end)",
-            next_track_id,
-            (duration - state.progress_ms) / 1000.0,
-        )
-        self.mass.create_task(self._start_next_prebuffer(next_track_id))
 
     # ------------------------------------------------------------------
     # Token handling
@@ -1006,9 +558,6 @@ class YandexYnisonProvider(PluginProvider):
         if is_our_device and not state.is_paused:
             # Pre-fetch next batch when playing second-to-last track
             self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
-            # Pre-buffer next track audio at ~80% progress for gapless transition
-            if self._prebuffer_next_enabled:
-                self._maybe_prebuffer_next(current_index, playable_list, state)
             await self._activate_playback(state)
         elif is_our_device and state.is_paused:
             # Our device but paused — stop player, keep association
@@ -1051,16 +600,6 @@ class YandexYnisonProvider(PluginProvider):
             # track change — Ynison echoes can report stale progress that
             # looks like a large drift.
             self._seek_grace_until = time.monotonic() + 5.0
-            # Start prebuffering immediately — before the player HTTP GET
-            # Skip if _next_prebuffer already has this track pre-loaded.
-            if self._yandex_provider:
-                has_next = (
-                    self._next_prebuffer
-                    and self._next_prebuffer.track_id == new_track
-                    and not self._next_prebuffer.error
-                )
-                if not has_next:
-                    self.mass.create_task(self._start_prebuffer(new_track, state.progress_ms))
         elif new_track and new_track == self._current_streaming_track_id:
             # Same-track resume after pause: explicitly seek to the Ynison position
             # so the new stream starts at the right offset.
@@ -1373,12 +912,6 @@ class YandexYnisonProvider(PluginProvider):
         self._prefetched_list = None
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
-        if self._prebuffer:
-            self.mass.create_task(self._prebuffer.cancel())
-            self._prebuffer = None
-        if self._next_prebuffer:
-            self.mass.create_task(self._next_prebuffer.cancel())
-            self._next_prebuffer = None
 
         if prev_player_id:
             self.logger.debug(
@@ -1823,7 +1356,3 @@ class YandexYnisonProvider(PluginProvider):
         self._seek_position_ms = seek_ms
         self._seek_grace_until = time.monotonic() + 5.0
         self._track_changed_event.set()
-        # Cancel prebuffer — seek changes the stream position
-        if self._prebuffer:
-            self.mass.create_task(self._prebuffer.cancel())
-            self._prebuffer = None
