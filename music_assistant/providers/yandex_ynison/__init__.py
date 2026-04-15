@@ -14,7 +14,6 @@ from .constants import (
     CONF_ACTION_CLEAR_AUTH,
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
-    CONF_FFMPEG_PACING,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
@@ -24,8 +23,6 @@ from .constants import (
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
     OUTPUT_AUTO,
-    PACING_REALTIME,
-    PACING_UNLIMITED,
     PLAYER_ID_AUTO,
 )
 from .provider import YandexYnisonProvider
@@ -197,23 +194,6 @@ async def get_config_entries(
             "to switch playback to that player. When disabled, playback is fixed to the "
             "configured default player.",
             default_value=True,
-        ),
-        # ffmpeg pacing mode for the inner per-track transcoder
-        ConfigEntry(
-            key=CONF_FFMPEG_PACING,
-            type=ConfigEntryType.STRING,
-            label="FFmpeg pacing mode",
-            description=(
-                "Controls how fast the inner per-track ffmpeg reads the source.\n"
-                "'Realtime (-re)' - strict 1x pacing (default, recommended).\n"
-                "'Unlimited' - no rate limiting, lowest latency but higher memory use."
-            ),
-            default_value=PACING_REALTIME,
-            options=[
-                ConfigValueOption("Realtime (-re) (recommended)", PACING_REALTIME),
-                ConfigValueOption("Unlimited", PACING_UNLIMITED),
-            ],
-            advanced=True,
         ),
         # Output sample rate
         ConfigEntry(

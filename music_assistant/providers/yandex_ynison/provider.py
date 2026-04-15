@@ -29,7 +29,6 @@ from music_assistant.models.plugin import PluginProvider, PluginSource
 from .constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
-    CONF_FFMPEG_PACING,
     CONF_MASS_PLAYER_ID,
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
@@ -38,7 +37,6 @@ from .constants import (
     CONF_X_TOKEN,
     DEFAULT_DISPLAY_NAME,
     OUTPUT_AUTO,
-    PACING_REALTIME,
     PLAYER_ID_AUTO,
 )
 from .protocols import YandexMusicProviderLike
@@ -107,9 +105,6 @@ class YandexYnisonProvider(PluginProvider):
         )
         self._display_name: str = (
             cast("str", self.config.get_value(CONF_PUBLISH_NAME)) or DEFAULT_DISPLAY_NAME
-        )
-        self._ffmpeg_pacing: str = (
-            cast("str", self.config.get_value(CONF_FFMPEG_PACING)) or PACING_REALTIME
         )
 
         # Device ID — persist in config so re-registration uses the same ID
@@ -390,7 +385,7 @@ class YandexYnisonProvider(PluginProvider):
 
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
-        extra_input_args = PROBE_ARGS + pacing_args(self._ffmpeg_pacing)
+        extra_input_args = PROBE_ARGS + pacing_args()
         if seek_ms > 0:
             extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 

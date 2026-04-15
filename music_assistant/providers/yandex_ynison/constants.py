@@ -26,7 +26,6 @@ CONF_FFMPEG_PACING: Final[str] = "ffmpeg_pacing"
 
 # ffmpeg pacing mode values
 PACING_REALTIME: Final[str] = "realtime"
-PACING_UNLIMITED: Final[str] = "unlimited"
 
 # Special value for "auto" config options
 OUTPUT_AUTO: Final[str] = "auto"
