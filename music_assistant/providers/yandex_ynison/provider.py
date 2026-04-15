@@ -399,7 +399,7 @@ class YandexYnisonProvider(PluginProvider):
             stream_details.audio_format,
             seek_ms,
         )
-        assert self._yandex_provider is not None  # guarded by _ensure_yandex_provider
+        assert self._yandex_provider is not None  # guarded by get_audio_stream
         async for chunk in get_ffmpeg_stream(
             audio_input=self._yandex_provider.get_audio_stream(stream_details),
             input_format=stream_details.audio_format,
