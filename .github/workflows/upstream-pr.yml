@@ -16,7 +16,6 @@ on:
           - yandex_smarthome
           - yandex_ynison
           - dlna_receiver
-          - ncloud_music
       version:
         description: "Provider release version (e.g. 1.2.0)"
         required: true
@@ -58,7 +57,6 @@ jobs:
             yandex_smarthome) PROVIDER_REPO="trudenboy/ma-provider-yandex-smarthome"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Smart Home" ;;
             yandex_ynison) PROVIDER_REPO="trudenboy/ma-provider-yandex-ynison"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music Connect (Ynison)" ;;
             dlna_receiver) PROVIDER_REPO="trudenboy/ma-provider-dlna-receiver"; PROVIDER_PATH="provider/"; DISPLAY_NAME="DLNA Receiver" ;;
-            ncloud_music) PROVIDER_REPO="trudenboy/ma-provider-ncloud-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="NetEase Cloud Music" ;;
             *) echo "Unknown domain: ${{ inputs.domain }}"; exit 1 ;;
           esac
           echo "PROVIDER_REPO=$PROVIDER_REPO" >> $GITHUB_ENV
