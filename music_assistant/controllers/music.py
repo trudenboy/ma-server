@@ -70,6 +70,7 @@ from music_assistant.constants import (
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
     DEFAULT_GENRE_MAPPING,
+    LOUDNESS_MEASUREMENT_MIN_LUFS,
     PROVIDERS_WITH_SHAREABLE_URLS,
 )
 from music_assistant.controllers.streams.smart_fades.fades import SMART_CROSSFADE_DURATION
@@ -684,12 +685,14 @@ class MusicController(CoreController):
 
         # An audiobook can be part of the library, in contrast to podcast episodes.
         # We then need to check the provider mappings table.
+        one_week_ago = int(utc_timestamp()) - (7 * 86400)
         query = (
             "SELECT p.item_id, p.media_type, p.name, p.image, p.provider "
             f"FROM {DB_TABLE_PLAYLOG} p "
             "WHERE p.media_type IN ('audiobook', 'podcast_episode') "
             "AND p.fully_played = 0 "
             "AND p.seconds_played > 0 "
+            f"AND (p.media_type != 'podcast_episode' OR p.timestamp >= {one_week_ago}) "
         )
         query += (
             "AND ( "
@@ -1104,8 +1107,8 @@ class MusicController(CoreController):
         """Store (EBU-R128) Integrated Loudness Measurement for a mediaitem in db."""
         if not (provider := self.mass.get_provider(provider_instance_id_or_domain)):
             return
-        if loudness in (None, inf, -inf):
-            # skip invalid values
+        if loudness in (None, inf, -inf) or loudness <= LOUDNESS_MEASUREMENT_MIN_LUFS:
+            # skip invalid or unreliable values (ebur128 reports -70 LUFS on near-silence)
             return
         # prefer domain for streaming providers as the catalog is the same across instances
         prov_key = provider.domain if provider.is_streaming_provider else provider.instance_id
@@ -1115,7 +1118,10 @@ class MusicController(CoreController):
             "provider": prov_key,
             "loudness": loudness,
         }
-        if album_loudness not in (None, inf, -inf):
+        if (
+            album_loudness not in (None, inf, -inf)
+            and album_loudness > LOUDNESS_MEASUREMENT_MIN_LUFS
+        ):
             values["loudness_album"] = album_loudness
         await self.database.insert_or_replace(DB_TABLE_LOUDNESS_MEASUREMENTS, values)
 

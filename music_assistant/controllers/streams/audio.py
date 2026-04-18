@@ -58,6 +58,7 @@ from music_assistant.constants import (
     CONF_VOLUME_NORMALIZATION_FIXED_GAIN_TRACKS,
     CONF_VOLUME_NORMALIZATION_TARGET,
     INTERNAL_PCM_FORMAT,
+    LOUDNESS_MEASUREMENT_MIN_LUFS,
     MASS_LOGGER_NAME,
     VERBOSE_LOG_LEVEL,
 )
@@ -261,10 +262,10 @@ class StreamsAudio:
                 streamdetails.loudness = result[0]
                 streamdetails.loudness_album = result[1]
 
-        if not streamdetails.duration:
+        if streamdetails.duration is None:
             if queue_item.media_item and queue_item.media_item.duration:
                 streamdetails.duration = queue_item.media_item.duration
-            else:
+            elif queue_item.duration:
                 streamdetails.duration = queue_item.duration
         if seek_position and (not streamdetails.allow_seek or not streamdetails.duration):
             self.logger.warning("seeking is not possible on duration-less streams!")
@@ -865,7 +866,8 @@ class StreamsAudio:
         self,
         audio_buffer: AudioBuffer,
         streamdetails: StreamDetails,
-        max_duration_seconds: int = 120,
+        max_duration_seconds: int = 600,
+        min_duration_seconds: int = 10,
     ) -> None:
         """
         Attach a loudness measurement job to an AudioBuffer.
@@ -877,6 +879,7 @@ class StreamsAudio:
         :param audio_buffer: The AudioBuffer to observe.
         :param streamdetails: Stream details for the track being buffered.
         :param max_duration_seconds: Maximum seconds of audio to analyze.
+        :param min_duration_seconds: Minimum seconds of audio required to persist the result.
         """
         item_id = streamdetails.item_id
         provider = streamdetails.provider
@@ -921,6 +924,17 @@ class StreamsAudio:
                     loglevel="info",
                 ) as ffmpeg_proc:
                     await ffmpeg_proc.wait()
+
+                    if chunks_received < min_duration_seconds:
+                        self.logger.debug(
+                            "Loudness analysis for %s skipped: "
+                            "insufficient audio data (%s/%s seconds analyzed)",
+                            streamdetails.uri,
+                            chunks_received,
+                            min_duration_seconds,
+                        )
+                        return
+
                     log_lines_str = "\n".join(ffmpeg_proc.log_history)
                     try:
                         loudness_str = (
@@ -933,6 +947,16 @@ class StreamsAudio:
                         self.logger.debug(
                             "Could not determine loudness of %s from buffer analysis",
                             streamdetails.uri,
+                        )
+                        return
+
+                    if loudness <= LOUDNESS_MEASUREMENT_MIN_LUFS:
+                        self.logger.debug(
+                            "Loudness measurement for %s discarded: "
+                            "%s LUFS is below the reliability threshold (%s LUFS)",
+                            streamdetails.uri,
+                            loudness,
+                            LOUDNESS_MEASUREMENT_MIN_LUFS,
                         )
                         return
 
@@ -1657,6 +1681,8 @@ class StreamsAudio:
         seconds_streamed = bytes_written / pcm_format.pcm_sample_size
         streamdetails.seconds_streamed = seconds_streamed
         streamdetails.duration = int(streamdetails.seek_position + seconds_streamed)
+        # propagate accurate duration to queue_item so UI displays it
+        queue_item.duration = streamdetails.duration
         self.logger.debug(
             "Finished Streaming queue track: %s (%s) on queue %s "
             "- crossfade data prepared for next track: %s",
@@ -1928,6 +1954,8 @@ class StreamsAudio:
             queue_track.streamdetails.duration = int(
                 queue_track.streamdetails.seek_position + seconds_streamed
             )
+            # propagate accurate duration to queue_item so UI displays it
+            queue_track.duration = queue_track.streamdetails.duration
             play_log_entry.seconds_streamed = seconds_streamed
             play_log_entry.duration = queue_track.streamdetails.duration
             if last_play_log_entry is play_log_entry and last_fadeout_part:

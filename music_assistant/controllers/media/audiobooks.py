@@ -84,6 +84,9 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
         """
         extra_query_params: dict[str, Any] = {}
         extra_query_parts: list[str] = []
+        extra_join_parts: list[str] = []
+        if session_user := get_current_user():
+            extra_join_parts = [f"AND playlog.userid = '{session_user.user_id}'"]
         result = await self.get_library_items_by_query(
             favorite=favorite,
             search=search,

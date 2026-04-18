@@ -105,11 +105,20 @@ class AirPlayStreamSession:
             if airplay_player not in self.sync_clients:
                 return
             self.sync_clients.remove(airplay_player)
+        await self._cleanup_after_removal(airplay_player)
+
+    async def _cleanup_after_removal(self, airplay_player: AirPlayPlayer) -> None:
+        """Clean up processes and state after a client has been removed from sync_clients.
+
+        :param airplay_player: The player whose processes should be stopped.
+        """
+        stream = airplay_player.stream
+        if stream is not None and stream.session != self:
+            stream = None
         await self.stop_client(airplay_player)
         # If this was the last client, stop the session
         if not self.sync_clients:
             await self.stop()
-            return
 
     async def stop_client(self, airplay_player: AirPlayPlayer, force: bool = False) -> None:
         """
@@ -134,15 +143,25 @@ class AirPlayStreamSession:
         """Add a sync client to the session as a late joiner.
 
         Uses the PCM ring buffer to prime the late joiner's pipeline so it
-        starts playing quickly.  All work happens under the lock to ensure
+        starts playing quickly. All work happens under the lock to ensure
         ``seconds_streamed`` and the buffer are consistent.
 
+        Devices generally cannot honour an NTP start anchor that is in the
+        past — they just play whatever the pipe gives them, trailing the
+        group by the deficit. To stay in sync we therefore push the late
+        joiner's ``start_at`` into the future (at least ``wait_start`` ahead
+        of now) and trim the corresponding amount from the head of the
+        buffered PCM, so the first sample we send maps to the correct future
+        stream position.
+
         1. Snapshot the ring buffer and calculate how many seconds it holds.
-        2. NTP = ``start_time + (seconds_streamed - buffer_seconds)`` — the
-           first byte in the buffer maps to that stream position.
-        3. Start ffmpeg+CLI, write the buffer into ffmpeg (primes the pipe
-           while cliraop is still connecting), then add to sync_clients so
-           the audio streamer continues seamlessly from where the buffer ends.
+        2. Map the buffer's first byte to its stream position; if the
+           resulting NTP start is in the past, shift it forward to
+           ``now + min_headroom`` and trim that many seconds from the buffer
+           head so timing stays aligned with the rest of the group.
+        3. Start ffmpeg+CLI, write the (possibly trimmed) buffer into ffmpeg
+           to prime the pipe while cliraop is still connecting, then add to
+           sync_clients so the audio streamer continues seamlessly.
         """
         if not self.sync_clients:
             return
@@ -252,8 +271,15 @@ class AirPlayStreamSession:
                     )
                     players_to_remove.append(player)
 
+            # Remove failed players from sync_clients immediately under the lock
+            # so they are excluded from future write cycles. Only defer process
+            # cleanup (_cleanup_after_removal) — this prevents fire-and-forget
+            # remove_client calls from racing with a subsequent add_client when
+            # a player is being moved between groups.
             for player in players_to_remove:
-                self.mass.create_task(self.remove_client(player))
+                if player in self.sync_clients:
+                    self.sync_clients.remove(player)
+                self.mass.create_task(self._cleanup_after_removal(player))
 
     async def _write_chunk_to_player(self, airplay_player: AirPlayPlayer, chunk: bytes) -> None:
         """Write audio chunk to a player's ffmpeg process."""

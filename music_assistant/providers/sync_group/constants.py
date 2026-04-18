@@ -40,7 +40,6 @@ SUPPORT_DYNAMIC_LEADER = {
     #  group.stop() when other clients remain.
 }
 
-
 EXTRA_FEATURES_FROM_MEMBERS: Final[set[PlayerFeature]] = {
     PlayerFeature.ENQUEUE,
     PlayerFeature.GAPLESS_PLAYBACK,
@@ -48,3 +47,15 @@ EXTRA_FEATURES_FROM_MEMBERS: Final[set[PlayerFeature]] = {
     PlayerFeature.VOLUME_MUTE,
     PlayerFeature.MULTI_DEVICE_DSP,
 }
+
+
+# Provider domains whose live sync session can survive removal of the current
+# leader (the protocol promotes another sync_client to leader at the protocol
+# level). When the active session is owned by one of these providers the sync
+# group can do a seamless leader handoff; otherwise it must dissolve and
+# re-form (with a brief audio gap) on leader change.
+PROVIDERS_WITH_DYNAMIC_LEADER_SWITCH: Final[tuple[str, ...]] = (
+    "airplay",
+    "snapcast",
+    "sendspin",
+)
