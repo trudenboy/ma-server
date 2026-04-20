@@ -104,6 +104,12 @@ jobs:
           if [ -d "provider-repo/tests" ]; then
             mkdir -p "tests/providers/${DOMAIN}"
             rsync -av --delete provider-repo/tests/ "tests/providers/${DOMAIN}/"
+            # Rewrite test imports: from provider.X → from music_assistant.providers.DOMAIN.X
+            find "tests/providers/${DOMAIN}/" -name '*.py' -exec \
+              sed -i "s/from provider\./from music_assistant.providers.${DOMAIN}./g" {} +
+            # Rewrite mock.patch string literals: "provider.X" → "music_assistant.providers.DOMAIN.X"
+            find "tests/providers/${DOMAIN}/" -name '*.py' -exec \
+              sed -i "s/\"provider\./\"music_assistant.providers.${DOMAIN}./g" {} +
           fi
 
           # Remove the cloned provider-repo dir before staging to avoid adding it as a submodule
