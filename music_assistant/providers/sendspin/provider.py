@@ -15,6 +15,7 @@ from music_assistant.models.player_provider import PlayerProvider
 from music_assistant.providers.sendspin.player import SendspinPlayer
 
 if TYPE_CHECKING:
+    from aiosendspin.models.core import ClientHelloPayload
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
@@ -117,6 +118,47 @@ class SendspinProvider(PlayerProvider):
         :param identifiers: Extra identifiers to attach to the SendspinPlayer.
         """
         self._bridge_identifiers[client_id] = identifiers
+
+    async def apply_bridge_claim(
+        self,
+        client_id: str,
+        identifiers: dict[IdentifierType, str],
+        bridge_hello: ClientHelloPayload,
+    ) -> bool:
+        """
+        Reclassify an already-registered SendspinPlayer as a bridge client.
+
+        This covers the restart race where the Cast JS receiver reconnects to
+        Sendspin before Chromecast discovery gets a chance to register the
+        external bridge player.
+        """
+        player = self.mass.players.get_player(client_id)
+        if not isinstance(player, SendspinPlayer):
+            return False
+        for id_type, id_value in identifiers.items():
+            player.device_info.add_identifier(id_type, id_value)
+        bridge_supported_commands: list[PlayerCommand] = []
+        if bridge_hello.player_support:
+            bridge_supported_commands = list(bridge_hello.player_support.supported_commands)
+        if PlayerCommand.VOLUME in bridge_supported_commands:
+            player._attr_supported_features.add(PlayerFeature.VOLUME_SET)
+        else:
+            player._attr_supported_features.discard(PlayerFeature.VOLUME_SET)
+        if PlayerCommand.MUTE in bridge_supported_commands:
+            player._attr_supported_features.add(PlayerFeature.VOLUME_MUTE)
+        else:
+            player._attr_supported_features.discard(PlayerFeature.VOLUME_MUTE)
+        player.is_web_player = False
+        player._attr_hidden_by_default = False
+        player._attr_expose_to_ha_by_default = True
+        player._attr_type = PlayerType.PROTOCOL
+        self.logger.info(
+            "Bridge claim applied to existing SendspinPlayer %s (client_id=%s)",
+            player.display_name,
+            client_id,
+        )
+        await self.mass.players.register_or_update(player)
+        return True
 
     async def _apply_hass_name_override(self, player: SendspinPlayer, client_id: str) -> None:
         """Apply Home Assistant display name for ESPHome-backed Sendspin players."""

@@ -2616,6 +2616,7 @@ class MusicController(CoreController):
             [media_type] TEXT NOT NULL,
             [alias] TEXT,
             [is_derived] BOOLEAN NOT NULL DEFAULT 0,
+            [is_manual] BOOLEAN NOT NULL DEFAULT 0,
             FOREIGN KEY([genre_id]) REFERENCES [genres]([item_id]),
             UNIQUE(genre_id, media_id, media_type)
             );"""
