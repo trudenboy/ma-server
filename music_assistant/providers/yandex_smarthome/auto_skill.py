@@ -703,8 +703,8 @@ def check_preconditions(
 # Orchestrator: device flow + resumable pipeline
 # ---------------------------------------------------------------------------
 
+# Hard cap on how long we'll wait for the user to enter the code.
 DEVICE_FLOW_TIMEOUT_SECONDS = 300.0
-"""Hard cap on how long we'll wait for the user to enter the code."""
 
 _DEVICE_CODE_PAGE_PATH = "/yandex_smarthome/device_code"
 # Keep the intermediate HTML page alive long enough for one more poll

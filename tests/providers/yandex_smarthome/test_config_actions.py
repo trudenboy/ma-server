@@ -121,7 +121,7 @@ async def test_auto_create_failed_preserves_artifacts(monkeypatch) -> None:  # t
 
 @pytest.mark.asyncio
 async def test_auto_create_precondition_valueerror_becomes_failed(
-    monkeypatch,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ValueError from preconditions is caught and stored as a FAILED artifact."""
 
