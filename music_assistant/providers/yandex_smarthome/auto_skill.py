@@ -37,7 +37,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
 
@@ -50,6 +50,7 @@ from .constants import (
     CLOUD_SKILL_WEBHOOK_TEMPLATE,
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
+    DIALOG_CHANNEL,
     DIRECT_API_BASE_PATH,
     DIRECT_AUTH_BASE_PATH,
     DIRECT_OAUTH_CLIENT_ID,
@@ -71,6 +72,8 @@ __all__ = [
     "DialogsDuplicateSkillError",
     "DialogsSkillCreator",
     "auto_create_skill",
+    "auto_rename_dialog_skill",
+    "build_dialog_draft_payload",
     "build_draft_payload",
     "build_oauth_app_payload",
     "check_preconditions",
@@ -143,16 +146,24 @@ class DialogsSkillCreator:
     orchestrator (see :func:`auto_create_skill`).
     """
 
-    __slots__ = ("_logger", "_session")
+    __slots__ = ("_channel", "_logger", "_session")
 
     def __init__(
         self,
         session: aiohttp.ClientSession,
         logger: logging.Logger | None = None,
+        *,
+        channel: str = SMART_HOME_CHANNEL,
     ) -> None:
-        """Take a session that already carries Passport auth cookies."""
+        """Take a session that already carries Passport auth cookies.
+
+        ``channel`` selects the Yandex Dialogs skill family — defaults to
+        ``smartHome`` for the existing Smart Home pipeline; pass
+        :data:`DIALOG_CHANNEL` for the experimental «Навык» pipeline.
+        """
         self._session = session
         self._logger = logger or _LOGGER
+        self._channel = channel
 
     # -----------------------------------------------------------------------
     # Step 1: CSRF token extraction
@@ -240,7 +251,7 @@ class DialogsSkillCreator:
         """
         url = f"{DIALOGS_API_BASE}/apps"
         payload = {
-            "channel": SMART_HOME_CHANNEL,
+            "channel": self._channel,
             "language": "ru",
             "isYangoConsole": False,
             "appName": name,
@@ -272,7 +283,7 @@ class DialogsSkillCreator:
         The logo file is sent as multipart with the field name ``file``
         and filename ``icon.png`` (matching the HAR capture).
         """
-        url = f"{DIALOGS_API_BASE}/apps/{skill_id}/draft/upload-logo?channel={SMART_HOME_CHANNEL}"
+        url = f"{DIALOGS_API_BASE}/apps/{skill_id}/draft/upload-logo?channel={self._channel}"
         form = aiohttp.FormData()
         form.add_field(
             "file",
@@ -365,7 +376,7 @@ class DialogsSkillCreator:
 
     async def attach_oauth(self, csrf: str, skill_id: str, oauth_app_id: str) -> None:
         """Attach an existing OAuth app to the skill's account-linking slot."""
-        url = f"{DIALOGS_API_BASE}/apps/{skill_id}/oauthApp?channel={SMART_HOME_CHANNEL}"
+        url = f"{DIALOGS_API_BASE}/apps/{skill_id}/oauthApp?channel={self._channel}"
         payload = {"oauthAppId": oauth_app_id}
         await self._post_json(url, payload, csrf=csrf, step="attach_oauth")
 
@@ -379,9 +390,7 @@ class DialogsSkillCreator:
         Body is empty; all params are in the query string. Returns on
         2xx; otherwise raises.
         """
-        url = (
-            f"{DIALOGS_API_BASE}/apps/{skill_id}/draft/request-deploy?channel={SMART_HOME_CHANNEL}"
-        )
+        url = f"{DIALOGS_API_BASE}/apps/{skill_id}/draft/request-deploy?channel={self._channel}"
         headers = {"x-csrf-token": csrf}
         async with self._session.post(url, headers=headers) as resp:
             body = await resp.text()
@@ -623,6 +632,62 @@ def build_draft_payload(
         "enableAllAvailableRegions": True,
         "selectedRegions": [],
         "channel": SMART_HOME_CHANNEL,
+    }
+
+
+def build_dialog_draft_payload(
+    *,
+    skill_name: str,
+    backend_uri: str,
+    logo_id: str | None,
+    developer_name: str = "Music Assistant user",
+) -> dict[str, Any]:
+    """Compose the PATCH /draft/update body for a Yandex Dialogs «Навык».
+
+    Mirrors :func:`build_draft_payload` but uses
+    ``publishingSettings.category="music_and_sounds"`` and drops
+    the ``smartHome`` deepLinks block. ⚠️ Exact required-field set
+    for «Навык» is not documented — this matches the most common shape
+    seen in Dialogs developer UI HARs and may need adjustment after a
+    manual probe (see plan probe checklist).
+    """
+    return {
+        "logo2": None,
+        "name": skill_name,
+        "voice": "shitova.us",
+        "logoId": logo_id,
+        "skillAccess": "private",
+        "hideInStore": True,
+        "noteForModerator": "",
+        "backendSettings": {
+            "uri": backend_uri,
+            "functionId": "",
+            "backendType": "webhook",
+        },
+        "publishingSettings": {
+            "brandVerificationWebsite": "",
+            "category": "music_and_sounds",
+            "developerName": developer_name,
+            "secondaryTitle": skill_name,
+            "email": "",
+            "multilingualSettings": {
+                "ru": {
+                    "name": skill_name,
+                    "secondaryTitle": skill_name,
+                    "description": "Free-form voice playback bridge for Music Assistant.",
+                    "shortDescription": "Music Assistant voice control",
+                    "examplePhrases": [
+                        "включи Metallica на кухне",
+                        "включи мою волну",
+                        "включи плейлист джаз",
+                    ],
+                },
+            },
+        },
+        "oauthAppId": None,
+        "enableAllAvailableRegions": True,
+        "selectedRegions": [],
+        "channel": DIALOG_CHANNEL,
     }
 
 
@@ -1020,6 +1085,8 @@ async def auto_create_skill(  # noqa: PLR0913
     direct_client_secret: str,
     logo_bytes: bytes,
     session_id: str,
+    skill_type: Literal["smart_home", "dialog"] = "smart_home",
+    dialog_backend_uri: str | None = None,
     progress_cb: Callable[[SkillCreationArtifacts], Awaitable[None]] | None = None,
     authenticator: Callable[..., AsyncIterator[aiohttp.ClientSession]] | None = None,
     creator_factory: Callable[[aiohttp.ClientSession], DialogsSkillCreator] | None = None,
@@ -1038,6 +1105,10 @@ async def auto_create_skill(  # noqa: PLR0913
     updated artifacts; the caller uses it to persist state to MA config
     so a subsequent retry resumes from the latest completed step.
 
+    ``skill_type`` selects the API channel and draft payload builder.
+    For ``"dialog"``, ``dialog_backend_uri`` must be provided (the full
+    HTTPS webhook URL including the path secret).
+
     ``authenticator`` and ``creator_factory`` are injection points for
     tests; production callers leave them as ``None`` to use the real
     Device Flow and a real :class:`DialogsSkillCreator`.
@@ -1050,14 +1121,22 @@ async def auto_create_skill(  # noqa: PLR0913
         direct_client_secret=direct_client_secret,
     )
 
+    if skill_type == "dialog" and not dialog_backend_uri:
+        msg = "dialog_backend_uri is required for skill_type='dialog'"
+        return dataclasses.replace(artifacts, state=SkillCreationState.FAILED, last_error=msg)
+
+    channel = DIALOG_CHANNEL if skill_type == "dialog" else SMART_HOME_CHANNEL
     auth_fn = authenticator or _default_authenticator
-    creator_fn = creator_factory or DialogsSkillCreator
 
     try:
         async with _build_authenticator_cm(
             auth_fn, mass=mass, session_id=session_id, timeout=timeout
         ) as session:
-            creator = creator_fn(session)
+            creator = (
+                creator_factory(session)
+                if creator_factory is not None
+                else DialogsSkillCreator(session, channel=channel)
+            )
             return await _run_pipeline_with_recovery(
                 creator=creator,
                 artifacts=artifacts,
@@ -1068,6 +1147,8 @@ async def auto_create_skill(  # noqa: PLR0913
                 logo_bytes=logo_bytes,
                 mass=mass,
                 developer_name=developer_name,
+                skill_type=skill_type,
+                dialog_backend_uri=dialog_backend_uri,
                 progress_cb=progress_cb,
             )
     except asyncio.CancelledError:
@@ -1080,7 +1161,7 @@ async def auto_create_skill(  # noqa: PLR0913
         return dataclasses.replace(artifacts, state=SkillCreationState.FAILED, last_error=repr(exc))
 
 
-async def _run_pipeline_with_recovery(
+async def _run_pipeline_with_recovery(  # noqa: PLR0913
     *,
     creator: DialogsSkillCreator,
     artifacts: SkillCreationArtifacts,
@@ -1091,6 +1172,8 @@ async def _run_pipeline_with_recovery(
     logo_bytes: bytes,
     mass: MusicAssistant,
     developer_name: str,
+    skill_type: Literal["smart_home", "dialog"] = "smart_home",
+    dialog_backend_uri: str | None = None,
     progress_cb: Callable[[SkillCreationArtifacts], Awaitable[None]] | None,
 ) -> SkillCreationArtifacts:
     """Fetch CSRF and run the pipeline, preserving partial state on failure.
@@ -1123,6 +1206,8 @@ async def _run_pipeline_with_recovery(
             logo_bytes=logo_bytes,
             mass=mass,
             developer_name=developer_name,
+            skill_type=skill_type,
+            dialog_backend_uri=dialog_backend_uri,
             progress_cb=_track,
         )
     except DialogsApiError as exc:
@@ -1142,6 +1227,8 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
     logo_bytes: bytes,
     mass: MusicAssistant,
     developer_name: str,
+    skill_type: Literal["smart_home", "dialog"] = "smart_home",
+    dialog_backend_uri: str | None = None,
     progress_cb: Callable[[SkillCreationArtifacts], Awaitable[None]] | None,
 ) -> SkillCreationArtifacts:
     """Advance through states sequentially, skipping completed steps."""
@@ -1173,17 +1260,32 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
             logo_id = await creator.upload_logo(csrf, skill_id, logo_bytes)
             artifacts = dataclasses.replace(artifacts, logo_id=logo_id)
 
-        backend_uri = derive_backend_uri(mass, connection_type)
-        draft = build_draft_payload(
-            connection_type=connection_type,
-            skill_name=skill_name,
-            backend_uri=backend_uri,
-            logo_id=logo_id,
-            developer_name=developer_name,
-        )
+        if skill_type == "dialog":
+            if dialog_backend_uri is None:
+                msg = "dialog_backend_uri is required for skill_type='dialog'"
+                raise ValueError(msg)
+            draft = build_dialog_draft_payload(
+                skill_name=skill_name,
+                backend_uri=dialog_backend_uri,
+                logo_id=logo_id,
+                developer_name=developer_name,
+            )
+        else:
+            backend_uri = derive_backend_uri(mass, connection_type)
+            draft = build_draft_payload(
+                connection_type=connection_type,
+                skill_name=skill_name,
+                backend_uri=backend_uri,
+                logo_id=logo_id,
+                developer_name=developer_name,
+            )
         _LOGGER.info("auto-skill: [3/5] updating draft with settings")
         await creator.update_draft(csrf, skill_id, draft)
-        artifacts = dataclasses.replace(artifacts, state=SkillCreationState.DRAFT_UPDATED)
+        artifacts = dataclasses.replace(
+            artifacts,
+            state=SkillCreationState.DRAFT_UPDATED,
+            last_known_name=skill_name,
+        )
         await _maybe_save(progress_cb, artifacts)
         state = artifacts.state
 
@@ -1243,6 +1345,70 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
         await _maybe_save(progress_cb, artifacts)
 
     return artifacts
+
+
+async def auto_rename_dialog_skill(
+    *,
+    mass: MusicAssistant,
+    artifacts: SkillCreationArtifacts,
+    new_name: str,
+    dialog_backend_uri: str,
+    session_id: str,
+    authenticator: Callable[..., AsyncIterator[aiohttp.ClientSession]] | None = None,
+    creator_factory: Callable[[aiohttp.ClientSession], DialogsSkillCreator] | None = None,
+    timeout: float = DEVICE_FLOW_TIMEOUT_SECONDS,
+    developer_name: str = "Music Assistant user",
+) -> SkillCreationArtifacts:
+    """Rename a dialog skill and re-deploy it.
+
+    Patches the draft ``name`` field and calls ``request_deploy``.  Does
+    not raise on failure — returns artifacts with ``state=FAILED`` and
+    ``last_error`` so the UI can display the message.
+
+    On success the returned artifacts have ``last_known_name=new_name``
+    and ``state=DONE`` so the drift-detector in the UI clears the banner.
+    """
+    if artifacts.skill_id is None:
+        msg = "skill_id is missing — cannot rename a skill that has not been created"
+        return dataclasses.replace(artifacts, state=SkillCreationState.FAILED, last_error=msg)
+
+    skill_id = artifacts.skill_id
+    auth_fn = authenticator or _default_authenticator
+
+    try:
+        async with _build_authenticator_cm(
+            auth_fn, mass=mass, session_id=session_id, timeout=timeout
+        ) as session:
+            creator = (
+                creator_factory(session)
+                if creator_factory is not None
+                else DialogsSkillCreator(session, channel=DIALOG_CHANNEL)
+            )
+            csrf = await creator.fetch_csrf()
+
+            draft = build_dialog_draft_payload(
+                skill_name=new_name,
+                backend_uri=dialog_backend_uri,
+                logo_id=artifacts.logo_id,
+                developer_name=developer_name,
+            )
+            await creator.update_draft(csrf, skill_id, draft)
+            await creator.request_deploy(csrf, skill_id)
+            _LOGGER.info("auto-skill: dialog skill renamed to %r and re-deployed", new_name)
+            return dataclasses.replace(
+                artifacts,
+                state=SkillCreationState.DONE,
+                last_known_name=new_name,
+                last_error=None,
+            )
+    except asyncio.CancelledError:
+        raise
+    except DialogsApiError as exc:
+        _LOGGER.warning("rename-dialog-skill failed: %s", exc, exc_info=True)
+        return dataclasses.replace(artifacts, state=SkillCreationState.FAILED, last_error=str(exc))
+    except Exception as exc:
+        _LOGGER.exception("rename-dialog-skill hit unexpected error")
+        return dataclasses.replace(artifacts, state=SkillCreationState.FAILED, last_error=repr(exc))
 
 
 # Minimal 1x1 transparent PNG — used when the packaged logo is missing

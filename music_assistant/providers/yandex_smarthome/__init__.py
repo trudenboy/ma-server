@@ -30,6 +30,7 @@ from music_assistant_models.enums import ConfigEntryType, ProviderFeature
 from ._compat import SecretStr
 from .auto_skill import (
     auto_create_skill,
+    auto_rename_dialog_skill,
     load_default_logo_bytes,
 )
 from .auto_skill_state import (
@@ -41,14 +42,23 @@ from .auto_skill_ui import build_cloud_plus_entries, build_direct_entries
 from .cloud import get_cloud_otp, register_cloud_instance
 from .constants import (
     CONF_ACTION_AUTO_CREATE,
+    CONF_ACTION_AUTO_CREATE_DIALOG,
     CONF_ACTION_GET_OTP,
     CONF_ACTION_REGISTER,
+    CONF_ACTION_RENAME_DIALOG_SKILL,
     CONF_AUTO_CREATE_ARTIFACTS,
     CONF_AUTO_CREATE_SESSION_ID,
     CONF_CLOUD_CONNECTION_TOKEN,
     CONF_CLOUD_INSTANCE_ID,
     CONF_CLOUD_INSTANCE_PASSWORD,
     CONF_CONNECTION_TYPE,
+    CONF_DIALOG_AUTO_CREATE_ARTIFACTS,
+    CONF_DIALOG_AUTO_CREATE_SESSION_ID,
+    CONF_DIALOG_SKILL_ENABLED,
+    CONF_DIALOG_SKILL_ID,
+    CONF_DIALOG_SKILL_NAME,
+    CONF_DIALOG_SKILL_TOKEN,
+    CONF_DIALOG_WEBHOOK_SECRET,
     CONF_DIRECT_ACCESS_TOKEN,
     CONF_DIRECT_CLIENT_SECRET,
     CONF_EXPOSED_PLAYERS,
@@ -59,6 +69,8 @@ from .constants import (
     CONNECTION_TYPE_CLOUD,
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
+    DIALOG_DEFAULT_NAME,
+    DIALOG_WEBHOOK_BASE_PATH,
     MAX_INPUT_SOURCES,
 )
 from .playlists import fetch_playlist_options
@@ -132,6 +144,26 @@ def _resolve_direct_client_secret(
     return str(values.get(CONF_DIRECT_CLIENT_SECRET) or "")
 
 
+def _resolve_dialog_webhook_secret(
+    mass: MusicAssistant,
+    instance_id: str | None,
+    values: dict[str, ConfigValueType],
+) -> str:
+    """Return the dialog webhook path-secret for the current install.
+
+    Like ``_resolve_direct_client_secret``, prefers the persisted
+    SECURE_STRING from saved config since the frontend does not echo
+    secrets back into ``values`` on re-open.
+    """
+    if instance_id:
+        prov = mass.get_provider(instance_id)
+        if prov and prov.config:
+            saved = prov.config.get_value(CONF_DIALOG_WEBHOOK_SECRET)
+            if saved:
+                return str(saved)
+    return str(values.get(CONF_DIALOG_WEBHOOK_SECRET) or "")
+
+
 async def _handle_config_actions(
     mass: MusicAssistant,
     action: str | None,
@@ -182,6 +214,12 @@ async def _handle_config_actions(
 
     if action == CONF_ACTION_AUTO_CREATE:
         await _run_auto_create_action(mass, values, connection_type, instance_id)
+
+    if action == CONF_ACTION_AUTO_CREATE_DIALOG:
+        await _run_auto_create_dialog_action(mass, values, connection_type, instance_id)
+
+    if action == CONF_ACTION_RENAME_DIALOG_SKILL:
+        await _run_rename_dialog_action(mass, values, instance_id)
 
     return otp_code
 
@@ -246,7 +284,104 @@ async def _run_auto_create_action(
         values[CONF_SKILL_ID] = new_artifacts.skill_id
 
 
-async def get_config_entries(
+def _build_dialog_backend_uri(base_url: str, webhook_secret: str) -> str:
+    return f"{base_url.rstrip('/')}{DIALOG_WEBHOOK_BASE_PATH}/{webhook_secret}"
+
+
+async def _run_auto_create_dialog_action(
+    mass: MusicAssistant,
+    values: dict[str, ConfigValueType],
+    connection_type: str,
+    instance_id: str | None,
+) -> None:
+    """Execute the experimental dialog skill auto-create action.
+
+    Mirrors ``_run_auto_create_action`` but targets the dialog channel
+    and persists under separate config keys so the two pipelines are
+    independent.
+    """
+    session_id = str(values.get("session_id") or uuid.uuid4().hex)
+    values[CONF_DIALOG_AUTO_CREATE_SESSION_ID] = session_id
+
+    artifacts_raw = values.get(CONF_DIALOG_AUTO_CREATE_ARTIFACTS)
+    artifacts = load_artifacts(str(artifacts_raw) if artifacts_raw else None)
+
+    webhook_secret = _resolve_dialog_webhook_secret(mass, instance_id, values)
+    if not webhook_secret:
+        webhook_secret = uuid.uuid4().hex
+        values[CONF_DIALOG_WEBHOOK_SECRET] = webhook_secret
+
+    ma_base_url = ""
+    with contextlib.suppress(Exception):
+        ma_base_url = str(mass.webserver.base_url)
+    dialog_backend_uri = _build_dialog_backend_uri(ma_base_url, webhook_secret)
+
+    skill_name = str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME)
+
+    try:
+        new_artifacts = await auto_create_skill(
+            mass=mass,
+            connection_type=connection_type,
+            skill_name=skill_name,
+            artifacts=artifacts,
+            cloud_instance_id="",
+            direct_client_secret=_resolve_direct_client_secret(mass, instance_id, values),
+            logo_bytes=load_default_logo_bytes(),
+            session_id=session_id,
+            skill_type="dialog",
+            dialog_backend_uri=dialog_backend_uri,
+        )
+    except asyncio.CancelledError:
+        raise
+    except ValueError as exc:
+        new_artifacts = dataclasses.replace(
+            artifacts,
+            state=SkillCreationState.FAILED,
+            last_error=str(exc),
+        )
+        _LOGGER.warning("dialog auto-create precondition failed: %s", exc)
+    except Exception as exc:
+        new_artifacts = dataclasses.replace(
+            artifacts,
+            state=SkillCreationState.FAILED,
+            last_error=repr(exc),
+        )
+        _LOGGER.exception("dialog auto-create hit unexpected error")
+
+    values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS] = dump_artifacts(new_artifacts)
+    if new_artifacts.state == SkillCreationState.DONE and new_artifacts.skill_id:
+        values[CONF_DIALOG_SKILL_ID] = new_artifacts.skill_id
+
+
+async def _run_rename_dialog_action(
+    mass: MusicAssistant,
+    values: dict[str, ConfigValueType],
+    instance_id: str | None,
+) -> None:
+    """Execute the dialog skill rename + re-deploy action."""
+    artifacts_raw = values.get(CONF_DIALOG_AUTO_CREATE_ARTIFACTS)
+    artifacts = load_artifacts(str(artifacts_raw) if artifacts_raw else None)
+
+    webhook_secret = _resolve_dialog_webhook_secret(mass, instance_id, values)
+    ma_base_url = ""
+    with contextlib.suppress(Exception):
+        ma_base_url = str(mass.webserver.base_url)
+    dialog_backend_uri = _build_dialog_backend_uri(ma_base_url, webhook_secret)
+
+    skill_name = str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME)
+    session_id = str(values.get("session_id") or uuid.uuid4().hex)
+
+    new_artifacts = await auto_rename_dialog_skill(
+        mass=mass,
+        artifacts=artifacts,
+        new_name=skill_name,
+        dialog_backend_uri=dialog_backend_uri,
+        session_id=session_id,
+    )
+    values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS] = dump_artifacts(new_artifacts)
+
+
+async def get_config_entries(  # noqa: PLR0915
     mass: MusicAssistant,
     instance_id: str | None = None,
     action: str | None = None,
@@ -378,6 +513,20 @@ async def get_config_entries(
         if not direct_secret:
             direct_secret = uuid.uuid4().hex
             values[CONF_DIRECT_CLIENT_SECRET] = direct_secret
+
+        # Pre-generate the dialog webhook secret similarly.
+        dialog_webhook_secret = _resolve_dialog_webhook_secret(mass, instance_id, values)
+        if not dialog_webhook_secret:
+            dialog_webhook_secret = uuid.uuid4().hex
+            values[CONF_DIALOG_WEBHOOK_SECRET] = dialog_webhook_secret
+
+        # Dialog skill state
+        dialog_artifacts_raw = values.get(CONF_DIALOG_AUTO_CREATE_ARTIFACTS)
+        dialog_artifacts_str = str(dialog_artifacts_raw) if dialog_artifacts_raw else None
+        dialog_artifacts = load_artifacts(dialog_artifacts_str)
+        dialog_session_id_val = values.get(CONF_DIALOG_AUTO_CREATE_SESSION_ID)
+        dialog_session_id_str = str(dialog_session_id_val) if dialog_session_id_val else None
+
         entries.extend(
             build_direct_entries(
                 artifacts=artifacts,
@@ -389,11 +538,42 @@ async def get_config_entries(
                 direct_client_secret=direct_secret,
                 skill_id=str(values.get(CONF_SKILL_ID) or ""),
                 skill_token_set=bool(values.get(CONF_SKILL_TOKEN)),
+                dialog_skill_enabled=bool(values.get(CONF_DIALOG_SKILL_ENABLED)),
+                dialog_skill_name=str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME),
+                dialog_artifacts=dialog_artifacts,
+                dialog_skill_id=str(values.get(CONF_DIALOG_SKILL_ID) or ""),
+                dialog_session_id=dialog_session_id_str,
+                dialog_existing_artifacts_raw=dialog_artifacts_str,
+                dialog_user_code=None,
+                dialog_verification_url=None,
             )
         )
         # NB: CONF_DIRECT_CLIENT_SECRET is now emitted by the manual
         # fallback block (advanced/hidden per state), so we don't add a
         # duplicate hidden round-trip entry here.
+
+        # Round-trip the dialog webhook secret (SECURE_STRING, never echoed).
+        entries.append(
+            ConfigEntry(
+                key=CONF_DIALOG_WEBHOOK_SECRET,
+                type=ConfigEntryType.SECURE_STRING,
+                label="Dialog webhook secret (internal)",
+                hidden=True,
+                required=False,
+                value=dialog_webhook_secret,
+            )
+        )
+        # Round-trip the dialog skill token (set externally if needed).
+        entries.append(
+            ConfigEntry(
+                key=CONF_DIALOG_SKILL_TOKEN,
+                type=ConfigEntryType.SECURE_STRING,
+                label="Dialog skill token (internal)",
+                hidden=True,
+                required=False,
+                value=cast("str", values.get(CONF_DIALOG_SKILL_TOKEN)) if values else None,
+            )
+        )
 
     # -- Tail: player filter + hidden round-trip fields (all modes) --
     entries.extend(_common_tail_entries(player_options, playlist_options, values))

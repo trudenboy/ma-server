@@ -57,6 +57,7 @@ class SkillCreationArtifacts:
     logo_id: str | None = None
     oauth_app_id: str | None = None
     last_error: str | None = None
+    last_known_name: str | None = None  # MA-side mirror of the skill name in Yandex Dialogs
 
 
 def dump_artifacts(artifacts: SkillCreationArtifacts) -> str:
@@ -68,6 +69,7 @@ def dump_artifacts(artifacts: SkillCreationArtifacts) -> str:
             "logo_id": artifacts.logo_id,
             "oauth_app_id": artifacts.oauth_app_id,
             "last_error": artifacts.last_error,
+            "last_known_name": artifacts.last_known_name,
         },
         ensure_ascii=False,
     )
@@ -107,6 +109,7 @@ def load_artifacts(raw: str | None) -> SkillCreationArtifacts:
         logo_id=_opt_str("logo_id"),
         oauth_app_id=_opt_str("oauth_app_id"),
         last_error=_opt_str("last_error"),
+        last_known_name=_opt_str("last_known_name"),
     )
 
 

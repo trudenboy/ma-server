@@ -30,17 +30,27 @@ from .constants import (
     CLOUD_SKILL_CLIENT_SECRET,
     CLOUD_SKILL_WEBHOOK_TEMPLATE,
     CONF_ACTION_AUTO_CREATE,
+    CONF_ACTION_AUTO_CREATE_DIALOG,
     CONF_ACTION_GET_OTP,
     CONF_ACTION_REGISTER,
+    CONF_ACTION_RENAME_DIALOG_SKILL,
     CONF_AUTO_CREATE_ARTIFACTS,
     CONF_AUTO_CREATE_SESSION_ID,
     CONF_CONNECTION_TYPE,
+    CONF_DIALOG_AUTO_CREATE_ARTIFACTS,
+    CONF_DIALOG_AUTO_CREATE_SESSION_ID,
+    CONF_DIALOG_SKILL_ENABLED,
+    CONF_DIALOG_SKILL_ID,
+    CONF_DIALOG_SKILL_NAME,
     CONF_DIRECT_CLIENT_SECRET,
     CONF_SKILL_ID,
     CONF_SKILL_TOKEN,
     CONNECTION_TYPE_CLOUD,
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
+    DIALOG_DEFAULT_NAME,
+    DIALOG_NAME_MAX_LEN,
+    DIALOG_NAME_MIN_LEN,
     DIRECT_API_BASE_PATH,
     DIRECT_AUTH_BASE_PATH,
     DIRECT_OAUTH_CLIENT_ID,
@@ -68,6 +78,8 @@ _CAT_STEP_2_CREATE = "Step 2 — Create Smart Home skill"
 _CAT_STEP_3_LINK = "Step 3 — Link skill to Yandex"
 # Direct mode has only one step — no cloud registration, no OTP linking.
 _CAT_STEP_DIRECT_CREATE = "Create Smart Home skill"
+# Dialog skill section — direct mode only, experimental.
+_CAT_DIALOG_SKILL = "🧪 Experimental — Dialogs voice skill (free-form playback)"
 
 
 def _status_label(state: SkillCreationState, last_error: str | None) -> str:
@@ -803,7 +815,7 @@ def _step3_link_entries(
 # ---------------------------------------------------------------------------
 
 
-def build_direct_entries(
+def build_direct_entries(  # noqa: PLR0913
     *,
     artifacts: SkillCreationArtifacts,
     session_id: str | None,
@@ -814,12 +826,24 @@ def build_direct_entries(
     direct_client_secret: str = "",
     skill_id: str = "",
     skill_token_set: bool = False,
+    # Dialog skill params (experimental, direct-only)
+    dialog_skill_enabled: bool = False,
+    dialog_skill_name: str = DIALOG_DEFAULT_NAME,
+    dialog_artifacts: SkillCreationArtifacts | None = None,
+    dialog_skill_id: str = "",
+    dialog_session_id: str | None = None,
+    dialog_existing_artifacts_raw: str | None = None,
+    dialog_user_code: str | None = None,
+    dialog_verification_url: str | None = None,
 ) -> list[ConfigEntry]:
     """Return the direct-mode config entries as a single Create-Skill step.
 
     direct mode has no yaha-cloud registration (Step 1) and no OTP
     linking (Step 3) — Yandex Dialogs' account-linking UI handles that
     once the skill exists.
+
+    Optionally includes the experimental dialog skill section when
+    ``dialog_skill_enabled`` is True.
     """
     fully_configured = bool(skill_id) and skill_token_set
     entries = _create_skill_step_entries(
@@ -835,4 +859,253 @@ def build_direct_entries(
         fully_configured=fully_configured,
     )
     entries.extend(_hidden_state_entries(existing_artifacts_raw, session_id))
+    entries.extend(
+        _dialog_skill_entries(
+            enabled=dialog_skill_enabled,
+            skill_name=dialog_skill_name,
+            artifacts=dialog_artifacts or SkillCreationArtifacts(),
+            dialog_skill_id=dialog_skill_id,
+            base_url=base_url,
+            session_id=dialog_session_id,
+            existing_artifacts_raw=dialog_existing_artifacts_raw,
+            user_code=dialog_user_code,
+            verification_url=dialog_verification_url,
+        )
+    )
     return entries
+
+
+def _dialog_skill_entries(
+    *,
+    enabled: bool,
+    skill_name: str,
+    artifacts: SkillCreationArtifacts,
+    dialog_skill_id: str,
+    base_url: str,
+    session_id: str | None,
+    existing_artifacts_raw: str | None,
+    user_code: str | None,
+    verification_url: str | None,
+) -> list[ConfigEntry]:
+    """Build config entries for the experimental dialog skill section.
+
+    Always emits the enable toggle (so the user can turn it on).
+    The rest of the entries are only emitted when ``enabled=True``.
+    """
+    entries: list[ConfigEntry] = [
+        ConfigEntry(
+            key=CONF_DIALOG_SKILL_ENABLED,
+            type=ConfigEntryType.BOOLEAN,
+            label="Enable experimental Dialogs voice skill",
+            description=(
+                "Enables a custom Yandex Dialogs «Навык» for free-form voice playback. "
+                'Once created, say "Алиса, попроси <name> включи Metallica на кухне". '
+                "Requires a publicly reachable HTTPS URL. Direct mode only."
+            ),
+            default_value=False,
+            required=False,
+            category=_CAT_DIALOG_SKILL,
+        )
+    ]
+
+    if not enabled:
+        return entries
+
+    # Skill activation name
+    entries.append(
+        ConfigEntry(
+            key=CONF_DIALOG_SKILL_NAME,
+            type=ConfigEntryType.STRING,
+            label="Skill activation name",
+            description=(
+                'Used as the activation phrase: "Алиса, попроси <name> …". '
+                "For Yandex voice recognition, a Russian name works best. "
+                f"Length: {DIALOG_NAME_MIN_LEN}-{DIALOG_NAME_MAX_LEN} characters."
+            ),
+            default_value=DIALOG_DEFAULT_NAME,
+            required=True,
+            category=_CAT_DIALOG_SKILL,
+        )
+    )
+
+    # Device-flow user code (shown while the Device Flow is in progress)
+    if user_code:
+        entries.append(
+            ConfigEntry(
+                key="dialog_auto_create_user_code",
+                type=ConfigEntryType.STRING,
+                label="Device code for ya.ru/device",
+                description=(
+                    "Open the URL below, log in to your Yandex account, and enter this code."
+                ),
+                value=user_code,
+                required=False,
+                help_link=verification_url or "https://ya.ru/device",
+                category=_CAT_DIALOG_SKILL,
+            )
+        )
+
+    # Status label
+    entries.append(
+        ConfigEntry(
+            key="label_dialog_skill_status",
+            type=ConfigEntryType.LABEL,
+            label=_dialog_status_label(artifacts.state, artifacts.last_error),
+            category=_CAT_DIALOG_SKILL,
+        )
+    )
+
+    # HTTPS prerequisite warning
+    direct_https_missing = not base_url.startswith("https://")
+    if direct_https_missing:
+        entries.append(
+            ConfigEntry(
+                key="label_dialog_https_warning",
+                type=ConfigEntryType.LABEL,
+                label=(
+                    f"⚠️ MA's Base URL is {base_url or '<unset>'}. "
+                    "The dialog skill webhook requires a **publicly reachable HTTPS URL**. "
+                    "Set a reverse proxy with a real certificate and update "
+                    "Settings → Core → Webserver → Base URL, then reopen these settings."
+                ),
+                category=_CAT_DIALOG_SKILL,
+            )
+        )
+
+    # Auto-create action button
+    can_create = not direct_https_missing and artifacts.state != SkillCreationState.DONE
+    entries.append(
+        ConfigEntry(
+            key=CONF_ACTION_AUTO_CREATE_DIALOG,
+            type=ConfigEntryType.ACTION,
+            label=_action_label(artifacts.state),
+            description=(
+                "Runs the Yandex Device Flow login, then creates and publishes "
+                "the private Dialogs «Навык». Takes ~30 seconds after you enter the code."
+            ),
+            action=CONF_ACTION_AUTO_CREATE_DIALOG,
+            action_label=_action_label(artifacts.state),
+            hidden=not can_create,
+            category=_CAT_DIALOG_SKILL,
+        )
+    )
+
+    # Rename button — shown when skill exists but name has drifted
+    name_drifted = (
+        bool(dialog_skill_id)
+        and bool(artifacts.last_known_name)
+        and skill_name != artifacts.last_known_name
+    )
+    if name_drifted:
+        entries.append(
+            ConfigEntry(
+                key="label_dialog_rename_warning",
+                type=ConfigEntryType.LABEL,
+                label=(
+                    f"⚠️ Activation name in Yandex Dialogs is still "
+                    f'"{artifacts.last_known_name}". Press the button below to '
+                    f'update it to "{skill_name}".'
+                ),
+                category=_CAT_DIALOG_SKILL,
+            )
+        )
+        entries.append(
+            ConfigEntry(
+                key=CONF_ACTION_RENAME_DIALOG_SKILL,
+                type=ConfigEntryType.ACTION,
+                label="Rename skill in Yandex Dialogs",
+                description=(
+                    "Updates the skill name and re-deploys. "
+                    'After this, say "Алиса, попроси <new name> …".'
+                ),
+                action=CONF_ACTION_RENAME_DIALOG_SKILL,
+                action_label="Rename and re-deploy",
+                category=_CAT_DIALOG_SKILL,
+            )
+        )
+
+    # Skill ID (manual override / reference)
+    entries.append(
+        ConfigEntry(
+            key=CONF_DIALOG_SKILL_ID,
+            type=ConfigEntryType.STRING,
+            label="Dialog Skill ID",
+            description=(
+                "UUID of the Dialogs «Навык» skill. Set automatically when "
+                "auto-create succeeds; you can paste it manually if you created "
+                "the skill by hand in Yandex.Dialogs."
+            ),
+            required=False,
+            advanced=artifacts.state
+            not in (
+                SkillCreationState.DONE,
+                SkillCreationState.FAILED,
+            ),
+            category=_CAT_DIALOG_SKILL,
+        )
+    )
+
+    # Dialogs console link (shown once skill exists)
+    if dialog_skill_id:
+        skill_url = f"https://dialogs.yandex.ru/developer/skills/{dialog_skill_id}/"
+        entries.append(
+            ConfigEntry(
+                key="dialog_skill_dialogs_link",
+                type=ConfigEntryType.STRING,
+                label="Open dialog skill in Yandex.Dialogs",
+                required=False,
+                default_value=skill_url,
+                help_link=skill_url,
+                advanced=True,
+                category=_CAT_DIALOG_SKILL,
+            )
+        )
+
+    # Hidden round-trip state
+    entries.extend(
+        [
+            ConfigEntry(
+                key=CONF_DIALOG_AUTO_CREATE_ARTIFACTS,
+                type=ConfigEntryType.STRING,
+                label="Dialog auto-create artifacts (internal)",
+                hidden=True,
+                required=False,
+                value=existing_artifacts_raw,
+            ),
+            ConfigEntry(
+                key=CONF_DIALOG_AUTO_CREATE_SESSION_ID,
+                type=ConfigEntryType.STRING,
+                label="Dialog auto-create session id (internal)",
+                hidden=True,
+                required=False,
+                value=session_id,
+            ),
+        ]
+    )
+
+    return entries
+
+
+def _dialog_status_label(state: SkillCreationState, last_error: str | None) -> str:
+    """Human-readable status for the dialog skill auto-create."""
+    if state == SkillCreationState.DONE:
+        return (
+            "✅ Dialog skill created and published. "
+            'You can now say "Алиса, попроси <name> включи Metallica на кухне".'
+        )
+    if state == SkillCreationState.FAILED:
+        err = last_error or "unknown error"
+        return (
+            f"❌ Creation failed: {err}\n"
+            f"Press '{_action_label(state)}' to try again, or fill in "
+            "Dialog Skill ID manually below."
+        )
+    if state == SkillCreationState.NONE:
+        return (
+            "Ready to create dialog skill. "
+            "Set the activation name above, then press the button below."
+        )
+    return (
+        f"Partial progress saved ({state.value}). "
+        f"Press '{_action_label(state)}' to finish, or fill Dialog Skill ID manually."
+    )

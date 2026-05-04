@@ -21,6 +21,7 @@ from music_assistant.providers.yandex_smarthome.auto_skill import (
     DialogsDuplicateSkillError,
     DialogsSkillCreator,
     auto_create_skill,
+    auto_rename_dialog_skill,
     build_draft_payload,
     build_oauth_app_payload,
     check_preconditions,
@@ -990,6 +991,171 @@ class TestAuthenticatorInjection:
             creator_factory=lambda _s: creator,
         )
         assert result.state == SkillCreationState.DONE
+
+
+class TestAutoCreateSkillDialogType:
+    """auto_create_skill with skill_type='dialog' uses dialog channel and draft builder."""
+
+    @pytest.mark.asyncio
+    async def test_dialog_skill_reaches_done(self) -> None:
+        """Full pipeline with skill_type='dialog' reaches DONE and stores last_known_name."""
+        creator = _make_creator_mock()
+        mass = _mass_with_base_url("https://ma.example.com")
+        result = await auto_create_skill(
+            mass=mass,
+            connection_type=CONNECTION_TYPE_DIRECT,
+            skill_name="Music Assistant",
+            artifacts=SkillCreationArtifacts(),
+            cloud_instance_id="",
+            direct_client_secret="secret-123",
+            logo_bytes=b"\x89PNG",
+            session_id="test-session",
+            skill_type="dialog",
+            dialog_backend_uri="https://ma.example.com/api/yandex_dialogs/webhook/abc123",
+            authenticator=_fake_authenticator_factory(),
+            creator_factory=lambda _s: creator,
+        )
+        assert result.state == SkillCreationState.DONE
+        assert result.last_known_name == "Music Assistant"
+        creator.create_app.assert_awaited_once()
+        creator.update_draft.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dialog_draft_uses_dialog_backend_uri(self) -> None:
+        """update_draft receives the dialog_backend_uri, not the MA Smart Home URI."""
+        creator = _make_creator_mock()
+        mass = _mass_with_base_url("https://ma.example.com")
+        backend_uri = "https://ma.example.com/api/yandex_dialogs/webhook/secret42"
+        await auto_create_skill(
+            mass=mass,
+            connection_type=CONNECTION_TYPE_DIRECT,
+            skill_name="My Skill",
+            artifacts=SkillCreationArtifacts(),
+            cloud_instance_id="",
+            direct_client_secret="sec",
+            logo_bytes=b"\x89PNG",
+            session_id="s",
+            skill_type="dialog",
+            dialog_backend_uri=backend_uri,
+            authenticator=_fake_authenticator_factory(),
+            creator_factory=lambda _s: creator,
+        )
+        _, _, draft = creator.update_draft.call_args.args
+        assert draft["backendSettings"]["uri"] == backend_uri
+        assert draft["name"] == "My Skill"
+
+    @pytest.mark.asyncio
+    async def test_dialog_missing_backend_uri_returns_failed(self) -> None:
+        """Missing dialog_backend_uri with skill_type='dialog' returns FAILED artifact."""
+        creator = _make_creator_mock()
+        mass = _mass_with_base_url("https://ma.example.com")
+        result = await auto_create_skill(
+            mass=mass,
+            connection_type=CONNECTION_TYPE_DIRECT,
+            skill_name="Music Assistant",
+            artifacts=SkillCreationArtifacts(),
+            cloud_instance_id="",
+            direct_client_secret="sec",
+            logo_bytes=b"\x89PNG",
+            session_id="s",
+            skill_type="dialog",
+            dialog_backend_uri=None,
+            authenticator=_fake_authenticator_factory(),
+            creator_factory=lambda _s: creator,
+        )
+        assert result.state == SkillCreationState.FAILED
+        assert "dialog_backend_uri" in (result.last_error or "")
+
+
+class TestAutoRenameDialogSkill:
+    """auto_rename_dialog_skill patches draft name and re-deploys."""
+
+    @pytest.mark.asyncio
+    async def test_rename_happy_path(self) -> None:
+        """Rename updates last_known_name, calls update_draft and request_deploy once."""
+        creator = _make_creator_mock()
+        mass = _mass_with_base_url("https://ma.example.com")
+        artifacts = SkillCreationArtifacts(
+            state=SkillCreationState.DONE,
+            skill_id="skill-abc",
+            logo_id="logo-abc",
+            last_known_name="Old Name",
+        )
+        result = await auto_rename_dialog_skill(
+            mass=mass,
+            artifacts=artifacts,
+            new_name="New Name",
+            dialog_backend_uri="https://ma.example.com/api/yandex_dialogs/webhook/secret",
+            session_id="s",
+            authenticator=_fake_authenticator_factory(),
+            creator_factory=lambda _s: creator,
+        )
+        assert result.state == SkillCreationState.DONE
+        assert result.last_known_name == "New Name"
+        assert result.last_error is None
+        creator.update_draft.assert_awaited_once()
+        creator.request_deploy.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rename_updates_draft_with_new_name(self) -> None:
+        """update_draft receives the new name in the draft payload."""
+        creator = _make_creator_mock()
+        mass = _mass_with_base_url("https://ma.example.com")
+        artifacts = SkillCreationArtifacts(
+            state=SkillCreationState.DONE,
+            skill_id="skill-abc",
+            logo_id="logo-xyz",
+        )
+        await auto_rename_dialog_skill(
+            mass=mass,
+            artifacts=artifacts,
+            new_name="Renamed Skill",
+            dialog_backend_uri="https://ma.example.com/api/yandex_dialogs/webhook/s",
+            session_id="sess",
+            authenticator=_fake_authenticator_factory(),
+            creator_factory=lambda _s: creator,
+        )
+        _, _, draft = creator.update_draft.call_args.args
+        assert draft["name"] == "Renamed Skill"
+
+    @pytest.mark.asyncio
+    async def test_rename_no_skill_id_returns_failed(self) -> None:
+        """Missing skill_id returns FAILED without calling the API."""
+        mass = _mass_with_base_url("https://ma.example.com")
+        artifacts = SkillCreationArtifacts(state=SkillCreationState.DONE, skill_id=None)
+        result = await auto_rename_dialog_skill(
+            mass=mass,
+            artifacts=artifacts,
+            new_name="Whatever",
+            dialog_backend_uri="https://ma.example.com/api/yandex_dialogs/webhook/s",
+            session_id="s",
+        )
+        assert result.state == SkillCreationState.FAILED
+        assert result.last_error is not None
+
+    @pytest.mark.asyncio
+    async def test_rename_api_error_returns_failed(self) -> None:
+        """API error on update_draft surfaces as FAILED artifact with last_error set."""
+        creator = _make_creator_mock()
+        creator.update_draft = AsyncMock(
+            side_effect=DialogsApiError("Bad Request", step="update_draft", http_status=400)
+        )
+        mass = _mass_with_base_url("https://ma.example.com")
+        artifacts = SkillCreationArtifacts(
+            state=SkillCreationState.DONE,
+            skill_id="skill-abc",
+        )
+        result = await auto_rename_dialog_skill(
+            mass=mass,
+            artifacts=artifacts,
+            new_name="Whatever",
+            dialog_backend_uri="https://ma.example.com/api/yandex_dialogs/webhook/s",
+            session_id="s",
+            authenticator=_fake_authenticator_factory(),
+            creator_factory=lambda _s: creator,
+        )
+        assert result.state == SkillCreationState.FAILED
+        assert result.last_error is not None
 
 
 class TestLoadDefaultLogoBytes:

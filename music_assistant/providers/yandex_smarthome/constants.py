@@ -130,3 +130,29 @@ ERROR_DEVICE_UNREACHABLE = "DEVICE_UNREACHABLE"
 ERROR_INVALID_ACTION = "INVALID_ACTION"
 ERROR_INTERNAL_ERROR = "INTERNAL_ERROR"
 ERROR_DEVICE_NOT_FOUND = "DEVICE_NOT_FOUND"
+
+# ---------------------------------------------------------------------------
+# Dialog skill (Yandex Dialogs «Навык» — free-form voice playback) — experimental
+# ---------------------------------------------------------------------------
+CONF_DIALOG_SKILL_ENABLED = "dialog_skill_enabled"
+CONF_DIALOG_SKILL_NAME = "dialog_skill_name"
+CONF_DIALOG_SKILL_ID = "dialog_skill_id"
+CONF_DIALOG_SKILL_TOKEN = "dialog_skill_token"
+CONF_DIALOG_WEBHOOK_SECRET = "dialog_webhook_secret"
+CONF_DIALOG_AUTO_CREATE_ARTIFACTS = "dialog_auto_create_artifacts"
+CONF_DIALOG_AUTO_CREATE_SESSION_ID = "dialog_auto_create_session_id"
+
+CONF_ACTION_AUTO_CREATE_DIALOG = "auto_create_dialog_skill"
+CONF_ACTION_RENAME_DIALOG_SKILL = "rename_dialog_skill"
+
+DIALOG_WEBHOOK_BASE_PATH = "/api/yandex_dialogs/webhook"
+DIALOG_RESOLVE_TIMEOUT = 2.5
+DIALOG_DEFAULT_NAME = "Music Assistant"
+# Yandex Dialogs app-store-api channel string for «Навык» (custom dialog skill).
+# Smart Home uses "smartHome" — value below is best guess pending manual probe.
+# See plan probe checklist (a) — adjust here if Yandex returns 4xx for "dialog".
+DIALOG_CHANNEL = "dialog"
+DIALOG_NAME_MIN_LEN = 2
+DIALOG_NAME_MAX_LEN = 64
+DIALOG_SESSION_CACHE_MAX = 200
+DIALOG_SESSION_TTL_SEC = 3600  # 1 hour — last-player memory per session
