@@ -18,31 +18,30 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-_LIBRARY_LIMIT = 500
-
 
 async def fetch_playlist_options(mass: MusicAssistant) -> list[ConfigValueOption]:
     """Build ConfigValueOption list of all library playlists for the config form.
 
-    Used at config-render time only. Fail-soft: returns [] if mass.music or
-    the playlists controller is not yet available (e.g. provider load order).
+    Pages through `iter_library_items` so the dropdown is not silently
+    truncated for users with very large libraries (the underlying
+    `library_items(limit=...)` defaults to 500). Used at config-render
+    time only. Fail-soft: returns [] if mass.music or the playlists
+    controller is not yet available (e.g. provider load order).
     """
+    options: list[ConfigValueOption] = []
     try:
-        playlists = await mass.music.playlists.library_items(limit=_LIBRARY_LIMIT)
+        async for playlist in mass.music.playlists.iter_library_items():
+            if not playlist.uri:
+                continue
+            provider_label = playlist.provider or ""
+            title = f"{playlist.name} ({provider_label})" if provider_label else playlist.name
+            options.append(ConfigValueOption(title=title, value=playlist.uri))
     except Exception as exc:
         # Fail-soft: this runs on every config-form render and races with
         # provider/database startup. Don't spam stack traces — debug-level
         # is enough for diagnostics, normal renders stay quiet.
         _LOGGER.debug("Library playlists not available yet: %s", exc)
         return []
-
-    options: list[ConfigValueOption] = []
-    for playlist in playlists:
-        if not playlist.uri:
-            continue
-        provider_label = playlist.provider or ""
-        title = f"{playlist.name} ({provider_label})" if provider_label else playlist.name
-        options.append(ConfigValueOption(title=title, value=playlist.uri))
     return options
 
 

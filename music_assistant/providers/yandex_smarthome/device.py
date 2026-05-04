@@ -87,11 +87,6 @@ def _get_source_list(player: Player) -> list[PlayerSource]:
     return []
 
 
-def _build_source_modes(source_list: list[PlayerSource]) -> list[ModeValue]:
-    """Build Yandex mode values from an MA source list (max 10)."""
-    return [ModeValue(value=YANDEX_MODE_VALUES[i]) for i in range(min(len(source_list), 10))]
-
-
 def _combined_size(
     source_list: list[PlayerSource], playlist_uris: tuple[str, ...] | list[str]
 ) -> int:
