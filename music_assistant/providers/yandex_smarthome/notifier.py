@@ -49,6 +49,7 @@ class StateNotifier:
         auth_header: dict[str, str],
         logger: logging.Logger | None = None,
         exposed_ids: set[str] | None = None,
+        playlist_uris: tuple[str, ...] | list[str] = (),
     ) -> None:
         """Initialize state notifier."""
         self._mass = mass
@@ -58,6 +59,7 @@ class StateNotifier:
         self._auth_header = auth_header
         self._logger = logger or _LOGGER
         self._exposed_ids = exposed_ids
+        self._playlist_uris = tuple(playlist_uris)
 
         self._dirty_player_ids: set[str] = set()
         self._flush_handle: asyncio.TimerHandle | None = None
@@ -166,7 +168,7 @@ class StateNotifier:
                 continue
             state = player.state
             if is_player_exposable(state, exposed_ids=self._exposed_ids):
-                devices.append(get_device_state(state))
+                devices.append(get_device_state(state, playlist_uris=self._playlist_uris))
 
         if not devices:
             return
@@ -210,7 +212,7 @@ class StateNotifier:
         for player in self._mass.players.all_players():
             state = player.state
             if is_player_exposable(state, exposed_ids=self._exposed_ids):
-                devices.append(get_device_state(state))
+                devices.append(get_device_state(state, playlist_uris=self._playlist_uris))
         if devices:
             self._logger.info("Reporting all states: %d device(s)", len(devices))
             await self._send_state_callback(devices)

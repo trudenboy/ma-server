@@ -52,13 +52,16 @@ from .constants import (
     CONF_DIRECT_ACCESS_TOKEN,
     CONF_DIRECT_CLIENT_SECRET,
     CONF_EXPOSED_PLAYERS,
+    CONF_EXPOSED_PLAYLISTS,
     CONF_INSTANCE_NAME,
     CONF_SKILL_ID,
     CONF_SKILL_TOKEN,
     CONNECTION_TYPE_CLOUD,
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
+    MAX_INPUT_SOURCES,
 )
+from .playlists import fetch_playlist_options
 from .plugin import YandexSmartHomePlugin
 
 if TYPE_CHECKING:
@@ -291,6 +294,12 @@ async def get_config_entries(
     except Exception:  # noqa: S110
         pass
 
+    # Build playlist options from MA library (any music provider). Fail-soft: empty
+    # list if music controller isn't ready (e.g. provider load order at first run).
+    playlist_options: list[ConfigValueOption] = []
+    with contextlib.suppress(Exception):
+        playlist_options = await fetch_playlist_options(mass)
+
     entries: list[ConfigEntry] = [
         # Instance name
         ConfigEntry(
@@ -387,7 +396,7 @@ async def get_config_entries(
         # duplicate hidden round-trip entry here.
 
     # -- Tail: player filter + hidden round-trip fields (all modes) --
-    entries.extend(_common_tail_entries(player_options, values))
+    entries.extend(_common_tail_entries(player_options, playlist_options, values))
     return tuple(entries)
 
 
@@ -456,7 +465,9 @@ def _cloud_mode_entries(
 
 
 def _common_tail_entries(
-    player_options: list[ConfigValueOption], values: dict[str, ConfigValueType]
+    player_options: list[ConfigValueOption],
+    playlist_options: list[ConfigValueOption],
+    values: dict[str, ConfigValueType],
 ) -> list[ConfigEntry]:
     """Player filter + hidden round-trip fields shared by every mode."""
     return [
@@ -472,6 +483,24 @@ def _common_tail_entries(
             multi_value=True,
             default_value=[],
             options=list(player_options) if player_options else [],
+        ),
+        ConfigEntry(
+            key=CONF_EXPOSED_PLAYLISTS,
+            type=ConfigEntryType.STRING,
+            label=f"Exposed Playlists (max {MAX_INPUT_SOURCES})",
+            description=(
+                "Pick up to "
+                f"{MAX_INPUT_SOURCES} playlists from your MA library — they appear "
+                "as input_source modes on every exposed player. After saving, "
+                "open the device in the Yandex app and assign voice aliases "
+                '(e.g. "Rock" for mode «one») so Alice can pick playlists by name. '
+                "If the list is empty, save the form and reopen it once your music "
+                "providers have finished loading their library."
+            ),
+            required=False,
+            multi_value=True,
+            default_value=[],
+            options=list(playlist_options) if playlist_options else [],
         ),
         ConfigEntry(
             key=CONF_CLOUD_INSTANCE_ID,

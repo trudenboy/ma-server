@@ -95,11 +95,20 @@ class MockPlayers:
         return self._players.get(player_id)
 
 
+class MockPlayerQueues:
+    """Mock of mass.player_queues controller."""
+
+    def __init__(self) -> None:
+        """Initialize mock player_queues controller."""
+        self.play_media = AsyncMock()
+
+
 @dataclass
 class MockMass:
     """Mock MusicAssistant for testing."""
 
     players: MockPlayers = field(default_factory=MockPlayers)
+    player_queues: MockPlayerQueues = field(default_factory=MockPlayerQueues)
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +841,171 @@ class TestInputSourceCapability:
             state=CapabilityActionState(instance="input_source", value="five"),
         )
         result = await execute_capability_action(mass, "p1", action)
+        assert result.state.action_result.status == "ERROR"
+        assert result.state.action_result.error_code == "INVALID_ACTION"
+
+
+# ---------------------------------------------------------------------------
+# Tests: input_source playlist sources (mode/input_source backed by playlists)
+# ---------------------------------------------------------------------------
+
+
+class TestPlaylistInputSources:
+    """Tests for playlist-backed input_source modes."""
+
+    def test_playlists_only_register_mode_cap(self) -> None:
+        """Player with no native sources but configured playlists gets mode cap."""
+        player = MockPlayer(source_list=[])
+        playlist_uris = ["library://playlist/1", "library://playlist/2", "library://playlist/3"]
+        desc = get_device_description(player, playlist_uris=playlist_uris)  # type: ignore[arg-type]
+        mode_caps = [c for c in desc.capabilities if c.type == YandexCapabilityType.MODE]
+        assert len(mode_caps) == 1
+        modes = mode_caps[0].parameters.modes  # type: ignore[union-attr]
+        assert modes is not None
+        assert [m.value for m in modes] == ["one", "two", "three"]
+
+    def test_native_then_playlists_capped_at_10(self) -> None:
+        """5 native sources + 7 playlists → 10 combined modes, native first."""
+        sources = [MockPlayerSource(id=f"s{i}", name=f"Source {i}") for i in range(5)]
+        playlist_uris = [f"library://playlist/{i}" for i in range(7)]
+        player = MockPlayer(source_list=sources, supported_features={"select_source"})
+        desc = get_device_description(player, playlist_uris=playlist_uris)  # type: ignore[arg-type]
+        mode_caps = [c for c in desc.capabilities if c.type == YandexCapabilityType.MODE]
+        assert len(mode_caps) == 1
+        assert len(mode_caps[0].parameters.modes) == 10  # type: ignore[arg-type,union-attr]
+
+    def test_native_full_ignores_playlists(self) -> None:
+        """If native sources already fill all 10 slots, playlists are ignored."""
+        sources = [MockPlayerSource(id=f"s{i}", name=f"Source {i}") for i in range(10)]
+        playlist_uris = ["library://playlist/extra"]
+        player = MockPlayer(source_list=sources, supported_features={"select_source"})
+        desc = get_device_description(player, playlist_uris=playlist_uris)  # type: ignore[arg-type]
+        mode_caps = [c for c in desc.capabilities if c.type == YandexCapabilityType.MODE]
+        assert len(mode_caps) == 1
+        assert len(mode_caps[0].parameters.modes) == 10  # type: ignore[arg-type,union-attr]
+
+    def test_state_with_native_active_in_combined_mode(self) -> None:
+        """Native active source still reports correct state when playlists also configured."""
+        sources = [
+            MockPlayerSource(id="hdmi1", name="HDMI 1"),
+            MockPlayerSource(id="optical", name="Optical"),
+        ]
+        player = MockPlayer(
+            source_list=sources,
+            active_source="Optical",
+            playback_state=PlaybackState.PLAYING,
+            supported_features={"select_source"},
+        )
+        state = get_device_state(
+            player,
+            playlist_uris=["library://playlist/x"],  # type: ignore[arg-type]
+        )
+        mode_states = [c for c in state.capabilities if c.state.instance == INSTANCE_INPUT_SOURCE]
+        assert len(mode_states) == 1
+        assert mode_states[0].state.value == "two"
+
+    @pytest.mark.asyncio
+    async def test_native_action_routes_to_select_source(self) -> None:
+        """Native slot value resolves to mass.players.select_source, not play_media."""
+        sources = [MockPlayerSource(id="hdmi1", name="HDMI 1")]
+        player = MockPlayer(
+            player_id="p1", source_list=sources, supported_features={"select_source"}
+        )
+        mass = MockMass()
+        mass.players._players["p1"] = player
+
+        action = CapabilityAction(
+            type=YandexCapabilityType.MODE,
+            state=CapabilityActionState(instance="input_source", value="one"),
+        )
+        result = await execute_capability_action(
+            mass, "p1", action, playlist_uris=["library://playlist/x"]
+        )
+        mass.players.select_source.assert_awaited_once_with("p1", "hdmi1")
+        mass.player_queues.play_media.assert_not_awaited()
+        assert result.state.action_result.status == "DONE"
+
+    @pytest.mark.asyncio
+    async def test_playlist_action_calls_play_media(self) -> None:
+        """Playlist slot triggers player_queues.play_media with URI."""
+        player = MockPlayer(player_id="p1", source_list=[], powered=True)
+        mass = MockMass()
+        mass.players._players["p1"] = player
+        uris = ["library://playlist/jazz", "library://playlist/rock"]
+
+        action = CapabilityAction(
+            type=YandexCapabilityType.MODE,
+            state=CapabilityActionState(instance="input_source", value="two"),
+        )
+        result = await execute_capability_action(mass, "p1", action, playlist_uris=uris)
+        mass.player_queues.play_media.assert_awaited_once_with(
+            queue_id="p1", media="library://playlist/rock"
+        )
+        mass.players.select_source.assert_not_awaited()
+        assert result.state.action_result.status == "DONE"
+
+    @pytest.mark.asyncio
+    async def test_playlist_action_powers_on_if_off(self) -> None:
+        """Player with power feature off should be powered on before playback."""
+        player = MockPlayer(
+            player_id="p1",
+            source_list=[],
+            powered=False,
+            supported_features={"power"},
+        )
+        mass = MockMass()
+        mass.players._players["p1"] = player
+
+        action = CapabilityAction(
+            type=YandexCapabilityType.MODE,
+            state=CapabilityActionState(instance="input_source", value="one"),
+        )
+        result = await execute_capability_action(
+            mass, "p1", action, playlist_uris=["library://playlist/jazz"]
+        )
+        mass.players.cmd_power.assert_awaited_once_with("p1", True)
+        mass.player_queues.play_media.assert_awaited_once_with(
+            queue_id="p1", media="library://playlist/jazz"
+        )
+        assert result.state.action_result.status == "DONE"
+
+    @pytest.mark.asyncio
+    async def test_playlist_action_skips_power_when_already_on(self) -> None:
+        """Powered player skips cmd_power but still plays media."""
+        player = MockPlayer(
+            player_id="p1",
+            source_list=[],
+            powered=True,
+            supported_features={"power"},
+        )
+        mass = MockMass()
+        mass.players._players["p1"] = player
+
+        action = CapabilityAction(
+            type=YandexCapabilityType.MODE,
+            state=CapabilityActionState(instance="input_source", value="one"),
+        )
+        await execute_capability_action(
+            mass, "p1", action, playlist_uris=["library://playlist/jazz"]
+        )
+        mass.players.cmd_power.assert_not_awaited()
+        mass.player_queues.play_media.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_slot_past_combined_returns_error(self) -> None:
+        """Mode value beyond combined native+playlists → INVALID_ACTION."""
+        player = MockPlayer(player_id="p1", source_list=[])
+        mass = MockMass()
+        mass.players._players["p1"] = player
+
+        action = CapabilityAction(
+            type=YandexCapabilityType.MODE,
+            state=CapabilityActionState(instance="input_source", value="three"),
+        )
+        result = await execute_capability_action(
+            mass, "p1", action, playlist_uris=["library://playlist/jazz"]
+        )
+        mass.player_queues.play_media.assert_not_awaited()
         assert result.state.action_result.status == "ERROR"
         assert result.state.action_result.error_code == "INVALID_ACTION"
 

@@ -13,6 +13,7 @@ CONF_CLOUD_CONNECTION_TOKEN = "cloud_connection_token"
 CONF_SKILL_ID = "skill_id"
 CONF_SKILL_TOKEN = "skill_token"
 CONF_EXPOSED_PLAYERS = "exposed_players"
+CONF_EXPOSED_PLAYLISTS = "exposed_playlists"
 
 # Auto-create-skill feature state (round-trips through the config form)
 CONF_AUTO_CREATE_ARTIFACTS = "auto_create_artifacts"
@@ -116,6 +117,10 @@ YANDEX_MODE_VALUES = (
     "nine",
     "ten",
 )
+
+# Combined cap for native sources + playlist sources in mode(input_source).
+# Yandex allows max 10 modes per capability.
+MAX_INPUT_SOURCES = len(YANDEX_MODE_VALUES)
 
 # ---------------------------------------------------------------------------
 # Yandex Smart Home API — response codes

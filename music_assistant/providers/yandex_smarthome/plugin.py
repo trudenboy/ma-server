@@ -34,12 +34,14 @@ from .constants import (
     CONF_DIRECT_ACCESS_TOKEN,
     CONF_DIRECT_CLIENT_SECRET,
     CONF_EXPOSED_PLAYERS,
+    CONF_EXPOSED_PLAYLISTS,
     CONF_INSTANCE_NAME,
     CONF_SKILL_ID,
     CONF_SKILL_TOKEN,
     CONNECTION_TYPE_CLOUD,
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
+    MAX_INPUT_SOURCES,
     YANDEX_DIALOGS_CALLBACK_BASE,
 )
 from .direct import DirectConnectionHandler
@@ -101,6 +103,23 @@ class YandexSmartHomePlugin(PluginProvider):
         else:
             exposed_raw = []
         self._exposed_ids: set[str] | None = set(exposed_raw) if exposed_raw else None
+
+        # Parse exposed playlists (URIs) — capped at MAX_INPUT_SOURCES.
+        playlists_raw = self.config.get_value(CONF_EXPOSED_PLAYLISTS) or []
+        if isinstance(playlists_raw, str):
+            playlists_raw = [x.strip() for x in playlists_raw.split(",") if x.strip()]
+        elif isinstance(playlists_raw, list):
+            playlists_raw = [str(x) for x in playlists_raw if x]
+        else:
+            playlists_raw = []
+        if len(playlists_raw) > MAX_INPUT_SOURCES:
+            self.logger.warning(
+                "Exposed playlists count (%d) exceeds cap %d; truncating",
+                len(playlists_raw),
+                MAX_INPUT_SOURCES,
+            )
+            playlists_raw = playlists_raw[:MAX_INPUT_SOURCES]
+        self._exposed_playlists: tuple[str, ...] = tuple(playlists_raw)
 
         self.logger.info(
             "Yandex Smart Home plugin init (mode=%s, name=%s)",
@@ -182,6 +201,7 @@ class YandexSmartHomePlugin(PluginProvider):
             auth_header=auth_header,
             logger=self.logger,
             exposed_ids=self._exposed_ids,
+            playlist_uris=self._exposed_playlists,
         )
         await self._state_notifier.start()
 
@@ -213,6 +233,7 @@ class YandexSmartHomePlugin(PluginProvider):
             exposed_ids=self._exposed_ids,
             logger=self.logger,
             on_token_created=_on_token_created,
+            playlist_uris=self._exposed_playlists,
         )
         self._direct_handler.register_routes()
 
@@ -229,6 +250,7 @@ class YandexSmartHomePlugin(PluginProvider):
             auth_header=auth_header,
             logger=self.logger,
             exposed_ids=self._exposed_ids,
+            playlist_uris=self._exposed_playlists,
         )
         await self._state_notifier.start()
 
@@ -255,6 +277,7 @@ class YandexSmartHomePlugin(PluginProvider):
                     self.mass,
                     self._user_id,
                     exposed_ids=self._exposed_ids,
+                    playlist_uris=self._exposed_playlists,
                 )
                 return build_response(request_id, asdict(device_list))
 
@@ -265,14 +288,20 @@ class YandexSmartHomePlugin(PluginProvider):
                     if isinstance(d, dict) and (device_id := d.get("id"))
                 ]
                 states = await handle_devices_query(
-                    self.mass, device_ids, exposed_ids=self._exposed_ids
+                    self.mass,
+                    device_ids,
+                    exposed_ids=self._exposed_ids,
+                    playlist_uris=self._exposed_playlists,
                 )
                 return build_response(request_id, asdict(states))
 
             if normalized == "/user/devices/action":
                 action_payload = parse_action_payload(message)
                 action_result = await handle_devices_action(
-                    self.mass, action_payload, exposed_ids=self._exposed_ids
+                    self.mass,
+                    action_payload,
+                    exposed_ids=self._exposed_ids,
+                    playlist_uris=self._exposed_playlists,
                 )
                 return build_response(request_id, asdict(action_result))
 
