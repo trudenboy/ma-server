@@ -896,10 +896,7 @@ class TestPlaylistInputSources:
             playback_state=PlaybackState.PLAYING,
             supported_features={"select_source"},
         )
-        state = get_device_state(
-            player,
-            playlist_uris=["library://playlist/x"],  # type: ignore[arg-type]
-        )
+        state = get_device_state(player, playlist_uris=["library://playlist/x"])  # type: ignore[arg-type]
         mode_states = [c for c in state.capabilities if c.state.instance == INSTANCE_INPUT_SOURCE]
         assert len(mode_states) == 1
         assert mode_states[0].state.value == "two"

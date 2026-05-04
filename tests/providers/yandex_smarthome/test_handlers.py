@@ -136,6 +136,7 @@ class TestHandleDeviceList:
             c for c in result.devices[0].capabilities if c.type == YandexCapabilityType.MODE
         ]
         assert len(mode_caps) == 1
+        assert mode_caps[0].parameters is not None
         modes = mode_caps[0].parameters.modes
         assert modes is not None
         assert [m.value for m in modes] == ["one", "two"]
