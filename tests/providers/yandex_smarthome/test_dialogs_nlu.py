@@ -132,7 +132,7 @@ class TestResolvePlayer:
             MockPlayer(player_id="p1", name="Кухня"),
             MockPlayer(player_id="p2", name="Спальня"),
         ]
-        result = resolve_player(_mass(players), "кухня")
+        result = resolve_player(_mass(players), "кухня")  # type: ignore[arg-type]
         assert result is not None
         assert result.player_id == "p1"
 
@@ -142,7 +142,7 @@ class TestResolvePlayer:
             MockPlayer(player_id="p1", name="Кухня"),
             MockPlayer(player_id="p2", name="Спальня"),
         ]
-        result = resolve_player(_mass(players), "кухне")
+        result = resolve_player(_mass(players), "кухне")  # type: ignore[arg-type]
         assert result is not None
         assert result.player_id == "p1"
 
@@ -152,29 +152,29 @@ class TestResolvePlayer:
             MockPlayer(player_id="p1", name="Sendspin BT Group"),
             MockPlayer(player_id="p2", name="Lenco LS-500"),
         ]
-        result = resolve_player(_mass(players), "lenco")
+        result = resolve_player(_mass(players), "lenco")  # type: ignore[arg-type]
         assert result is not None
         assert result.player_id == "p2"
 
     def test_no_match_returns_none(self) -> None:
         """Unrecognised hint returns None."""
         players = [MockPlayer(player_id="p1", name="Кухня")]
-        assert resolve_player(_mass(players), "гостиная") is None
+        assert resolve_player(_mass(players), "гостиная") is None  # type: ignore[arg-type]
 
     def test_skips_disabled(self) -> None:
         """Disabled players are excluded from candidates."""
         players = [MockPlayer(player_id="p1", name="Кухня", enabled=False)]
-        assert resolve_player(_mass(players), "кухня") is None
+        assert resolve_player(_mass(players), "кухня") is None  # type: ignore[arg-type]
 
     def test_skips_unavailable(self) -> None:
         """Unavailable players are excluded from candidates."""
         players = [MockPlayer(player_id="p1", name="Кухня", available=False)]
-        assert resolve_player(_mass(players), "кухня") is None
+        assert resolve_player(_mass(players), "кухня") is None  # type: ignore[arg-type]
 
     def test_skips_synced(self) -> None:
         """Players synced to another player are excluded from candidates."""
         players = [MockPlayer(player_id="p1", name="Кухня", synced_to="leader")]
-        assert resolve_player(_mass(players), "кухня") is None
+        assert resolve_player(_mass(players), "кухня") is None  # type: ignore[arg-type]
 
     def test_default_id_used_when_no_hint(self) -> None:
         """No hint falls back to default_id."""
@@ -182,14 +182,14 @@ class TestResolvePlayer:
             MockPlayer(player_id="p1", name="Кухня"),
             MockPlayer(player_id="p2", name="Спальня"),
         ]
-        result = resolve_player(_mass(players), None, default_id="p2")
+        result = resolve_player(_mass(players), None, default_id="p2")  # type: ignore[arg-type]
         assert result is not None
         assert result.player_id == "p2"
 
     def test_single_player_no_hint_picked(self) -> None:
         """No hint with a single available player returns that player."""
         players = [MockPlayer(player_id="p1", name="Кухня")]
-        result = resolve_player(_mass(players), None)
+        result = resolve_player(_mass(players), None)  # type: ignore[arg-type]
         assert result is not None
         assert result.player_id == "p1"
 
@@ -199,5 +199,5 @@ class TestResolvePlayer:
             MockPlayer(player_id="p1", name="Кухня"),
             MockPlayer(player_id="p2", name="Спальня"),
         ]
-        result = resolve_player(_mass(players), "кухня", exposed_ids={"p2"})
+        result = resolve_player(_mass(players), "кухня", exposed_ids={"p2"})  # type: ignore[arg-type]
         assert result is None

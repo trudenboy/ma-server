@@ -51,10 +51,10 @@ def _make_mass(players: list[MockPlayer], search_track: object = None) -> MagicM
 
     @dataclass
     class _SearchResults:
-        artists: list = field(default_factory=list)
-        albums: list = field(default_factory=list)
-        tracks: list = field(default_factory=list)
-        playlists: list = field(default_factory=list)
+        artists: list[object] = field(default_factory=list)
+        albums: list[object] = field(default_factory=list)
+        tracks: list[object] = field(default_factory=list)
+        playlists: list[object] = field(default_factory=list)
 
     if search_track is not None:
         mass.music.search = AsyncMock(return_value=_SearchResults(tracks=[search_track]))
@@ -76,7 +76,7 @@ def _make_mass(players: list[MockPlayer], search_track: object = None) -> MagicM
 _TEST_SECRET = "topsecret"
 
 
-def _build_request(body: dict, secret: str = _TEST_SECRET) -> web.Request:
+def _build_request(body: dict[str, object], secret: str = _TEST_SECRET) -> web.Request:
     """Build a mocked aiohttp Request that returns the given JSON body."""
     req = make_mocked_request(
         "POST",
