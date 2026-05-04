@@ -491,11 +491,12 @@ def _common_tail_entries(
             description=(
                 "Pick up to "
                 f"{MAX_INPUT_SOURCES} playlists from your MA library — they appear "
-                "as input_source modes on every exposed player. After saving, "
-                "open the device in the Yandex app and assign voice aliases "
-                '(e.g. "Rock" for mode «one») so Alice can pick playlists by name. '
-                "If the list is empty, save the form and reopen it once your music "
-                "providers have finished loading their library."
+                "as input_source mode slots one..ten on every exposed player, in the "
+                "order you select them. Alice triggers them by ordinal only "
+                "(«Alice, switch <player> source to five»); the Yandex Smart Home "
+                "API does not allow naming mode values, so remember the order you "
+                "picked. If the list is empty, save the form and reopen it once "
+                "your music providers have finished loading their library."
             ),
             required=False,
             multi_value=True,
