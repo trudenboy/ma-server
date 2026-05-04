@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -76,7 +76,7 @@ def _make_mass(players: list[MockPlayer], search_track: object = None) -> MagicM
 _TEST_SECRET = "topsecret"
 
 
-def _build_request(body: dict[str, object], secret: str = _TEST_SECRET) -> web.Request:
+def _build_request(body: dict[str, Any], secret: str = _TEST_SECRET) -> web.Request:
     """Build a mocked aiohttp Request that returns the given JSON body."""
     req = make_mocked_request(
         "POST",
