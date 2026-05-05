@@ -10,6 +10,7 @@ from music_assistant.providers.yandex_smarthome.dialogs_nlu import (
     ParsedCommand,
     parse_command,
     resolve_player,
+    resolve_player_candidates,
 )
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,11 @@ class TestParseCommand:
             ("включить Iron Maiden", "search", "iron maiden", None, True),
             ("сыграй Metallica на кухне", "search", "metallica", "кухне", True),
             ("послушать джаз", "search", "джаз", None, True),
+            # P0.5 — find/open/show verbs as play synonyms
+            ("найди Metallica", "search", "metallica", None, True),
+            ("найти джаз на кухне", "search", "джаз", "кухне", True),
+            ("открой плейлист утренний джаз", "playlist", "утренний джаз", None, False),
+            ("покажи альбом Black Album", "album", "black album", None, False),
         ],
     )
     def test_parse(
@@ -205,3 +211,57 @@ class TestResolvePlayer:
         ]
         result = resolve_player(_mass(players), "кухня", exposed_ids={"p2"})  # type: ignore[arg-type]
         assert result is None
+
+    def test_ambiguous_returns_none(self) -> None:
+        """When the hint matches multiple players in the same tier, resolve_player returns None.
+
+        The caller is expected to use ``resolve_player_candidates`` directly
+        when it wants to surface the ambiguity (P0.3 disambiguation).
+        """
+        players = [
+            MockPlayer(player_id="p1", name="Кухня большая"),
+            MockPlayer(player_id="p2", name="Кухня маленькая"),
+        ]
+        # Both names start with "Кухня" — startswith tier has 2 → ambiguous.
+        assert resolve_player(_mass(players), "кухня") is None  # type: ignore[arg-type]
+
+
+class TestResolvePlayerCandidates:
+    """Tests for resolve_player_candidates — same matching, surface tier list."""
+
+    def test_zero_matches(self) -> None:
+        """No candidate match → empty list."""
+        players = [MockPlayer(player_id="p1", name="Кухня")]
+        assert resolve_player_candidates(_mass(players), "гостиная") == []  # type: ignore[arg-type]
+
+    def test_single_match(self) -> None:
+        """One unambiguous match → single-element list."""
+        players = [
+            MockPlayer(player_id="p1", name="Кухня"),
+            MockPlayer(player_id="p2", name="Спальня"),
+        ]
+        result = resolve_player_candidates(_mass(players), "кухне")  # type: ignore[arg-type]
+        assert len(result) == 1
+        assert result[0].player_id == "p1"
+
+    def test_multiple_matches_returned_in_alphabetical_order(self) -> None:
+        """When multiple players match the same tier, return all sorted by name."""
+        players = [
+            MockPlayer(player_id="p1", name="Кухня большая"),
+            MockPlayer(player_id="p2", name="Кухня маленькая"),
+            MockPlayer(player_id="p3", name="Спальня"),
+        ]
+        result = resolve_player_candidates(_mass(players), "кухня")  # type: ignore[arg-type]
+        assert len(result) == 2
+        names = [p.name for p in result]
+        assert names == sorted(names, key=str.lower)
+
+    def test_exact_tier_wins_over_startswith(self) -> None:
+        """An exact match excludes startswith candidates from the result."""
+        players = [
+            MockPlayer(player_id="p1", name="Кухня"),
+            MockPlayer(player_id="p2", name="Кухня большая"),
+        ]
+        result = resolve_player_candidates(_mass(players), "кухня")  # type: ignore[arg-type]
+        # Only the exact match is returned.
+        assert [p.player_id for p in result] == ["p1"]

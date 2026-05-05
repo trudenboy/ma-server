@@ -483,7 +483,7 @@ async def _run_rename_dialog_action(
     values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS] = dump_artifacts(new_artifacts)
 
 
-async def get_config_entries(  # noqa: PLR0915
+async def get_config_entries(
     mass: MusicAssistant,
     instance_id: str | None = None,
     action: str | None = None,

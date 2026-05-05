@@ -1402,7 +1402,7 @@ async def _run_pipeline_with_recovery(  # noqa: PLR0913
         return dataclasses.replace(current, state=SkillCreationState.FAILED, last_error=str(exc))
 
 
-async def _execute_pipeline(  # noqa: PLR0913, PLR0915
+async def _execute_pipeline(  # noqa: PLR0913
     *,
     creator: DialogsSkillCreator,
     csrf: str,

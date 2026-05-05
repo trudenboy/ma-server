@@ -106,6 +106,41 @@ class TestResolveQuery:
         result = await resolve_query(mass, ParsedCommand(kind="track", query="x"))
         assert result is None
 
+    async def test_cyrillic_query_retries_with_stemmed_form(self) -> None:
+        """First search empty + Cyrillic query → retry with inflection stripped."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        empty = _SearchResults()
+        hit = _SearchResults(tracks=[track])
+        mass = _make_mass(empty)
+        # First call returns empty, second returns the track.
+        mass.music.search = AsyncMock(side_effect=[empty, hit])
+        result = await resolve_query(mass, ParsedCommand(kind="track", query="металлику"))
+        assert result is track
+        # Two calls were made.
+        assert mass.music.search.await_count == 2
+        # Second call used the stemmed query ("металлик" — last `у` stripped).
+        second_call_kwargs = mass.music.search.await_args_list[1].kwargs
+        assert second_call_kwargs["search_query"] == "металлик"
+
+    async def test_ascii_query_does_not_retry(self) -> None:
+        """ASCII-only query is not retried — stemming has no effect."""
+        empty = _SearchResults()
+        mass = _make_mass(empty)
+        mass.music.search = AsyncMock(return_value=empty)
+        result = await resolve_query(mass, ParsedCommand(kind="track", query="metallica"))
+        assert result is None
+        assert mass.music.search.await_count == 1
+
+    async def test_retry_skipped_when_stemmed_equals_original(self) -> None:
+        """Russian query already in stemmed form (short word) doesn't trigger retry."""
+        empty = _SearchResults()
+        mass = _make_mass(empty)
+        mass.music.search = AsyncMock(return_value=empty)
+        # "рок" (3 chars) — too short for the suffix-strip to produce a different stem.
+        result = await resolve_query(mass, ParsedCommand(kind="search", query="рок"))
+        assert result is None
+        assert mass.music.search.await_count == 1
+
 
 # ---------------------------------------------------------------------------
 # play_for_alice

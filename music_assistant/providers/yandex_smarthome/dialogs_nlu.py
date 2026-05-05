@@ -63,8 +63,11 @@ _VERB_RE = re.compile(
     r"запусти(?:те)?|запустить|"
     r"сыграй(?:те)?|сыграть|"
     r"играй(?:те)?|"
-    r"послушай(?:те)?|послушать"
-    r")\s+",
+    r"послушай(?:те)?|послушать|"
+    r"найди(?:те)?|найти|"
+    r"открой(?:те)?|открыть|"
+    r"покажи(?:те)?|показать"
+    r")(?:\s+|$)",
     re.IGNORECASE,
 )
 
@@ -162,19 +165,21 @@ def parse_command(text: str) -> ParsedCommand:
 # Not a full lemmatizer — picks up the most frequent endings for short names.
 # Order: longest first so multi-letter suffixes match before single-letter ones.
 _INFLECTION_SUFFIXES = (
-    "ого",  # noqa: RUF001
+    "ого",
     "ому",
     "ыми",
+    "ая",  # feminine adjective nominative — "большая", "маленькая"
     "ой",
     "ом",
     "ым",
     "ы",
-    "е",  # noqa: RUF001
-    "у",  # noqa: RUF001
-    "а",  # noqa: RUF001
+    "е",
+    "у",
+    "а",
     "и",
     "й",
     "ь",
+    "я",  # feminine noun nominative — "Кухня", "Спальня"
 )
 
 
@@ -186,7 +191,7 @@ _GENERIC_PLAYER_STEMS = frozenset(
     {
         "колонк",  # колонка / на колонке / колонку
         "плеер",  # плеер / на плеере / плеера
-        "пле",  # short for "плеер" after stripping the trailing -ер suffix  # noqa: RUF003
+        "пле",  # short for "плеер" after stripping the trailing -ер suffix
         "проигрыватель",  # full word survives stem (no matching suffix)
         "проигрывател",  # stripped «-ь»
         "динамик",  # динамик / на динамике
@@ -217,26 +222,18 @@ def _normalize_player_token(name: str) -> str:
     return " ".join(parts)
 
 
-def resolve_player(
+def list_exposed_players(
     mass: MusicAssistant,
-    hint: str | None,
     *,
-    default_id: str | None = None,
     exposed_ids: set[str] | None = None,
-) -> Any:
-    """Find an MA player by fuzzy-matching the hint string against player names.
+) -> list[Any]:
+    """Return all available, enabled, non-synced players (filtered by exposure).
 
-    Filters: only players that are available, enabled, and not synced to a
-    leader (we control the leader, not the followers). Optional ``exposed_ids``
-    further restricts to the user's exposed-players list from the SH plugin.
-
-    Disambiguation:
-      - exact normalized match wins
-      - else startswith
-      - else substring
-      - else None (caller asks Alice for clarification)
+    Same filter as ``resolve_player_candidates`` uses for its candidate set,
+    extracted so the dialog handler can answer "what speakers do you see?"
+    queries (P0.6 ``list_players`` action) without re-implementing it.
     """
-    candidates: list[Any] = []
+    out: list[Any] = []
     for player in mass.players.all_players():
         if not player.available or not player.enabled:
             continue
@@ -244,24 +241,66 @@ def resolve_player(
             continue
         if exposed_ids and player.player_id not in exposed_ids:
             continue
-        candidates.append(player)
+        out.append(player)
+    return out
+
+
+def resolve_player_candidates(
+    mass: MusicAssistant,
+    hint: str | None,
+    *,
+    default_id: str | None = None,
+    exposed_ids: set[str] | None = None,
+) -> list[Any]:
+    """Return the best-matching tier of players for ``hint``.
+
+    Filters: only players that are available, enabled, and not synced to
+    a leader. Optional ``exposed_ids`` further restricts to the user's
+    exposed-players list. Tier priority: exact → startswith → contains →
+    generic-word fallback. The caller decides what to do with multiple
+    matches (typically: ask the user to disambiguate).
+
+    Logs a single DEBUG-level summary on every call describing the
+    decision: chosen tier, candidate count, and the names of the
+    candidates returned.
+
+    Returns:
+        A list with all players in the best non-empty tier. ``[]`` if
+        nothing matched. ``[player]`` for an unambiguous resolution.
+    """
+    candidates = list_exposed_players(mass, exposed_ids=exposed_ids)
+
+    def _label(p: Any) -> str:
+        return str(getattr(p, "name", None) or p.player_id)
+
+    def _result(result: list[Any], reason: str) -> list[Any]:
+        _LOGGER.debug(
+            "resolve_player: hint=%r default=%s exposed=%d -> %d candidate(s) %s [%s]",
+            hint,
+            default_id,
+            len(candidates),
+            len(result),
+            [_label(p) for p in result],
+            reason,
+        )
+        return result
 
     if not candidates:
-        return None
+        return _result([], "no exposed players")
 
-    # Single-player install or no hint → pick the default / only candidate.
+    # Single-player install or no hint → default / only candidate.
     if not hint:
         if default_id:
             for p in candidates:
                 if p.player_id == default_id:
-                    return p
+                    return _result([p], "no hint, matched default_id")
         if len(candidates) == 1:
-            return candidates[0]
-        return None
+            return _result(candidates[:], "no hint, single exposed player")
+        return _result([], "no hint, ambiguous")
 
     needle = _normalize_player_token(hint)
     if not needle:
-        return None
+        return _result([], "hint normalised to empty string")
 
     exact: list[Any] = []
     startswith: list[Any] = []
@@ -280,7 +319,7 @@ def resolve_player(
             contains.append(p)
 
     _LOGGER.debug(
-        "resolve_player: hint=%r → needle=%r; candidates=%s; "
+        "resolve_player tiers: hint=%r needle=%r candidates=%s "
         "matches: exact=%d startswith=%d contains=%d",
         hint,
         needle,
@@ -290,23 +329,18 @@ def resolve_player(
         len(contains),
     )
 
-    for tier in (exact, startswith, contains):
-        if not tier:
-            continue
-        if len(tier) > 1:
-            _LOGGER.warning(
-                "Player hint %r matches %d players: %s — picking first by name",
-                hint,
-                len(tier),
-                [p.name for p in tier],
-            )
+    for tier_name, tier in (
+        ("exact", exact),
+        ("startswith", startswith),
+        ("contains", contains),
+    ):
+        if tier:
             tier.sort(key=lambda p: (p.name or p.player_id).lower())
-        return tier[0]
+            return _result(tier, f"tier={tier_name}")
 
-    # Generic-word fallback: user said something like "на колонке" /
-    # "на проигрывателе" / "на динамике" — these mean "any speaker", not
-    # a specific player. If only one player is exposed (or a default_id
-    # is configured) we can resolve unambiguously; otherwise still None.
+    # Generic-word fallback: "на колонке" / "на проигрывателе" / "на динамике"
+    # mean "any speaker" — resolve unambiguously only when the choice is
+    # forced (default_id set, or single exposed player).
     if any(stem in needle for stem in _GENERIC_PLAYER_STEMS):
         if default_id:
             for p in candidates:
@@ -316,19 +350,40 @@ def resolve_player(
                         hint,
                         p.name,
                     )
-                    return p
+                    return _result([p], "generic word, matched default_id")
         if len(candidates) == 1:
             _LOGGER.info(
                 "Generic player hint %r → resolved to the only exposed player %r",
                 hint,
                 candidates[0].name,
             )
-            return candidates[0]
+            return _result(candidates[:], "generic word, single exposed player")
         _LOGGER.warning(
             "Generic player hint %r matches no specific player and there are "
             "%d exposed players — caller will ask for clarification",
             hint,
             len(candidates),
         )
+        return _result([], "generic word, multiple players, no default")
 
-    return None
+    return _result([], "no tier matched")
+
+
+def resolve_player(
+    mass: MusicAssistant,
+    hint: str | None,
+    *,
+    default_id: str | None = None,
+    exposed_ids: set[str] | None = None,
+) -> Any:
+    """Find an unambiguously-matching MA player for ``hint``, or None.
+
+    Thin wrapper over ``resolve_player_candidates`` — returns the single
+    candidate when exactly one matches, ``None`` otherwise (zero matches
+    or ambiguous). Use ``resolve_player_candidates`` directly when you
+    want to surface the ambiguity to the user.
+    """
+    candidates = resolve_player_candidates(
+        mass, hint, default_id=default_id, exposed_ids=exposed_ids
+    )
+    return candidates[0] if len(candidates) == 1 else None

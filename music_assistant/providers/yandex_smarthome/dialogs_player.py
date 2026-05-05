@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.enums import MediaType
 
+from .dialogs_nlu import _normalize_player_token
+
 if TYPE_CHECKING:
     from music_assistant_models.media_items import MediaItemType
 
@@ -27,6 +29,11 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _SEARCH_LIMIT_DEFAULT = 5
+
+
+def _has_cyrillic(text: str) -> bool:
+    """Return True if `text` contains at least one Cyrillic letter."""
+    return any("а" <= c.lower() <= "я" or c.lower() == "ё" for c in text)
 
 
 def _has_feature(player: Any, feature_name: str) -> bool:
@@ -89,7 +96,32 @@ async def resolve_query(mass: MusicAssistant, parsed: ParsedCommand) -> MediaIte
         _LOGGER.warning("mass.music.search failed for %r: %s", parsed.query, exc)
         return None
 
-    return _pick_from_results(results, parsed.kind)
+    picked = _pick_from_results(results, parsed.kind)
+    if picked is not None:
+        return picked
+
+    # P0.7 — retry search with the inflection-stripped query if the original
+    # was Russian. Yandex ASR usually returns words in the case the user
+    # spoke ("включи металлику" → accusative); music indexes store the
+    # nominative ("Металлика"). Stripping the trailing suffix ("металлик")
+    # is enough of a stem to land prefix matches in most providers.
+    if not _has_cyrillic(parsed.query):
+        return None
+    stemmed = _normalize_player_token(parsed.query)
+    if not stemmed or stemmed == parsed.query.lower():
+        return None
+    try:
+        results2 = await mass.music.search(
+            search_query=stemmed,
+            media_types=media_types,
+            limit=_SEARCH_LIMIT_DEFAULT,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _LOGGER.warning("stemmed-retry search failed for %r: %s", stemmed, exc)
+        return None
+    return _pick_from_results(results2, parsed.kind)
 
 
 def _pick_from_results(results: object, kind: str) -> MediaItemType | None:

@@ -171,5 +171,3 @@ DIALOG_DEFAULT_NAME = "Music Assistant"
 DIALOG_CHANNEL = os.environ.get("MA_YANDEX_DIALOG_CHANNEL", "aliceSkill")
 DIALOG_NAME_MIN_LEN = 2
 DIALOG_NAME_MAX_LEN = 64
-DIALOG_SESSION_CACHE_MAX = 200
-DIALOG_SESSION_TTL_SEC = 3600  # 1 hour — last-player memory per session
