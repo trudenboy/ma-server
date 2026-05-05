@@ -691,7 +691,7 @@ def _fake_authenticator_factory(
     if session is None:
         session = MagicMock(spec=aiohttp.ClientSession)
 
-    async def _auth(mass, session_id, timeout):  # type: ignore[no-untyped-def]
+    async def _auth(mass, session_id, timeout, **_kwargs):  # type: ignore[no-untyped-def]
         if session_id_captor is not None:
             session_id_captor.append(session_id)
         _ = (mass, timeout)
@@ -975,7 +975,7 @@ class TestAuthenticatorInjection:
 
         @asynccontextmanager
         async def _cm_auth(
-            *, mass: Any, session_id: str, timeout: float
+            *, mass: Any, session_id: str, timeout: float, **_kwargs: Any
         ) -> AsyncIterator[aiohttp.ClientSession]:
             _ = (mass, session_id, timeout)
             yield session

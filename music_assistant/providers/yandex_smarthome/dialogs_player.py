@@ -1,4 +1,4 @@
-"""Music + player resolvers for the Yandex Dialogs «Навык» webhook.
+"""Music + player resolvers for the Yandex Dialogs custom-skill webhook.
 
 `resolve_query` turns a `ParsedCommand` into a concrete URI/MediaItem ready
 to feed to `mass.player_queues.play_media`. `play_for_alice` wraps the
@@ -140,7 +140,7 @@ def _find_yandex_music_provider(mass: MusicAssistant) -> Any:
 
 
 async def _resolve_my_wave(mass: MusicAssistant) -> str | None:
-    """Resolve «Моя волна» — yandex_music rotor station user:onyourwave.
+    """Resolve "My Wave" radio — yandex_music rotor station user:onyourwave.
 
     Returns a track URI from the rotor batch; play_media in radio mode
     will keep pulling next tracks via the standard queue radio loop. If

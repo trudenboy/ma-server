@@ -46,6 +46,7 @@ from .constants import (
     CONF_ACTION_GET_OTP,
     CONF_ACTION_REGISTER,
     CONF_ACTION_RENAME_DIALOG_SKILL,
+    CONF_AUTH_X_TOKEN,
     CONF_AUTO_CREATE_ARTIFACTS,
     CONF_AUTO_CREATE_SESSION_ID,
     CONF_CLOUD_CONNECTION_TOKEN,
@@ -143,6 +144,26 @@ def _resolve_direct_client_secret(
             if saved:
                 return str(saved)
     return str(values.get(CONF_DIRECT_CLIENT_SECRET) or "")
+
+
+def _resolve_cached_x_token(
+    mass: MusicAssistant,
+    instance_id: str | None,
+    values: dict[str, ConfigValueType],
+) -> str:
+    """Return the cached Yandex Passport x_token, or empty string if absent.
+
+    Like the other secret resolvers, prefers the persisted SECURE_STRING
+    from saved config since the frontend does not echo secrets back into
+    ``values`` on re-open.
+    """
+    if instance_id:
+        prov = mass.get_provider(instance_id)
+        if prov and prov.config:
+            saved = prov.config.get_value(CONF_AUTH_X_TOKEN)
+            if saved:
+                return str(saved)
+    return str(values.get(CONF_AUTH_X_TOKEN) or "")
 
 
 def _resolve_external_base_url(
@@ -273,6 +294,9 @@ async def _run_auto_create_action(
     artifacts_raw = values.get(CONF_AUTO_CREATE_ARTIFACTS)
     artifacts = load_artifacts(str(artifacts_raw) if artifacts_raw else None)
 
+    def _cache_x_token(token: str) -> None:
+        values[CONF_AUTH_X_TOKEN] = token
+
     try:
         new_artifacts = await auto_create_skill(
             mass=mass,
@@ -284,6 +308,8 @@ async def _run_auto_create_action(
             logo_bytes=load_default_logo_bytes(),
             session_id=session_id,
             base_url_override=str(values.get(CONF_EXTERNAL_BASE_URL) or "") or None,
+            cached_x_token=_resolve_cached_x_token(mass, instance_id, values) or None,
+            on_token_obtained=_cache_x_token,
         )
     except asyncio.CancelledError:
         # Preserve cooperative cancellation so config-flow shutdown
@@ -344,6 +370,9 @@ async def _run_auto_create_dialog_action(
 
     skill_name = str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME)
 
+    def _cache_x_token(token: str) -> None:
+        values[CONF_AUTH_X_TOKEN] = token
+
     try:
         new_artifacts = await auto_create_skill(
             mass=mass,
@@ -357,6 +386,8 @@ async def _run_auto_create_dialog_action(
             skill_type="dialog",
             dialog_backend_uri=dialog_backend_uri,
             base_url_override=str(values.get(CONF_EXTERNAL_BASE_URL) or "") or None,
+            cached_x_token=_resolve_cached_x_token(mass, instance_id, values) or None,
+            on_token_obtained=_cache_x_token,
         )
     except asyncio.CancelledError:
         raise
@@ -374,6 +405,27 @@ async def _run_auto_create_dialog_action(
             last_error=repr(exc),
         )
         _LOGGER.exception("dialog auto-create hit unexpected error")
+
+    # Hint: empty-body 400 on create_app for the dialog pipeline almost
+    # always means our DIALOG_CHANNEL guess ("dialog" by default) is wrong.
+    # The Yandex Dialogs app-store-api channel string for the custom skill type is not
+    # publicly documented and we cannot probe it from our side.
+    if (
+        new_artifacts.state == SkillCreationState.FAILED
+        and new_artifacts.last_error
+        and "create_app" in new_artifacts.last_error
+        and "HTTP 400" in new_artifacts.last_error
+    ):
+        new_artifacts = dataclasses.replace(
+            new_artifacts,
+            last_error=(
+                f"{new_artifacts.last_error}\n\n"
+                "Hint: This usually means the channel value sent to "
+                "Yandex Dialogs is wrong. Try overriding the "
+                "MA_YANDEX_DIALOG_CHANNEL environment variable at MA "
+                "startup (e.g. =general, =alice, =skill) and retry."
+            ),
+        )
 
     values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS] = dump_artifacts(new_artifacts)
     if new_artifacts.state == SkillCreationState.DONE and new_artifacts.skill_id:
@@ -396,12 +448,17 @@ async def _run_rename_dialog_action(
     skill_name = str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME)
     session_id = str(values.get("session_id") or uuid.uuid4().hex)
 
+    def _cache_x_token(token: str) -> None:
+        values[CONF_AUTH_X_TOKEN] = token
+
     new_artifacts = await auto_rename_dialog_skill(
         mass=mass,
         artifacts=artifacts,
         new_name=skill_name,
         dialog_backend_uri=dialog_backend_uri,
         session_id=session_id,
+        cached_x_token=_resolve_cached_x_token(mass, instance_id, values) or None,
+        on_token_obtained=_cache_x_token,
     )
     values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS] = dump_artifacts(new_artifacts)
 
@@ -771,5 +828,16 @@ def _common_tail_entries(
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_DIRECT_ACCESS_TOKEN)) if values else None),
+        ),
+        # Cached Yandex Passport x_token — populated after the first
+        # successful auto-create Device Flow and reused on subsequent
+        # auto-create runs to skip the device-code prompt.
+        ConfigEntry(
+            key=CONF_AUTH_X_TOKEN,
+            type=ConfigEntryType.SECURE_STRING,
+            label="Yandex Passport x_token (cached)",
+            hidden=True,
+            required=False,
+            value=(cast("str", values.get(CONF_AUTH_X_TOKEN)) if values else None),
         ),
     ]

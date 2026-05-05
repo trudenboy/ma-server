@@ -1,4 +1,4 @@
-"""Server-side NLU parser for Yandex Dialogs «Навык» webhook commands.
+"""Server-side NLU parser for Yandex Dialogs custom-skill webhook commands.
 
 The plugin's Dialogs skill registers in the Yandex Dialogs UI without
 declared intents/slots — Yandex passes the raw user phrase as
@@ -44,11 +44,14 @@ class ParsedCommand:
 _PUNCT_RE = re.compile(r"[!?.,;:«»\"„“]")
 _SPACE_RE = re.compile(r"\s+")
 
-# "на <player_hint>" suffix. The hint can be multi-word ("на кухонной колонке").
-# Anchored to a word boundary so "Натали" isn't mis-split.
+# Trailing "<player>" hint suffix introduced by the Russian preposition "на".
+# The hint can be multi-word (e.g. a phrase like "in the kitchen speaker").
+# Anchored to a word boundary so a name beginning with the same letters
+# (e.g. "Natalie" in Russian) isn't mis-split mid-token.
 _PLAYER_SUFFIX_RE = re.compile(r"\s+на\s+(?P<hint>.+?)\s*$", re.IGNORECASE)
 
-# Verb stem covering "включи", "включай", "включите", "поставь", "запусти".
+# Verb stem covering Russian imperative forms used to start playback
+# ("turn on", "play", "launch") with their plural / aspect variants.
 _VERB_RE = re.compile(
     r"^(?:алиса[, ]+)?(?:включи(?:те)?|включай(?:те)?|поставь(?:те)?|запусти(?:те)?)\s+",
     re.IGNORECASE,
@@ -56,7 +59,7 @@ _VERB_RE = re.compile(
 
 # Type prefixes inside the intent part. Order matters: longer keywords first.
 _KIND_RULES: tuple[tuple[re.Pattern[str], CommandKind, bool], ...] = (
-    # my_wave / личная волна — no query, the verb is everything
+    # my_wave / personal radio wave — no query, the verb is everything
     (re.compile(r"^(?:мою|свою|нашу)\s+волну\b", re.IGNORECASE), "my_wave", True),
     (re.compile(r"^мо[её]\s+радио\b", re.IGNORECASE), "my_wave", True),
     # playlist
@@ -100,16 +103,17 @@ def parse_command(text: str) -> ParsedCommand:
     cleaned = _PUNCT_RE.sub(" ", text)
     cleaned = _SPACE_RE.sub(" ", cleaned).strip()
 
-    # Strip "Алиса, …" prefix if present (Yandex usually does this, but defensively).
+    # Strip the "Alice, ..." vocative prefix if present
+    # (Yandex usually strips it on its side, but defensively).
     cleaned = re.sub(r"^алиса[,\s]+", "", cleaned, flags=re.IGNORECASE)
 
-    # Split off "на <player_hint>" suffix.
+    # Split off the trailing "<player>" hint suffix.
     player_hint: str | None = None
     if match := _PLAYER_SUFFIX_RE.search(cleaned):
         player_hint = match.group("hint").strip().lower()
         cleaned = cleaned[: match.start()].strip()
 
-    # Strip the verb at the start ("включи …", "поставь …").
+    # Strip the imperative verb at the start (e.g. "play this", "turn on that").
     intent_part = _VERB_RE.sub("", cleaned).strip()
 
     if not intent_part:
@@ -141,7 +145,7 @@ def parse_command(text: str) -> ParsedCommand:
 
 # Common Russian inflection suffixes we strip for fuzzy player-name matching.
 # Not a full lemmatizer — picks up the most frequent endings for short names.
-# Order: longest first so "ой" matches before "й".
+# Order: longest first so multi-letter suffixes match before single-letter ones.
 _INFLECTION_SUFFIXES = (
     "ого",  # noqa: RUF001
     "ому",

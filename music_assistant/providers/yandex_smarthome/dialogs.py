@@ -1,4 +1,4 @@
-"""HTTP handler for the Yandex Dialogs «Навык» webhook (experimental).
+"""HTTP handler for the Yandex Dialogs custom-skill webhook (experimental).
 
 Registers a single dynamic route on the MA webserver:
 

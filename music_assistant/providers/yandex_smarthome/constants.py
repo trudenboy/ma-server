@@ -25,6 +25,11 @@ CONF_EXPOSED_PLAYLISTS = "exposed_playlists"
 # Auto-create-skill feature state (round-trips through the config form)
 CONF_AUTO_CREATE_ARTIFACTS = "auto_create_artifacts"
 CONF_AUTO_CREATE_SESSION_ID = "auto_create_session_id"
+# Cached Yandex Passport x_token from the first successful Device Flow.
+# Reused on subsequent auto-create runs (Smart Home + Dialog) so the user
+# does not have to confirm the device code every time. Long-lived (months);
+# automatically refreshed on use. Cleared if Yandex returns 401 on refresh.
+CONF_AUTH_X_TOKEN = "auth_x_token"
 
 # ---------------------------------------------------------------------------
 # Config actions
@@ -143,7 +148,7 @@ ERROR_INTERNAL_ERROR = "INTERNAL_ERROR"
 ERROR_DEVICE_NOT_FOUND = "DEVICE_NOT_FOUND"
 
 # ---------------------------------------------------------------------------
-# Dialog skill (Yandex Dialogs «Навык» — free-form voice playback) — experimental
+# Dialog skill (Yandex Dialogs custom skill — free-form voice playback) — experimental
 # ---------------------------------------------------------------------------
 CONF_DIALOG_SKILL_ENABLED = "dialog_skill_enabled"
 CONF_DIALOG_SKILL_NAME = "dialog_skill_name"
@@ -159,13 +164,11 @@ CONF_ACTION_RENAME_DIALOG_SKILL = "rename_dialog_skill"
 DIALOG_WEBHOOK_BASE_PATH = "/api/yandex_dialogs/webhook"
 DIALOG_RESOLVE_TIMEOUT = 2.5
 DIALOG_DEFAULT_NAME = "Music Assistant"
-# Yandex Dialogs app-store-api channel string for «Навык» (custom dialog skill).
-# Smart Home uses "smartHome"; the Dialogs «Навык» channel string is not
-# documented in the public app-store-api. Default below ("dialog") is our best
-# guess. If Yandex returns a 4xx during auto-create with this value, the user
-# can override via the MA_YANDEX_DIALOG_CHANNEL environment variable without
-# editing the code (e.g. set MA_YANDEX_DIALOG_CHANNEL=general for a probe).
-DIALOG_CHANNEL = os.environ.get("MA_YANDEX_DIALOG_CHANNEL", "dialog")
+# Yandex Dialogs app-store-api channel string for the custom dialog skill.
+# Smart Home uses "smartHome"; the Dialogs custom-skill channel value was captured
+# from the dev console DevTools (POST /apps): channel="aliceSkill".
+# Override via MA_YANDEX_DIALOG_CHANNEL env var if Yandex changes the contract.
+DIALOG_CHANNEL = os.environ.get("MA_YANDEX_DIALOG_CHANNEL", "aliceSkill")
 DIALOG_NAME_MIN_LEN = 2
 DIALOG_NAME_MAX_LEN = 64
 DIALOG_SESSION_CACHE_MAX = 200

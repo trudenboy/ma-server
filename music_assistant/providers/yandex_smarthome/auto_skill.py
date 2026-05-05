@@ -462,8 +462,22 @@ class DialogsSkillCreator:
                     yandex_error=_extract_error_code(body),
                 )
             if resp.status not in (200, 201, 202):
+                # Empty / very short body 4xx — log response headers so the
+                # user can see what Yandex actually returned (helps diagnose
+                # e.g. wrong "channel" parameter where the API rejects the
+                # request before generating a body).
+                if not body.strip():
+                    _LOGGER.warning(
+                        "Yandex %s %s returned %s with empty body; response "
+                        "headers=%s, request payload channel=%r",
+                        method,
+                        url,
+                        resp.status,
+                        dict(resp.headers),
+                        payload.get("channel"),
+                    )
                 raise DialogsApiError(
-                    f"{method} {url} HTTP {resp.status}: {body[:200]}",
+                    f"{method} {url} HTTP {resp.status}: {body[:200] or '<empty>'}",
                     step=step,
                     http_status=resp.status,
                     yandex_error=_extract_error_code(body),
@@ -671,23 +685,29 @@ def build_dialog_draft_payload(
     logo_id: str | None,
     developer_name: str = "Music Assistant user",
 ) -> dict[str, Any]:
-    """Compose the PATCH /draft/update body for a Yandex Dialogs «Навык».
+    """Compose the PATCH /draft/update body for a Yandex Dialogs custom skill.
 
-    Mirrors :func:`build_draft_payload` but uses
-    ``publishingSettings.category="music_and_sounds"`` and drops
-    the ``smartHome`` deepLinks block. ⚠️ Exact required-field set
-    for «Навык» is not documented — this matches the most common shape
-    seen in Dialogs developer UI HARs and may need adjustment after a
-    manual probe (see plan probe checklist).
+    Captured from a live PATCH /draft/update request made by the Yandex
+    Dialogs developer console — fields and shape match exactly. Notes:
+
+    - ``activationPhrases``: globally unique across all Yandex skills, so
+      the user must pick something distinctive (Yandex returns 400
+      ``"Это активационное имя уже зарегистрировано"`` if the name is taken).
+    - ``voice="good_oksana"``: default female voice in Dialogs (older
+      ``"shitova.us"`` constant was Smart-Home-specific).
+    - ``publishingSettings``: flat fields (no ``multilingualSettings`` /
+      ``secondaryTitle`` blocks — those are Smart-Home shape).
+    - ``skillAccess="private"`` + ``hideInStore=true`` keep the skill
+      out of the public store; only the creator can link it.
     """
     return {
         "logo2": None,
         "name": skill_name,
-        "voice": "shitova.us",
+        "voice": "good_oksana",
+        "activationPhrases": [skill_name],
         "logoId": logo_id,
-        "skillAccess": "private",
-        "hideInStore": True,
         "noteForModerator": "",
+        "yaCloudGrant": False,
         "backendSettings": {
             "uri": backend_uri,
             "functionId": "",
@@ -697,25 +717,21 @@ def build_dialog_draft_payload(
             "brandVerificationWebsite": "",
             "category": "music_and_sounds",
             "developerName": developer_name,
-            "secondaryTitle": skill_name,
+            "explicitContent": False,
+            "structuredExamples": [],
+            "description": "Free-form voice playback bridge for Music Assistant.",
             "email": "",
-            "multilingualSettings": {
-                "ru": {
-                    "name": skill_name,
-                    "secondaryTitle": skill_name,
-                    "description": "Free-form voice playback bridge for Music Assistant.",
-                    "shortDescription": "Music Assistant voice control",
-                    "examplePhrases": [
-                        "включи Metallica на кухне",
-                        "включи мою волну",
-                        "включи плейлист джаз",
-                    ],
-                },
-            },
         },
+        "requiredInterfaces": [],
+        "exactSurfaces": [],
+        "surfaceWhitelist": [],
+        "surfaceBlacklist": [],
         "oauthAppId": None,
-        "enableAllAvailableRegions": True,
-        "selectedRegions": [],
+        "appMetricaApiKey": "",
+        "useStateStorage": False,
+        "rsyPlatformId": "",
+        "skillAccess": "private",
+        "hideInStore": True,
         "channel": DIALOG_CHANNEL,
     }
 
@@ -955,13 +971,25 @@ def _build_device_code_page(user_code: str, verification_url: str, status_url: s
 </html>"""
 
 
-async def _default_authenticator(
+async def _default_authenticator(  # noqa: PLR0915
     *,
     mass: MusicAssistant,
     session_id: str,
     timeout: float,
+    cached_x_token: str | None = None,
+    on_token_obtained: Callable[[str], None] | None = None,
 ) -> AsyncIterator[aiohttp.ClientSession]:
     """Real-world authentication path — runs Device Flow and yields a session.
+
+    Cache fast-path: if ``cached_x_token`` is provided and Yandex still
+    accepts it, ``refresh_passport_cookies`` succeeds without a fresh
+    Device Flow, so subsequent auto-create runs (e.g. Smart Home → Dialog)
+    do not prompt the user to confirm the device code again. On any
+    failure during refresh the cache is treated as stale and the full
+    Device Flow runs as before.
+
+    After a successful Device Flow, ``on_token_obtained`` (if provided)
+    is invoked with the fresh ``x_token`` so the caller can persist it.
 
     Serves an intermediate HTML page through MA's webserver so the user
     sees the short ``user_code`` (Yandex's ya.ru/device does not pre-fill
@@ -975,6 +1003,7 @@ async def _default_authenticator(
     from aiohttp import web  # noqa: PLC0415
     from ya_passport_auth import ClientConfig, PassportClient  # noqa: PLC0415
     from ya_passport_auth.config import DEFAULT_ALLOWED_HOSTS  # noqa: PLC0415
+    from ya_passport_auth.credentials import SecretStr  # noqa: PLC0415
 
     from music_assistant.helpers.auth import AuthenticationHelper  # noqa: PLC0415
 
@@ -986,6 +1015,26 @@ async def _default_authenticator(
     config = ClientConfig(allowed_hosts=allowed)
 
     async with PassportClient.create(config=config) as client:
+        # Cache fast-path: try cached x_token first. If the token is still
+        # valid Yandex returns fresh session cookies and we skip Device Flow.
+        # The cache stores the raw string; ya_passport_auth wraps it in
+        # SecretStr for redacted logging on its side.
+        if cached_x_token:
+            try:
+                await client.refresh_passport_cookies(SecretStr(cached_x_token))
+                _LOGGER.info(
+                    "auto-skill: reused cached Yandex Passport x_token (no Device Flow needed)"
+                )
+                yield client._session
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOGGER.info(
+                    "auto-skill: cached x_token rejected (%s) — falling back to fresh Device Flow",
+                    exc,
+                )
+
         device_session = await client.start_device_login()
         # Don't log user_code — it's a time-limited credential (grants
         # Yandex sign-in for the device-flow window) and writing it to
@@ -1066,6 +1115,19 @@ async def _default_authenticator(
             mass.webserver.unregister_dynamic_route(status_path, "GET")
 
         await client.refresh_passport_cookies(creds.x_token)
+
+        # Persist the new x_token so subsequent auto-create runs can skip
+        # Device Flow. Best-effort: a callback failure must not break auth.
+        # Unwrap SecretStr → str so the callback can store it via the MA
+        # config plumbing (SECURE_STRING serialiser expects a plain str).
+        if on_token_obtained is not None:
+            try:
+                on_token_obtained(creds.x_token.get_secret())
+            except Exception:
+                _LOGGER.exception(
+                    "auto-skill: on_token_obtained callback failed; x_token will not be cached"
+                )
+
         yield client._session
 
 
@@ -1075,6 +1137,8 @@ def _build_authenticator_cm(
     mass: MusicAssistant,
     session_id: str,
     timeout: float,
+    cached_x_token: str | None = None,
+    on_token_obtained: Callable[[str], None] | None = None,
 ) -> Any:
     """Wrap *authenticator* so it supports ``async with`` uniformly.
 
@@ -1083,8 +1147,18 @@ def _build_authenticator_cm(
     a CM factory with ``asynccontextmanager`` is *not* idempotent — the
     outer wrapper would call ``__anext__`` on the inner CM object and
     crash — so detect the CM result and pass it through unchanged.
+
+    ``cached_x_token`` and ``on_token_obtained`` are forwarded to the
+    default authenticator for fast-path / persistence; injected
+    test authenticators (which take ``**kwargs``) get them as well.
     """
-    result = authenticator(mass=mass, session_id=session_id, timeout=timeout)
+    result = authenticator(
+        mass=mass,
+        session_id=session_id,
+        timeout=timeout,
+        cached_x_token=cached_x_token,
+        on_token_obtained=on_token_obtained,
+    )
     if hasattr(result, "__aenter__") and hasattr(result, "__aexit__"):
         return result
 
@@ -1123,6 +1197,8 @@ async def auto_create_skill(  # noqa: PLR0913
     skill_type: Literal["smart_home", "dialog"] = "smart_home",
     dialog_backend_uri: str | None = None,
     base_url_override: str | None = None,
+    cached_x_token: str | None = None,
+    on_token_obtained: Callable[[str], None] | None = None,
     progress_cb: Callable[[SkillCreationArtifacts], Awaitable[None]] | None = None,
     authenticator: Callable[..., AsyncIterator[aiohttp.ClientSession]] | None = None,
     creator_factory: Callable[[aiohttp.ClientSession], DialogsSkillCreator] | None = None,
@@ -1167,7 +1243,12 @@ async def auto_create_skill(  # noqa: PLR0913
 
     try:
         async with _build_authenticator_cm(
-            auth_fn, mass=mass, session_id=session_id, timeout=timeout
+            auth_fn,
+            mass=mass,
+            session_id=session_id,
+            timeout=timeout,
+            cached_x_token=cached_x_token,
+            on_token_obtained=on_token_obtained,
         ) as session:
             creator = (
                 creator_factory(session)
@@ -1392,13 +1473,15 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
     return artifacts
 
 
-async def auto_rename_dialog_skill(
+async def auto_rename_dialog_skill(  # noqa: PLR0913
     *,
     mass: MusicAssistant,
     artifacts: SkillCreationArtifacts,
     new_name: str,
     dialog_backend_uri: str,
     session_id: str,
+    cached_x_token: str | None = None,
+    on_token_obtained: Callable[[str], None] | None = None,
     authenticator: Callable[..., AsyncIterator[aiohttp.ClientSession]] | None = None,
     creator_factory: Callable[[aiohttp.ClientSession], DialogsSkillCreator] | None = None,
     timeout: float = DEVICE_FLOW_TIMEOUT_SECONDS,
@@ -1422,7 +1505,12 @@ async def auto_rename_dialog_skill(
 
     try:
         async with _build_authenticator_cm(
-            auth_fn, mass=mass, session_id=session_id, timeout=timeout
+            auth_fn,
+            mass=mass,
+            session_id=session_id,
+            timeout=timeout,
+            cached_x_token=cached_x_token,
+            on_token_obtained=on_token_obtained,
         ) as session:
             creator = (
                 creator_factory(session)

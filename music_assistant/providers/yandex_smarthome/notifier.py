@@ -67,6 +67,13 @@ class StateNotifier:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._unsub: Callable[[], None] | None = None
 
+        # Track UNKNOWN_USER state — Yandex returns this until the user
+        # has linked the skill in the Yandex Smart Home / Alice mobile
+        # app via OAuth. We surface the first occurrence as a clear
+        # WARNING with instructions and then silence further errors at
+        # debug level so logs don't flood while linking is in progress.
+        self._unknown_user_warned: bool = False
+
     async def start(self) -> None:
         """Subscribe to player events and start background tasks."""
         self._unsub = self._mass.subscribe(
@@ -185,7 +192,14 @@ class StateNotifier:
     # -----------------------------------------------------------------------
 
     async def _send_state_callback(self, devices: list[DeviceState]) -> None:
-        """POST state callback to Yandex."""
+        """POST state callback to Yandex.
+
+        Yandex returns ``UNKNOWN_USER`` (HTTP 400) until the user has
+        linked the skill in the Yandex Alice / Smart Home app. That is a
+        normal first-run state, not a code bug — we emit one WARNING with
+        linking instructions, then quiet down to debug level so logs
+        don't flood while linking is in progress.
+        """
         payload = CallbackRequest(
             ts=time.time(),
             payload=CallbackPayload(user_id=self._user_id, devices=devices),
@@ -196,13 +210,34 @@ class StateNotifier:
                 json=_strip_none(asdict(payload)),
                 headers=self._auth_header,
             ) as resp:
-                if resp.status not in (200, 202):
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"State callback failed with HTTP {resp.status}: {body[:200]}"
-                    )
-                self._logger.debug("State callback sent: %d device(s)", len(devices))
-        except Exception:
+                if resp.status in (200, 202):
+                    if self._unknown_user_warned:
+                        self._logger.info(
+                            "State callback succeeded — Yandex now recognizes the user "
+                            "(account linking complete)"
+                        )
+                        self._unknown_user_warned = False
+                    self._logger.debug("State callback sent: %d device(s)", len(devices))
+                    return
+
+                body = await resp.text()
+                if resp.status == 400 and "UNKNOWN_USER" in body:
+                    if not self._unknown_user_warned:
+                        self._logger.warning(
+                            "Yandex returned UNKNOWN_USER for state callback — this means "
+                            "the skill has not been linked to a Yandex account yet. "
+                            "Open https://yandex.ru/quasar/iot or the «Дом с Алисой» app, "  # noqa: RUF001
+                            "find the skill in Devices → +, and tap «Связать аккаунт». "
+                            "State callback errors will be suppressed at debug level "
+                            "until linking succeeds."
+                        )
+                        self._unknown_user_warned = True
+                    else:
+                        self._logger.debug("State callback still UNKNOWN_USER (account not linked)")
+                    return  # silent — not a real error, don't raise
+
+                raise RuntimeError(f"State callback failed with HTTP {resp.status}: {body[:200]}")
+        except RuntimeError:
             self._logger.exception("State callback error")
             raise
 
