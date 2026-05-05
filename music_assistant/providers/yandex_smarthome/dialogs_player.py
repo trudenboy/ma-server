@@ -162,7 +162,7 @@ async def _resolve_my_wave(mass: MusicAssistant) -> str | None:
     if not track_id:
         return None
     instance_id = getattr(provider, "instance_id", "yandex_music")
-    return f"yandex_music://{instance_id}/track/{track_id}"
+    return f"{instance_id}://track/{track_id}"
 
 
 async def _resolve_genre(mass: MusicAssistant, query: str) -> MediaItemType | str | None:
@@ -187,7 +187,7 @@ async def _resolve_genre(mass: MusicAssistant, query: str) -> MediaItemType | st
                     )
                     if track_id:
                         instance_id = getattr(provider, "instance_id", "yandex_music")
-                        return f"yandex_music://{instance_id}/track/{track_id}"
+                        return f"{instance_id}://track/{track_id}"
         except Exception as exc:
             _LOGGER.debug("Genre rotor fallback for %r: %s", query, exc)
 
