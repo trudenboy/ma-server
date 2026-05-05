@@ -431,9 +431,14 @@ async def get_config_entries(  # noqa: PLR0915
 
     # Build playlist options from MA library (any music provider). Fail-soft: empty
     # list if music controller isn't ready (e.g. provider load order at first run).
+    # CancelledError must propagate so config-flow cancellation/shutdown work.
     playlist_options: list[ConfigValueOption] = []
-    with contextlib.suppress(Exception):
+    try:
         playlist_options = await fetch_playlist_options(mass)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: S110
+        pass
 
     entries: list[ConfigEntry] = [
         # Instance name

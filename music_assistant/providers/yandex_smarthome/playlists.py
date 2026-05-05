@@ -7,6 +7,7 @@ and so tests can stub a single seam.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,8 @@ async def fetch_playlist_options(mass: MusicAssistant) -> list[ConfigValueOption
             provider_label = playlist.provider or ""
             title = f"{playlist.name} ({provider_label})" if provider_label else playlist.name
             options.append(ConfigValueOption(title=title, value=playlist.uri))
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         # Fail-soft: this runs on every config-form render and races with
         # provider/database startup. Don't spam stack traces — debug-level

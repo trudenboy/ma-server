@@ -143,6 +143,8 @@ class DialogsWebhookHandler:
 
         try:
             body = await request.json()
+        except asyncio.CancelledError:
+            raise
         except Exception:
             return self._yandex_response(session_state={}, text="Что-то пошло не так с запросом.")  # noqa: RUF001
         if not isinstance(body, dict):

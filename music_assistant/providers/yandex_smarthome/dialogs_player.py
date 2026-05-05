@@ -10,6 +10,7 @@ Bound to MA APIs: `mass.music.search`, `mass.music.get_item_by_uri`,
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -82,6 +83,8 @@ async def resolve_query(mass: MusicAssistant, parsed: ParsedCommand) -> MediaIte
             media_types=media_types,
             limit=_SEARCH_LIMIT_DEFAULT,
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         _LOGGER.warning("mass.music.search failed for %r: %s", parsed.query, exc)
         return None
@@ -152,6 +155,8 @@ async def _resolve_my_wave(mass: MusicAssistant) -> str | None:
         if client is None:
             return None
         tracks, _batch_id = await client.get_rotor_station_tracks("user:onyourwave")
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         _LOGGER.warning("My Wave rotor fetch failed: %s", exc)
         return None
@@ -188,6 +193,8 @@ async def _resolve_genre(mass: MusicAssistant, query: str) -> MediaItemType | st
                     if track_id:
                         instance_id = getattr(provider, "instance_id", "yandex_music")
                         return f"{instance_id}://track/{track_id}"
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             _LOGGER.debug("Genre rotor fallback for %r: %s", query, exc)
 
@@ -198,6 +205,8 @@ async def _resolve_genre(mass: MusicAssistant, query: str) -> MediaItemType | st
             media_types=[MediaType.ARTIST, MediaType.TRACK],
             limit=_SEARCH_LIMIT_DEFAULT,
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         _LOGGER.warning("Genre fallback search failed for %r: %s", query, exc)
         return None
@@ -225,6 +234,8 @@ async def play_for_alice(
         if powered is False:
             try:
                 await mass.players.cmd_power(player_id, True)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 _LOGGER.warning("cmd_power(True) on %s failed: %s", player_id, exc)
 
