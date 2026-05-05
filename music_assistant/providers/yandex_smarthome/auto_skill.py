@@ -527,10 +527,13 @@ def _resolve_base_url(mass: MusicAssistant, override: str | None) -> str:
 
     ``override`` is the user's ``CONF_EXTERNAL_BASE_URL`` value if they
     chose to set one. Empty/None falls back to ``mass.webserver.base_url``.
+    Both branches strip leading/trailing whitespace and trailing slashes
+    so a user-entered value like ``" https://ma.example.com/ "`` doesn't
+    break the HTTPS precondition check or generate malformed URIs.
     """
-    if override:
-        return override.rstrip("/")
-    return str(mass.webserver.base_url).rstrip("/")
+    if override and override.strip():
+        return override.strip().rstrip("/")
+    return str(mass.webserver.base_url).strip().rstrip("/")
 
 
 def derive_backend_uri(

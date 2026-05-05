@@ -168,7 +168,7 @@ def _resolve_external_base_url(
     fallback = ""
     with contextlib.suppress(Exception):
         fallback = str(mass.webserver.base_url)
-    return fallback.rstrip("/")
+    return fallback.strip().rstrip("/")
 
 
 def _resolve_dialog_webhook_secret(

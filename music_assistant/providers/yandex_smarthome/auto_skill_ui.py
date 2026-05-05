@@ -949,10 +949,13 @@ def _dialog_skill_entries(
                 key="label_dialog_https_warning",
                 type=ConfigEntryType.LABEL,
                 label=(
-                    f"⚠️ MA's Base URL is {base_url or '<unset>'}. "
+                    f"⚠️ Resolved Base URL is {base_url or '<unset>'}. "
                     "The dialog skill webhook requires a **publicly reachable HTTPS URL**. "
-                    "Set a reverse proxy with a real certificate and update "
-                    "Settings → Core → Webserver → Base URL, then reopen these settings."
+                    "Set up a reverse proxy with a real certificate, then either "
+                    "fill the **External Base URL** field above (recommended — "
+                    "doesn't affect MA's local access / HA Ingress) "
+                    "or update Settings → Core → Webserver → Base URL globally. "
+                    "Save and reopen this page after."
                 ),
                 category=_CAT_DIALOG_SKILL,
             )

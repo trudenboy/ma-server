@@ -216,14 +216,16 @@ class YandexSmartHomePlugin(PluginProvider):
         await self._state_notifier.start()
 
     async def _start_direct_mode(self) -> None:
-        """Initialize direct connection mode — HTTP endpoints + state notifier."""
-        if not self._skill_id or not self._skill_token or not self._skill_token.get_secret():
-            self.logger.error(
-                "Direct mode requires skill_id and skill_token — "
-                "create a private skill in Yandex.Dialogs and configure the tokens"
-            )
-            return
+        """Initialize direct connection mode — HTTP endpoints + state notifier.
 
+        Two-stage: HTTP routes are registered as soon as ``direct_client_secret``
+        is available (auto-generated when the user opens the config form), so
+        Yandex's backend-validation step during ``request_deploy`` can reach
+        them before the skill is created. The state notifier (outgoing
+        callbacks to Yandex) only starts once ``skill_id``/``skill_token``
+        are populated by a successful auto-create — there is nothing to
+        report state to before that point.
+        """
         if not self._direct_client_secret:
             self.logger.error("Direct mode requires a client secret for OAuth account linking")
             return
@@ -247,22 +249,31 @@ class YandexSmartHomePlugin(PluginProvider):
         )
         self._direct_handler.register_routes()
 
-        # State notifier — callback to Yandex Dialogs (same as Cloud Plus)
-        session = self.mass.http_session
-        callback_url = f"{YANDEX_DIALOGS_CALLBACK_BASE}/{self._skill_id}/callback/state"
-        auth_header = {"Authorization": f"OAuth {self._skill_token.get_secret()}"}
+        # State notifier needs skill_id + skill_token to push state callbacks
+        # to Yandex — these only exist after a successful auto-create. Skip
+        # silently if missing; this is the normal "first run" state.
+        if self._skill_id and self._skill_token and self._skill_token.get_secret():
+            session = self.mass.http_session
+            callback_url = f"{YANDEX_DIALOGS_CALLBACK_BASE}/{self._skill_id}/callback/state"
+            auth_header = {"Authorization": f"OAuth {self._skill_token.get_secret()}"}
 
-        self._state_notifier = StateNotifier(
-            mass=self.mass,
-            session=session,
-            user_id=self._user_id,
-            callback_url=callback_url,
-            auth_header=auth_header,
-            logger=self.logger,
-            exposed_ids=self._exposed_ids,
-            playlist_uris=self._exposed_playlists,
-        )
-        await self._state_notifier.start()
+            self._state_notifier = StateNotifier(
+                mass=self.mass,
+                session=session,
+                user_id=self._user_id,
+                callback_url=callback_url,
+                auth_header=auth_header,
+                logger=self.logger,
+                exposed_ids=self._exposed_ids,
+                playlist_uris=self._exposed_playlists,
+            )
+            await self._state_notifier.start()
+        else:
+            self.logger.info(
+                "Direct mode: HTTP routes registered, but state notifier is "
+                "idle (no skill_id/skill_token yet). Run 'Create Smart Home "
+                "skill' in the plugin settings to complete setup."
+            )
 
         # Experimental: Dialogs voice skill webhook handler
         if self._dialog_skill_enabled:
