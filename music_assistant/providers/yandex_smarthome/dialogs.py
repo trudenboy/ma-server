@@ -300,18 +300,34 @@ class DialogsWebhookHandler:
         is_new = bool(session.get("new"))
         command = str(req.get("command") or "").strip()
 
+        # Pending-command / awaiting-query lookups read from `state.session`
+        # first and fall back to `state.application`. Some Yandex devices
+        # (notably screenless Stations under certain settings) don't
+        # consistently echo `state.session` back across SimpleUtterance
+        # turns — the application tier is per-device, persists across
+        # session resets, and is honoured by every Yandex surface we've
+        # tested. Writes mirror to both buckets in the response builders.
+        pending_in = session_state_in.get("pending_command")
+        if not isinstance(pending_in, dict):
+            pending_in = app_state_in.get("pending_command")
+        awaiting_in = bool(session_state_in.get("awaiting_query")) or bool(
+            app_state_in.get("awaiting_query")
+        )
+
         # Single summary log per incoming request — surfaces the wire-shape
         # bits we route on. Sensitive fields (skill_id, webhook_secret,
         # raw payload IDs) are excluded; user/session IDs are opaque
-        # opaque tokens and DEBUG is opt-in, so they're included as-is.
+        # tokens and DEBUG is opt-in, so they're included as-is.
         self._logger.debug(
             "Webhook recv: cmd=%r req_type=%s is_new=%s pending=%s "
-            "awaiting=%s default_player=%s session_id=%s",
+            "(session=%s app=%s) awaiting=%s default_player=%s session_id=%s",
             command,
             req.get("type", "SimpleUtterance"),
             is_new,
+            bool(pending_in),
             bool(session_state_in.get("pending_command")),
-            bool(session_state_in.get("awaiting_query")),
+            bool(app_state_in.get("pending_command")),
+            awaiting_in,
             default_id,
             session.get("session_id", ""),
         )
@@ -359,15 +375,18 @@ class DialogsWebhookHandler:
         # the existing kind classifier runs ("песню X", "альбом Y",
         # "мою волну", etc.). Skip the synthetic prefix if the user
         # already said one of the verbs.
-        if session_state_in.get("awaiting_query") and not _VERB_RE.match(command):
+        if awaiting_in and not _VERB_RE.match(command):
             command = f"включи {command}"
             self._logger.debug("Awaiting-query branch: synthesised cmd=%r", command)
 
         # P0.3 — pending-command re-entry. If a previous turn asked the
         # user to disambiguate which player to use, the new utterance (or
         # button press) carries the answer; replay the saved play intent.
-        pending = session_state_in.get("pending_command")
-        if isinstance(pending, dict):
+        # `pending_in` was merged from `state.session` and `state.application`
+        # earlier so this works even on devices that don't preserve
+        # session-state between SimpleUtterance turns.
+        if isinstance(pending_in, dict):
+            pending: dict[str, Any] = pending_in
             self._logger.debug(
                 "Pending-command branch: kind=%s query=%r radio=%s; cmd=%r payload=%s",
                 pending.get("kind"),
@@ -427,6 +446,12 @@ class DialogsWebhookHandler:
                     **_without_pending(session_state_in),
                     "awaiting_query": True,
                 },
+                # Mirror to application_state so the next turn can find
+                # the flag even if Yandex didn't echo `state.session`.
+                application_state={
+                    **_without_pending(app_state_in),
+                    "awaiting_query": True,
+                },
             )
 
         candidates = resolve_player_candidates(
@@ -455,6 +480,7 @@ class DialogsWebhookHandler:
                         parsed=parsed,
                         candidates=all_exposed,
                         session_state_in=session_state_in,
+                        app_state_in=app_state_in,
                     )
             hint = parsed.player_hint or "(не указано)"
             self._logger.info(
@@ -481,6 +507,7 @@ class DialogsWebhookHandler:
                 parsed=parsed,
                 candidates=candidates,
                 session_state_in=session_state_in,
+                app_state_in=app_state_in,
             )
 
         self._logger.debug(
@@ -561,8 +588,15 @@ class DialogsWebhookHandler:
             control.value,
         )
         self._mass.create_task(execute_control(self._mass, control, player))
+        # Clear any pending disambiguation / awaiting-query state from
+        # both tiers — the user took a different path. (`session_state_in`
+        # was already cleaned by the caller with `_without_pending`; do
+        # the same defensively here for application_state.)
         new_session_state = {**session_state_in, "last_player_id": player.player_id}
-        new_app_state = {**app_state_in, "last_player_id": player.player_id}
+        new_app_state = {
+            **_without_pending(app_state_in),
+            "last_player_id": player.player_id,
+        }
         user_obj = session.get("user") or {}
         user_state_update: dict[str, Any] | None = None
         if isinstance(user_obj, dict) and user_obj.get("user_id"):
@@ -607,6 +641,7 @@ class DialogsWebhookHandler:
                 text=text,
                 tts=_tts_for(text),
                 session_state=_without_pending(base_session_state),
+                application_state=_without_pending(base_app_state),
             )
 
         if media is None:
@@ -616,6 +651,7 @@ class DialogsWebhookHandler:
                 text=text,
                 tts=_tts_for(text),
                 session_state=_without_pending(base_session_state),
+                application_state=_without_pending(base_app_state),
             )
 
         # Fire-and-forget — Alice has a 4.5s budget; play_media may take longer
@@ -634,7 +670,13 @@ class DialogsWebhookHandler:
             **_without_pending(base_session_state),
             "last_player_id": player.player_id,
         }
-        new_app_state = {**base_app_state, "last_player_id": player.player_id}
+        # Also clear pending/awaiting from `application_state` — it was
+        # mirrored there as a fallback for devices that don't preserve
+        # `state.session` between turns.
+        new_app_state = {
+            **_without_pending(base_app_state),
+            "last_player_id": player.player_id,
+        }
         user_obj = session.get("user") or {}
         user_state_update: dict[str, Any] | None = None
         if isinstance(user_obj, dict) and user_obj.get("user_id"):
@@ -662,6 +704,7 @@ class DialogsWebhookHandler:
         parsed: ParsedCommand,
         candidates: list[Any],
         session_state_in: dict[str, Any],
+        app_state_in: dict[str, Any] | None = None,
     ) -> web.Response:
         """Ask the user which player to use — voice-first, with optional buttons.
 
@@ -691,25 +734,33 @@ class DialogsWebhookHandler:
             for p in capped
         ]
         # Clear any prior `awaiting_query` / `pending_command` before
-        # writing the new one. Without this, slot-elicitation state from
-        # an earlier turn would leak into the disambiguation response —
-        # the next utterance ("Кухня маленькая") would get auto-prefixed
-        # with "включи " by the awaiting-query branch and miss the
-        # pending-command resolver.
+        # writing the new one, and include the saved `pending_command`.
+        # The same pending entry is mirrored to BOTH `session_state` and
+        # `application_state` because some Yandex devices (notably
+        # screenless Stations) don't reliably echo `state.session` back
+        # across SimpleUtterance turns. The application tier persists
+        # per-device — it survives session resets and is honoured on
+        # every surface we've tested. Reads in `_handle_webhook` merge
+        # the two tiers (session preferred, application as fallback).
+        pending_command = {
+            "kind": parsed.kind,
+            "query": parsed.query[:200],
+            "radio_mode": parsed.radio_mode,
+            # Ordered list of player IDs we offered. Used by
+            # `_try_resume_pending` to (a) resolve "первая"/"вторая"
+            # to a specific player by position, (b) re-narrow free-text
+            # matching to just these candidates so a short distinguisher
+            # wins even if a third matching player exists outside the
+            # disambiguation set.
+            "candidate_ids": [p.player_id for p in capped],
+        }
         new_session_state = {
             **_without_pending(session_state_in),
-            "pending_command": {
-                "kind": parsed.kind,
-                "query": parsed.query[:200],
-                "radio_mode": parsed.radio_mode,
-                # Ordered list of player IDs we offered. Used by
-                # `_try_resume_pending` to (a) resolve "первая"/"вторая"
-                # to a specific player by position, (b) re-narrow
-                # free-text matching to just these candidates so a
-                # short distinguisher wins even if a third matching
-                # player exists outside the disambiguation set.
-                "candidate_ids": [p.player_id for p in capped],
-            },
+            "pending_command": pending_command,
+        }
+        new_app_state = {
+            **_without_pending(app_state_in or {}),
+            "pending_command": pending_command,
         }
         return self._yandex_response(
             incoming_session=session,
@@ -717,6 +768,7 @@ class DialogsWebhookHandler:
             tts=_tts_for(text),
             end_session=False,
             session_state=new_session_state,
+            application_state=new_app_state,
             buttons=buttons,
         )
 
@@ -802,6 +854,7 @@ class DialogsWebhookHandler:
                     ),
                     candidates=candidates,
                     session_state_in=session_state_in,
+                    app_state_in=app_state_in,
                 )
 
         # Step 3 — voice ordinal ("первая", "выбираю первую", "номер
@@ -849,6 +902,7 @@ class DialogsWebhookHandler:
                             ),
                             candidates=still_available,
                             session_state_in=session_state_in,
+                            app_state_in=app_state_in,
                         )
                     # else: no candidates remain at all — fall through.
 

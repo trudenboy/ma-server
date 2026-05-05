@@ -969,6 +969,70 @@ class TestDisambiguation:
         assert body_out["session_state"]["pending_command"]["candidate_ids"] == ["p1"]
         mass.player_queues.play_media.assert_not_awaited()
 
+    async def test_pending_command_falls_back_to_application_state(self) -> None:
+        """Yandex didn't echo `state.session` but kept `state.application` — still resolves.
+
+        Reproduces the screenless-Station bug where the second turn of
+        a disambiguation arrives without the `pending_command` we put in
+        `state.session`. The same record is mirrored in `state.application`
+        so the handler can recover.
+        """
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Проигрыватель"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "Проигрыватель"},
+            "state": {
+                # state.session is empty — Yandex didn't echo it back.
+                "application": {
+                    "pending_command": {
+                        "kind": "search",
+                        "query": "джаз",
+                        "radio_mode": True,
+                        "candidate_ids": ["p1", "p2"],
+                    },
+                },
+            },
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.play_media.assert_awaited_once()
+        assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p2"
+
+    async def test_disambiguation_writes_pending_to_application_state(self) -> None:
+        """The disambiguation prompt mirrors `pending_command` to application_state.
+
+        Without this, devices that drop `state.session` between turns can
+        never complete the disambiguation flow.
+        """
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Проигрыватель"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи джаз"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        # Disambiguation triggered.
+        assert "buttons" in body_out["response"]
+        # Pending mirrored in BOTH session_state and application_state.
+        assert body_out["session_state"]["pending_command"]["candidate_ids"] == ["p1", "p2"]
+        assert body_out["application_state"]["pending_command"]["candidate_ids"] == ["p1", "p2"]
+
     async def test_voice_ordinal_with_filler(self) -> None:
         """Filler-padded ordinal answers ('выбираю первую', 'хочу вторую') resolve.
 
