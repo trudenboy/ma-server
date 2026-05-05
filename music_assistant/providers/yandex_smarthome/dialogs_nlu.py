@@ -50,10 +50,21 @@ _SPACE_RE = re.compile(r"\s+")
 # (e.g. "Natalie" in Russian) isn't mis-split mid-token.
 _PLAYER_SUFFIX_RE = re.compile(r"\s+на\s+(?P<hint>.+?)\s*$", re.IGNORECASE)
 
-# Verb stem covering Russian imperative forms used to start playback
-# ("turn on", "play", "launch") with their plural / aspect variants.
+# Verb regex covering Russian imperative + infinitive forms used to
+# start playback ("turn on", "play", "launch"). Yandex's voice-to-text
+# sometimes returns the infinitive ("включить") even if the user spoke
+# the imperative ("включи"); we accept both. Also covers the plural
+# imperatives (-те), informal aspect variants (включай/сыграй),
+# and the listening verbs (послушай/послушать).
 _VERB_RE = re.compile(
-    r"^(?:алиса[, ]+)?(?:включи(?:те)?|включай(?:те)?|поставь(?:те)?|запусти(?:те)?)\s+",
+    r"^(?:алиса[, ]+)?(?:"
+    r"включи(?:те)?|включай(?:те)?|включить|"
+    r"поставь(?:те)?|поставить|"
+    r"запусти(?:те)?|запустить|"
+    r"сыграй(?:те)?|сыграть|"
+    r"играй(?:те)?|"
+    r"послушай(?:те)?|послушать"
+    r")\s+",
     re.IGNORECASE,
 )
 
@@ -130,12 +141,16 @@ def parse_command(text: str) -> ParsedCommand:
                 radio_mode=radio,
             )
 
-    # Fallback: unstructured search — let mass.music.search figure out the type.
+    # Fallback: unstructured search — let mass.music.search figure out
+    # the type. Force radio_mode=True so when the result is an artist or
+    # a single track, MA starts a radio based on it instead of playing
+    # one item and stopping (matches the typical user expectation
+    # "включи <X>" → "play <X> music").
     return ParsedCommand(
         kind="search",
         query=intent_part.lower(),
         player_hint=player_hint,
-        radio_mode=False,
+        radio_mode=True,
     )
 
 

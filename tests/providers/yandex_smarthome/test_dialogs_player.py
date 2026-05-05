@@ -72,13 +72,20 @@ class TestResolveQuery:
         result = await resolve_query(mass, ParsedCommand(kind="playlist", query="rock"))
         assert result is playlist
 
-    async def test_search_kind_prefers_playlist(self) -> None:
-        """kind=search prefers playlist over track when both are present."""
+    async def test_search_kind_prefers_artist(self) -> None:
+        """kind=search prefers artist over playlist/track for unqualified queries.
+
+        Users typically say a band/artist name without a "плейлист" /
+        "альбом" qualifier ("включи Iron Maiden"). Picking the artist
+        (with radio_mode=True downstream) matches the intent better than
+        starting an unrelated playlist that happens to contain the query.
+        """
+        artist = MagicMock(uri="library://artist/1", spec_set=["uri"])
         playlist = MagicMock(uri="library://playlist/1", spec_set=["uri"])
         track = MagicMock(uri="library://track/1", spec_set=["uri"])
-        mass = _make_mass(_SearchResults(playlists=[playlist], tracks=[track]))
-        result = await resolve_query(mass, ParsedCommand(kind="search", query="rock"))
-        assert result is playlist
+        mass = _make_mass(_SearchResults(artists=[artist], playlists=[playlist], tracks=[track]))
+        result = await resolve_query(mass, ParsedCommand(kind="search", query="iron maiden"))
+        assert result is artist
 
     async def test_search_no_results_returns_none(self) -> None:
         """Empty search results return None."""

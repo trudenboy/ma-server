@@ -23,9 +23,10 @@ class TestParseCommand:
     @pytest.mark.parametrize(
         ("phrase", "expected_kind", "expected_query", "expected_hint", "expected_radio"),
         [
-            # Bare/default search
-            ("включи Metallica", "search", "metallica", None, False),
-            ("включи джаз", "search", "джаз", None, False),
+            # Bare/default search — radio_mode=True so artists and tracks
+            # start a radio rather than playing one item and stopping.
+            ("включи Metallica", "search", "metallica", None, True),
+            ("включи джаз", "search", "джаз", None, True),
             # Track explicit
             ("включи песню Yesterday", "track", "yesterday", None, False),
             ("включи трек Imagine", "track", "imagine", None, False),
@@ -45,18 +46,21 @@ class TestParseCommand:
             ("включи жанр джаз", "genre", "джаз", None, True),
             ("включи радио рок", "genre", "рок", None, True),
             # With player suffix
-            ("включи Metallica на кухне", "search", "metallica", "кухне", False),
+            ("включи Metallica на кухне", "search", "metallica", "кухне", True),
             ("включи песню Yesterday на спальне", "track", "yesterday", "спальне", False),
             ("включи мою волну на кухне", "my_wave", "", "кухне", True),
             ("включи альбом Black Album на колонке", "album", "black album", "колонке", False),
             # Punctuation, casing, alice prefix
-            ("Алиса, включи Metallica.", "search", "metallica", None, False),
+            ("Алиса, включи Metallica.", "search", "metallica", None, True),
             ("ВКЛЮЧИ ПЕСНЮ Hey Jude!", "track", "hey jude", None, False),
-            # Different verbs (including включай which was previously unmatched)
-            ("поставь Metallica", "search", "metallica", None, False),
-            ("запусти джаз на кухне", "search", "джаз", "кухне", False),
-            ("включай Metallica", "search", "metallica", None, False),
-            ("включайте джаз на кухне", "search", "джаз", "кухне", False),
+            # Different verbs (incl. infinitives Yandex sometimes returns)
+            ("поставь Metallica", "search", "metallica", None, True),
+            ("запусти джаз на кухне", "search", "джаз", "кухне", True),
+            ("включай Metallica", "search", "metallica", None, True),
+            ("включайте джаз на кухне", "search", "джаз", "кухне", True),
+            ("включить Iron Maiden", "search", "iron maiden", None, True),
+            ("сыграй Metallica на кухне", "search", "metallica", "кухне", True),
+            ("послушать джаз", "search", "джаз", None, True),
         ],
     )
     def test_parse(

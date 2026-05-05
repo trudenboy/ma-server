@@ -95,10 +95,15 @@ async def resolve_query(mass: MusicAssistant, parsed: ParsedCommand) -> MediaIte
 def _pick_from_results(results: object, kind: str) -> MediaItemType | None:
     """Pick best MediaItem from SearchResults given the parsed kind."""
     # SearchResults has .artists, .albums, .tracks, .playlists, plus .library_*.
-    # For "search" (kind=catch-all) prefer playlist > album > artist > track.
+    # For "search" (no explicit marker), users almost always say a band /
+    # song / album name without qualifier ("включи Iron Maiden",
+    # "включи Yesterday"). Best UX is to resolve to the ARTIST first
+    # (radio_mode=True will be set on top → starts artist radio), then
+    # ALBUM, then TRACK; PLAYLIST is least likely to be what the user
+    # wants when they didn't say "плейлист" or "подборку".
     order: list[str]
     if kind == "search":
-        order = ["playlists", "albums", "artists", "tracks"]
+        order = ["artists", "albums", "tracks", "playlists"]
     elif kind == "track":
         order = ["tracks"]
     elif kind == "artist":
