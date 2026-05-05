@@ -6,6 +6,7 @@ capability states, and action execution.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -551,6 +552,11 @@ async def execute_capability_action(  # noqa: PLR0915
                 ),
             ),
         )
+    except asyncio.CancelledError:
+        # Cooperative cancellation must propagate untouched — without this
+        # the broad `except Exception` below would convert a shutdown /
+        # config-flow abort into an INTERNAL_ERROR action result.
+        raise
     except Exception:
         _LOGGER.exception("Error executing action %s/%s on %s", action.type, instance, player_id)
         return CapabilityActionResult(

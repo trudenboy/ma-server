@@ -1,8 +1,15 @@
 """HTTP handler for the Yandex Dialogs custom-skill webhook (experimental).
 
-Registers a single dynamic route on the MA webserver:
+Registers a single exact route on the MA webserver — the secret is
+**baked into the path string** at registration time, not a route
+template variable:
 
-  POST /api/yandex_dialogs/webhook/{secret}
+  POST /api/yandex_dialogs/webhook/<secret-as-literal-segment>
+
+Therefore ``request.match_info`` is empty in production; the handler
+parses the secret from ``request.path`` (last segment) for the
+constant-time compare. Tests that pass an explicit ``match_info`` cover
+the alternative branch.
 
 Yandex Dialogs does not send an Authorization header on webhook calls,
 so authentication is two-layered:
