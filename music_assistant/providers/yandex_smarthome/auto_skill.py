@@ -401,6 +401,35 @@ class DialogsSkillCreator:
                     http_status=resp.status,
                 )
 
+    async def get_operations(self, csrf: str, skill_id: str) -> list[dict[str, Any]]:
+        """Fetch the recent operations log for a skill.
+
+        Returns entries like ``{"type": "deployCompleted", "itemId": "<id>", "createdAt": "..."}``.
+        Used to poll for ``deployCompleted`` after ``request_deploy``.
+        """
+        url = f"{DIALOGS_API_BASE}/apps/{skill_id}/operations"
+        headers = {"x-csrf-token": csrf}
+        async with self._session.get(url, headers=headers) as resp:
+            body = await resp.text()
+            if resp.status != 200:
+                raise DialogsApiError(
+                    f"get_operations HTTP {resp.status}: {body[:200]}",
+                    step="get_operations",
+                    http_status=resp.status,
+                )
+            data = _try_json(body)
+        if isinstance(data, dict):
+            result = data.get("result", data)
+            if isinstance(result, list):
+                return [op for op in result if isinstance(op, dict)]
+            if isinstance(result, dict):
+                ops = result.get("operations") or result.get("items")
+                if isinstance(ops, list):
+                    return [op for op in ops if isinstance(op, dict)]
+        if isinstance(data, list):
+            return [op for op in data if isinstance(op, dict)]
+        return []
+
     # -----------------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------------
@@ -1504,6 +1533,21 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
     if state == SkillCreationState.DEPLOY_REQUESTED:
         _LOGGER.info("auto-skill: [5/5] publishing skill")
         await creator.request_deploy(csrf, skill_id)
+        # Yandex's deploy is async — for smart_home it usually completes
+        # in a few seconds, but for aliceSkill ("Навык") it can take
+        # 5-15 minutes under typical moderation queue conditions. We
+        # don't block the config-flow waiting; the request was accepted,
+        # Yandex will finish on its side. The UI surfaces a direct link
+        # to the skill's dev-console page so the user can check the
+        # on-air indicator at their convenience.
+        _LOGGER.info(
+            "auto-skill: deploy requested for skill %s — Yandex processes "
+            "this asynchronously (a few seconds for smart_home, several "
+            "minutes for dialog skills). Watch on-air status at "
+            "https://dialogs.yandex.ru/developer/skills/%s",
+            skill_id,
+            skill_id,
+        )
         artifacts = dataclasses.replace(artifacts, state=SkillCreationState.DONE)
         await _maybe_save(progress_cb, artifacts)
 

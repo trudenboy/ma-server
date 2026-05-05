@@ -163,6 +163,24 @@ _INFLECTION_SUFFIXES = (
 )
 
 
+# Generic Russian words for "speaker / player" — fall through to the
+# default/only-exposed player if the user said one of these instead of
+# a specific player name. Stored as already-normalised stems so we can
+# compare against the same normalisation we run on `hint`.
+_GENERIC_PLAYER_STEMS = frozenset(
+    {
+        "колонк",  # колонка / на колонке / колонку
+        "плеер",  # плеер / на плеере / плеера
+        "пле",  # short for "плеер" after stripping the trailing -ер suffix  # noqa: RUF003
+        "проигрыватель",  # full word survives stem (no matching suffix)
+        "проигрывател",  # stripped «-ь»
+        "динамик",  # динамик / на динамике
+        "акустик",  # акустика / на акустике
+        "устройств",  # устройство / на устройстве
+    }
+)
+
+
 def _normalize_player_token(name: str) -> str:
     """Lowercase + strip common Russian inflection suffix.
 
@@ -233,8 +251,10 @@ def resolve_player(
     exact: list[Any] = []
     startswith: list[Any] = []
     contains: list[Any] = []
+    haystacks: list[tuple[str, str]] = []  # (raw, normalised) for debug
     for p in candidates:
         haystack = _normalize_player_token(p.name or p.player_id)
+        haystacks.append((p.name or p.player_id, haystack))
         if not haystack:
             continue
         if haystack == needle:
@@ -243,6 +263,17 @@ def resolve_player(
             startswith.append(p)
         elif needle in haystack or haystack in needle:
             contains.append(p)
+
+    _LOGGER.debug(
+        "resolve_player: hint=%r → needle=%r; candidates=%s; "
+        "matches: exact=%d startswith=%d contains=%d",
+        hint,
+        needle,
+        haystacks,
+        len(exact),
+        len(startswith),
+        len(contains),
+    )
 
     for tier in (exact, startswith, contains):
         if not tier:
@@ -256,5 +287,33 @@ def resolve_player(
             )
             tier.sort(key=lambda p: (p.name or p.player_id).lower())
         return tier[0]
+
+    # Generic-word fallback: user said something like "на колонке" /
+    # "на проигрывателе" / "на динамике" — these mean "any speaker", not
+    # a specific player. If only one player is exposed (or a default_id
+    # is configured) we can resolve unambiguously; otherwise still None.
+    if any(stem in needle for stem in _GENERIC_PLAYER_STEMS):
+        if default_id:
+            for p in candidates:
+                if p.player_id == default_id:
+                    _LOGGER.info(
+                        "Generic player hint %r → resolved to default player %r",
+                        hint,
+                        p.name,
+                    )
+                    return p
+        if len(candidates) == 1:
+            _LOGGER.info(
+                "Generic player hint %r → resolved to the only exposed player %r",
+                hint,
+                candidates[0].name,
+            )
+            return candidates[0]
+        _LOGGER.warning(
+            "Generic player hint %r matches no specific player and there are "
+            "%d exposed players — caller will ask for clarification",
+            hint,
+            len(candidates),
+        )
 
     return None
