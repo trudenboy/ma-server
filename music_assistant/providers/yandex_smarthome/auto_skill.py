@@ -687,21 +687,23 @@ def build_dialog_draft_payload(
 ) -> dict[str, Any]:
     """Compose the PATCH /draft/update body for a Yandex Dialogs custom skill.
 
-    Captured from a live PATCH /draft/update request made by the Yandex
-    Dialogs developer console — fields and shape match exactly. Notes:
+    All fields and values were derived from a live ``GET /snapshot`` call
+    against the Yandex Dialogs developer console (which exposes the full
+    category catalogue + a previously deployed reference skill):
 
-    - ``activationPhrases``: globally unique across all Yandex skills, so
-      the user must pick something distinctive (Yandex returns 400
-      ``"Это активационное имя уже зарегистрировано"`` if the name is taken).
-    - ``voice="good_oksana"``: default female voice in Dialogs (older
-      ``"shitova.us"`` constant was Smart-Home-specific).
-    - ``publishingSettings``: flat fields (no ``multilingualSettings`` /
-      ``secondaryTitle`` blocks — those are Smart-Home shape).
+    - ``category="music_audio"``: the API key for "Аудио и подкасты"
+      (the previous guess ``"music_and_sounds"`` is not a valid Yandex
+      category — sending it returns HTTP 400 with an empty body).
+    - ``activationPhrases``: globally unique across all Yandex skills.
+    - ``voice="good_oksana"``: default female voice in Dialogs.
+    - ``structuredExamples``: shipped with three sample phrases that
+      match the patterns ``parse_command`` recognises so the catalogue
+      text reflects what users can really say. Required by
+      ``request_deploy`` for the ``aliceSkill`` channel.
     - ``skillAccess="private"`` + ``hideInStore=true`` keep the skill
-      out of the public store; only the creator can link it.
+      out of the public store.
     """
     return {
-        "logo2": None,
         "name": skill_name,
         "voice": "good_oksana",
         "activationPhrases": [skill_name],
@@ -715,14 +717,9 @@ def build_dialog_draft_payload(
         },
         "publishingSettings": {
             "brandVerificationWebsite": "",
-            "category": "music_and_sounds",
+            "category": "music_audio",
             "developerName": developer_name,
             "explicitContent": False,
-            # request_deploy enforces non-empty structuredExamples even for
-            # private skills (Yandex quality-check). Phrases below are
-            # crafted to match the patterns recognised by parse_command in
-            # provider/dialogs_nlu.py so the catalogue text actually
-            # reflects what users can say.
             "structuredExamples": [
                 {"phrase": "включи Metallica"},
                 {"phrase": "включи мою волну"},
