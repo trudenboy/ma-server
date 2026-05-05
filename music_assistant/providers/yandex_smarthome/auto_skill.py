@@ -718,7 +718,16 @@ def build_dialog_draft_payload(
             "category": "music_and_sounds",
             "developerName": developer_name,
             "explicitContent": False,
-            "structuredExamples": [],
+            # request_deploy enforces non-empty structuredExamples even for
+            # private skills (Yandex quality-check). Phrases below are
+            # crafted to match the patterns recognised by parse_command in
+            # provider/dialogs_nlu.py so the catalogue text actually
+            # reflects what users can say.
+            "structuredExamples": [
+                {"phrase": "включи Metallica"},
+                {"phrase": "включи мою волну"},
+                {"phrase": "включи джаз на кухне"},
+            ],
             "description": "Free-form voice playback bridge for Music Assistant.",
             "email": "",
         },
