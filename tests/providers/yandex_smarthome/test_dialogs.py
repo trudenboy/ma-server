@@ -136,6 +136,31 @@ class TestDialogsWebhookHandler:
         resp = await handler._handle_webhook(req)
         assert resp.status == 404
 
+    async def test_secret_parsed_from_path_when_no_match_info(self) -> None:
+        """Cover the production secret-from-path fallback in `_handle_webhook`.
+
+        Production registers an exact route (no `{secret}` variable), so
+        `request.match_info` is empty and the handler parses the secret
+        from `request.path`. This test passes `match_info={}` to exercise
+        that branch.
+        """
+        track = MagicMock(uri="library://track/123", spec_set=["uri"])
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")], search_track=track)
+        handler = self._make_handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи Metallica на кухне"},
+        }
+        req = make_mocked_request(
+            "POST",
+            f"/api/yandex_dialogs/webhook/{_TEST_SECRET}",
+            match_info={},
+        )
+        req.json = AsyncMock(return_value=body)  # type: ignore[method-assign]
+        resp = await handler._handle_webhook(req)
+        # If path parsing works, secret matches and we reach the play branch (200).
+        assert resp.status == 200
+
     async def test_skill_id_mismatch_returns_401(self) -> None:
         """Payload with wrong skill_id is rejected with 401."""
         mass = _make_mass([])
