@@ -425,9 +425,10 @@ async def _run_auto_create_dialog_action(
         _LOGGER.exception("dialog auto-create hit unexpected error")
 
     # Hint: empty-body 400 on create_app for the dialog pipeline almost
-    # always means our DIALOG_CHANNEL guess ("dialog" by default) is wrong.
-    # The Yandex Dialogs app-store-api channel string for the custom skill type is not
-    # publicly documented and we cannot probe it from our side.
+    # always means the DIALOG_CHANNEL value sent to Yandex is wrong.
+    # The default ("aliceSkill") was captured from a live POST /apps in the
+    # dev console — if Yandex changes the contract or the value stops
+    # working, users can override at startup via MA_YANDEX_DIALOG_CHANNEL.
     if (
         new_artifacts.state == SkillCreationState.FAILED
         and new_artifacts.last_error
@@ -439,9 +440,10 @@ async def _run_auto_create_dialog_action(
             last_error=(
                 f"{new_artifacts.last_error}\n\n"
                 "Hint: This usually means the channel value sent to "
-                "Yandex Dialogs is wrong. Try overriding the "
+                "Yandex Dialogs is wrong. The current default is "
+                "'aliceSkill'; if it stops working try overriding the "
                 "MA_YANDEX_DIALOG_CHANNEL environment variable at MA "
-                "startup (e.g. =general, =alice, =skill) and retry."
+                "startup (e.g. =dialog, =general) and retry."
             ),
         )
 

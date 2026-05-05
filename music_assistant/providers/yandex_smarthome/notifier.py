@@ -237,7 +237,14 @@ class StateNotifier:
                     return  # silent — not a real error, don't raise
 
                 raise RuntimeError(f"State callback failed with HTTP {resp.status}: {body[:200]}")
-        except RuntimeError:
+        except asyncio.CancelledError:
+            # Cooperative cancellation must propagate untouched.
+            raise
+        except Exception:
+            # Includes RuntimeError above + transport-level errors
+            # (aiohttp.ClientError, DNS resolution failures, connection
+            # resets, etc.). Caller (_flush_pending) re-queues the dirty
+            # players for the next flush.
             self._logger.exception("State callback error")
             raise
 
