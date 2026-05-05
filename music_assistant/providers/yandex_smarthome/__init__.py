@@ -370,6 +370,24 @@ async def _run_auto_create_dialog_action(
 
     skill_name = str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME)
 
+    # Yandex Dialogs validation: skill name must contain at least two
+    # words. Catch this client-side so we don't burn a Device Flow + create
+    # a half-broken skill that fails at request_deploy. Trim multiple
+    # internal whitespace before counting.
+    if len(skill_name.split()) < 2:
+        artifacts_failed = dataclasses.replace(
+            artifacts,
+            state=SkillCreationState.FAILED,
+            last_error=(
+                f"Skill activation name {skill_name!r} has fewer than two "
+                "words. Yandex Dialogs requires the skill name to contain at "
+                "least two words (e.g. 'Music Assistant', 'Моя Музыка'). "
+                "Edit the field above and try again."
+            ),
+        )
+        values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS] = dump_artifacts(artifacts_failed)
+        return
+
     def _cache_x_token(token: str) -> None:
         values[CONF_AUTH_X_TOKEN] = token
 

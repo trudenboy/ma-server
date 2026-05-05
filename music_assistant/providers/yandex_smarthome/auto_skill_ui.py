@@ -906,6 +906,9 @@ def _dialog_skill_entries(
             description=(
                 'Used as the activation phrase: "Алиса, попроси <name> …". '
                 "For Yandex voice recognition, a Russian name works best. "
+                "**Must contain at least two words** (Yandex requirement) and "
+                "must be **globally unique across all Yandex skills** — pick "
+                "something distinctive. "
                 f"Length: {DIALOG_NAME_MIN_LEN}-{DIALOG_NAME_MAX_LEN} characters."
             ),
             default_value=DIALOG_DEFAULT_NAME,
