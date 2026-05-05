@@ -969,6 +969,100 @@ class TestDisambiguation:
         assert body_out["session_state"]["pending_command"]["candidate_ids"] == ["p1"]
         mass.player_queues.play_media.assert_not_awaited()
 
+    async def test_voice_ordinal_with_filler(self) -> None:
+        """Filler-padded ordinal answers ('выбираю первую', 'хочу вторую') resolve.
+
+        On smart speakers users naturally pad voice replies with filler;
+        the strict-anchor regex from v1.8.2 missed these.
+        """
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Спальня"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "выбираю первую"},
+            "state": {
+                "session": {
+                    "pending_command": {
+                        "kind": "search",
+                        "query": "metallica",
+                        "radio_mode": True,
+                        "candidate_ids": ["p1", "p2"],
+                    },
+                },
+            },
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p1"
+
+    async def test_voice_accusative_adjective(self) -> None:
+        """Accusative-case answer 'большую' resolves to 'Кухня большая'.
+
+        Caught by the new `ую` suffix in `_INFLECTION_SUFFIXES`.
+        """
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня большая"),
+                MockPlayer(player_id="p2", name="Кухня маленькая"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "большую"},
+            "state": {
+                "session": {
+                    "pending_command": {
+                        "kind": "search",
+                        "query": "metallica",
+                        "radio_mode": True,
+                        "candidate_ids": ["p1", "p2"],
+                    },
+                },
+            },
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p1"
+
+    async def test_voice_accusative_noun(self) -> None:
+        """Accusative noun 'Кухню' resolves to 'Кухня' via the new `ю` suffix."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Спальня"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "Кухню"},
+            "state": {
+                "session": {
+                    "pending_command": {
+                        "kind": "search",
+                        "query": "metallica",
+                        "radio_mode": True,
+                        "candidate_ids": ["p1", "p2"],
+                    },
+                },
+            },
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p1"
+
     async def test_voice_ordinal_digit(self) -> None:
         """A bare digit ('2') also works as an ordinal."""
         track = MagicMock(uri="library://track/1", spec_set=["uri"])

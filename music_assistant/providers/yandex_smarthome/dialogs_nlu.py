@@ -169,6 +169,7 @@ _INFLECTION_SUFFIXES = (
     "ого",
     "ому",
     "ыми",
+    "ую",  # feminine adjective accusative — "большую", "маленькую"
     "ая",  # feminine adjective nominative — "большая", "маленькая"
     "ой",
     "ом",
@@ -181,6 +182,7 @@ _INFLECTION_SUFFIXES = (
     "й",
     "ь",
     "я",  # feminine noun nominative — "Кухня", "Спальня"
+    "ю",  # feminine noun accusative — "Кухню", "Спальню"
 )
 
 

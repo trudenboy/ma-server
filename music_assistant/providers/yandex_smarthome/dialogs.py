@@ -129,52 +129,40 @@ def _without_pending(state: dict[str, Any]) -> dict[str, Any]:
 
 
 # Ordinal voice-disambiguation patterns. The user picks a candidate by
-# position ("первая", "второй", "номер три"). Used when a screenless
-# audio device makes button-tap impossible.
+# position ("первая", "выбираю первую", "номер три"). Used when a
+# screenless audio device makes button-tap impossible.
+#
+# Two pattern families (all matched via ``re.search`` — leading filler
+# words like "ну", "хочу", "выбираю", "давай" don't kill the match):
+#
+# 1. Russian ordinal stems (``перв\w*`` etc.) — case-insensitive
+#    word-prefix match. Catches every morphological form ("первая",
+#    "первый", "первое", "первую", "первой", "первом", …) without
+#    enumerating each.
+# 2. Cardinal numbers and digits — anchored ``^…$`` so only a
+#    bare-number utterance counts ("один", "1", "номер один").
+#    "У меня один вариант" must NOT silently pick the first.
 _ORDINAL_PATTERNS: tuple[tuple[re.Pattern[str], int], ...] = (
-    (
-        re.compile(
-            r"^(?:номер\s+)?(?:перв(?:ая|ый|ое|ую)|один|1)\b",
-            re.IGNORECASE,
-        ),
-        0,
-    ),
-    (
-        re.compile(
-            r"^(?:номер\s+)?(?:втор(?:ая|ой|ое|ую)|два|2)\b",
-            re.IGNORECASE,
-        ),
-        1,
-    ),
-    (
-        re.compile(
-            r"^(?:номер\s+)?(?:треть(?:я|ий|е|ю)|три|3)\b",
-            re.IGNORECASE,
-        ),
-        2,
-    ),
-    (
-        re.compile(
-            r"^(?:номер\s+)?(?:четв[её]рт(?:ая|ый|ое|ую)|четыре|4)\b",
-            re.IGNORECASE,
-        ),
-        3,
-    ),
-    (
-        re.compile(
-            r"^(?:номер\s+)?(?:пят(?:ая|ый|ое|ую)|пять|5)\b",
-            re.IGNORECASE,
-        ),
-        4,
-    ),
+    (re.compile(r"\bперв\w*\b", re.IGNORECASE), 0),
+    (re.compile(r"\bвтор\w*\b", re.IGNORECASE), 1),
+    (re.compile(r"\bтреть\w*\b", re.IGNORECASE), 2),
+    (re.compile(r"\bчетв[её]рт\w*\b", re.IGNORECASE), 3),
+    (re.compile(r"\bпят\w*\b", re.IGNORECASE), 4),
+    # Cardinals — whole-utterance only.
+    (re.compile(r"^(?:номер\s+)?(?:один|1)$", re.IGNORECASE), 0),
+    (re.compile(r"^(?:номер\s+)?(?:два|2)$", re.IGNORECASE), 1),
+    (re.compile(r"^(?:номер\s+)?(?:три|3)$", re.IGNORECASE), 2),
+    (re.compile(r"^(?:номер\s+)?(?:четыре|4)$", re.IGNORECASE), 3),
+    (re.compile(r"^(?:номер\s+)?(?:пять|5)$", re.IGNORECASE), 4),
 )
 
 
 def _parse_ordinal_choice(text: str) -> int | None:
-    """Parse 'первая' / 'второй' / 'номер три' / '2' as a 0-based index, else None.
+    """Parse 'первая' / 'выбираю первую' / 'номер три' / '2' as 0-based index.
 
-    Pattern is forgiving — accepts feminine / masculine / neuter forms and
-    Russian ordinals as well as cardinal numbers ("два") and digits.
+    Returns the index, or None if no ordinal/cardinal pattern matched.
+    Tolerates leading filler words ("ну", "хочу", "выбираю", "давай")
+    since users often pad voice replies on smart speakers.
     """
     if not text:
         return None
@@ -182,7 +170,7 @@ def _parse_ordinal_choice(text: str) -> int | None:
     if not cleaned:
         return None
     for pattern, index in _ORDINAL_PATTERNS:
-        if pattern.match(cleaned):
+        if pattern.search(cleaned):
             return index
     return None
 
@@ -759,73 +747,28 @@ class DialogsWebhookHandler:
         exposed = list_exposed_players(self._mass, exposed_ids=self._exposed_player_ids)
         exposed_by_id = {p.player_id: p for p in exposed}
 
-        # Step 1 — voice ordinal ("первая" / "второй" / "номер три") wins
-        # outright. On screenless smart speakers this is the primary
-        # channel since buttons aren't visible to the user.
-        ordinal = _parse_ordinal_choice(command)
-        if ordinal is not None:
-            target_pid: str | None = (
-                candidate_ids[ordinal] if 0 <= ordinal < len(candidate_ids) else None
-            )
-            if target_pid is not None:
-                chosen_player = exposed_by_id.get(target_pid)
-                if chosen_player is not None:
-                    self._logger.debug(
-                        "Pending replay: voice ordinal %d → player %s",
-                        ordinal,
-                        chosen_player.name or chosen_player.player_id,
+        # Step 1 — Button press. Direct UI signal on surfaces with a
+        # screen. Validate against the currently exposed set
+        # (defence-in-depth: stale / crafted payloads are rejected).
+        payload = req.get("payload")
+        if isinstance(payload, dict):
+            pid = payload.get("player_id")
+            if isinstance(pid, str):
+                chosen_player = exposed_by_id.get(pid)
+                if chosen_player is None:
+                    self._logger.warning(
+                        "Pending replay: ButtonPressed payload player_id=%r "
+                        "not in exposed-player set; ignoring",
+                        pid,
                     )
-            # If the ordinal couldn't be resolved (out of range, or the
-            # indexed player is no longer exposed), the user clearly
-            # *meant* to pick from the disambiguation list — falling
-            # through to free-text would mis-interpret "третья" as a
-            # play query "search for третья". Re-ask with whichever
-            # candidates are still exposed instead.
-            if chosen_player is None:
-                still_available = [
-                    exposed_by_id[pid] for pid in candidate_ids if pid in exposed_by_id
-                ]
-                if still_available:
-                    self._logger.info(
-                        "Pending replay: ordinal=%d unresolvable; "
-                        "re-asking with %d remaining candidate(s)",
-                        ordinal,
-                        len(still_available),
-                    )
-                    return self._build_disambiguation_response(
-                        session=session,
-                        parsed=ParsedCommand(
-                            kind=str(pending.get("kind", "search")),  # type: ignore[arg-type]
-                            query=str(pending.get("query", "")),
-                            radio_mode=bool(pending.get("radio_mode", False)),
-                        ),
-                        candidates=still_available,
-                        session_state_in=session_state_in,
-                    )
-                # else: no candidates remain at all — fall through to
-                # normal flow, which will reply with "не нашёл колонку".
 
-        # Step 2 — Button press. Validate against the currently exposed
-        # set (defence-in-depth: stale or crafted payloads pointing to a
-        # non-exposed player are rejected).
-        if chosen_player is None:
-            payload = req.get("payload")
-            if isinstance(payload, dict):
-                pid = payload.get("player_id")
-                if isinstance(pid, str):
-                    chosen_player = exposed_by_id.get(pid)
-                    if chosen_player is None:
-                        self._logger.warning(
-                            "Pending replay: ButtonPressed payload player_id=%r "
-                            "not in exposed-player set; ignoring",
-                            pid,
-                        )
-
-        # Step 3 — Free-text follow-up. If we offered a specific
-        # candidate set, narrow the resolver to just those players (so a
-        # one-word distinguisher like "большая" wins even if a third
-        # unrelated player elsewhere also matches). Without a candidate
-        # set, fall back to the global exposed set.
+        # Step 2 — Free-text first. Lets named answers ("Кухня большая"
+        # / "большая" / "маленькую") and even hypothetical players whose
+        # names contain ordinal words ("Спальня первая") win over the
+        # purely-positional ordinal interpretation. Narrow the resolver
+        # to the saved candidate set so a short distinguisher like
+        # "большая" doesn't accidentally pick an unrelated third player
+        # outside the disambiguation set.
         if chosen_player is None:
             followup = parse_command(command)
             hint = followup.player_hint or command
@@ -844,6 +787,10 @@ class DialogsWebhookHandler:
             )
             if len(candidates) == 1:
                 chosen_player = candidates[0]
+                self._logger.debug(
+                    "Pending replay: free-text → player %s",
+                    chosen_player.name or chosen_player.player_id,
+                )
             elif len(candidates) > 1:
                 # Still ambiguous — re-ask with the saved play intent.
                 return self._build_disambiguation_response(
@@ -856,6 +803,54 @@ class DialogsWebhookHandler:
                     candidates=candidates,
                     session_state_in=session_state_in,
                 )
+
+        # Step 3 — voice ordinal ("первая", "выбираю первую", "номер
+        # три"). Last because we want named answers to win even when
+        # they happen to contain an ordinal word ("Спальня первая").
+        # On screenless smart speakers ordinal is the natural reply
+        # when none of the names is easy to pronounce.
+        if chosen_player is None:
+            ordinal = _parse_ordinal_choice(command)
+            if ordinal is not None:
+                target_pid: str | None = (
+                    candidate_ids[ordinal] if 0 <= ordinal < len(candidate_ids) else None
+                )
+                if target_pid is not None:
+                    chosen_player = exposed_by_id.get(target_pid)
+                    if chosen_player is not None:
+                        self._logger.debug(
+                            "Pending replay: voice ordinal %d → player %s",
+                            ordinal,
+                            chosen_player.name or chosen_player.player_id,
+                        )
+                # If the ordinal couldn't be resolved (out of range, or
+                # the indexed player is no longer exposed), the user
+                # clearly *meant* to pick from the disambiguation list —
+                # re-ask with whichever candidates are still exposed
+                # instead of falling through and mis-interpreting
+                # "третья" as a play query.
+                if chosen_player is None:
+                    still_available = [
+                        exposed_by_id[pid] for pid in candidate_ids if pid in exposed_by_id
+                    ]
+                    if still_available:
+                        self._logger.info(
+                            "Pending replay: ordinal=%d unresolvable; "
+                            "re-asking with %d remaining candidate(s)",
+                            ordinal,
+                            len(still_available),
+                        )
+                        return self._build_disambiguation_response(
+                            session=session,
+                            parsed=ParsedCommand(
+                                kind=str(pending.get("kind", "search")),  # type: ignore[arg-type]
+                                query=str(pending.get("query", "")),
+                                radio_mode=bool(pending.get("radio_mode", False)),
+                            ),
+                            candidates=still_available,
+                            session_state_in=session_state_in,
+                        )
+                    # else: no candidates remain at all — fall through.
 
         if chosen_player is None:
             return None
