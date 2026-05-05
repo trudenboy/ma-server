@@ -51,8 +51,8 @@ from .constants import (
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
     DIALOG_CHANNEL,
-    DIRECT_API_BASE_PATH,
     DIRECT_AUTH_BASE_PATH,
+    DIRECT_BACKEND_URI_PATH,
     DIRECT_OAUTH_CLIENT_ID,
 )
 
@@ -542,15 +542,18 @@ def derive_backend_uri(
     """Return the Backend URL the skill should point at for *connection_type*.
 
     cloud_plus → yaha-cloud.ru relay (fixed URL).
-    direct     → ``{base_url}`` + our API path (requires HTTPS base URL;
-                 see :func:`check_preconditions`). ``base_url_override``,
-                 if given, takes precedence over ``mass.webserver.base_url``.
+    direct     → ``{base_url}{DIRECT_BACKEND_URI_PATH}`` (requires HTTPS
+                 base URL; see :func:`check_preconditions`). The path is
+                 the prefix WITHOUT ``/v1.0`` because Yandex appends the
+                 version segment itself when calling our endpoints.
+                 ``base_url_override``, if given, takes precedence over
+                 ``mass.webserver.base_url``.
     """
     if connection_type == CONNECTION_TYPE_CLOUD_PLUS:
         return CLOUD_SKILL_WEBHOOK_TEMPLATE
     if connection_type == CONNECTION_TYPE_DIRECT:
         base = _resolve_base_url(mass, base_url_override)
-        return f"{base}{DIRECT_API_BASE_PATH}"
+        return f"{base}{DIRECT_BACKEND_URI_PATH}"
     msg = f"auto-create is not supported for connection_type={connection_type!r}"
     raise ValueError(msg)
 

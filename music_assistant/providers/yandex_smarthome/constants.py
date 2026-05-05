@@ -74,6 +74,10 @@ CLOUD_SKILL_WEBHOOK_TEMPLATE = "https://yaha-cloud.ru/api/yandex_smart_home"
 # Direct connection — HTTP endpoints on MA webserver
 # ---------------------------------------------------------------------------
 DIRECT_API_BASE_PATH = "/api/yandex_smarthome/v1.0"
+# What we send to Yandex as the skill Backend URI. Yandex appends /v1.0/...
+# itself when calling our endpoints, so the backend URI must NOT include
+# /v1.0 — otherwise Yandex calls /v1.0/v1.0/user/devices and gets 404.
+DIRECT_BACKEND_URI_PATH = "/api/yandex_smarthome"
 DIRECT_AUTH_BASE_PATH = "/api/yandex_smarthome/auth"
 DIRECT_HEALTH_RESPONSE = "Yandex Smart Home for Music Assistant"
 CONF_DIRECT_ACCESS_TOKEN = "direct_access_token"

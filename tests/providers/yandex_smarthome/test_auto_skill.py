@@ -476,12 +476,16 @@ class TestDeriveBackendUri:
         )
 
     def test_direct_uses_ma_base_plus_api_path(self) -> None:
-        """Direct concatenates MA base_url with the provider's API path."""
+        """Direct backend URI is base_url + /api/yandex_smarthome (no /v1.0).
+
+        Yandex appends /v1.0/... itself when calling the backend, so the
+        URI we send must NOT include /v1.0.
+        """
         mass = _mass_with_base_url("https://my-ma.example.com/")
         # Trailing slash on base_url should be stripped so the full URL is clean.
         assert (
             derive_backend_uri(mass, CONNECTION_TYPE_DIRECT)
-            == "https://my-ma.example.com/api/yandex_smarthome/v1.0"
+            == "https://my-ma.example.com/api/yandex_smarthome"
         )
 
     def test_cloud_raises(self) -> None:
@@ -545,7 +549,7 @@ class TestBuildDraftPayload:
         payload = build_draft_payload(
             connection_type=CONNECTION_TYPE_DIRECT,
             skill_name="Music Assistant",
-            backend_uri="https://ma.example.com/api/yandex_smarthome/v1.0",
+            backend_uri="https://ma.example.com/api/yandex_smarthome",
             logo_id=None,
             developer_name="alice",
         )
@@ -944,8 +948,7 @@ class TestAutoCreateSkillDirectMode:
 
         draft_payload = creator.update_draft.call_args.args[2]
         assert (
-            draft_payload["backendSettings"]["uri"]
-            == "https://ma.example.com/api/yandex_smarthome/v1.0"
+            draft_payload["backendSettings"]["uri"] == "https://ma.example.com/api/yandex_smarthome"
         )
         oauth_call = creator.create_oauth_app.call_args
         assert oauth_call.kwargs["client_id"] == "https://social.yandex.net/"

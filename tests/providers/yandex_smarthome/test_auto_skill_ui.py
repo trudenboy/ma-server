@@ -395,7 +395,8 @@ class TestBuildDirectEntries:
         backend = _find(list(entries), "manual_backend_url")
         assert backend is not None
         assert "ma.example.com" in str(backend.default_value)
-        assert "/api/yandex_smarthome/v1.0" in str(backend.default_value)
+        # No /v1.0 — Yandex appends the version segment itself.
+        assert str(backend.default_value).endswith("/api/yandex_smarthome")
 
     def test_skill_id_field_shown_on_done(self) -> None:
         """Skill ID input field is surfaced (non-advanced) on DONE."""

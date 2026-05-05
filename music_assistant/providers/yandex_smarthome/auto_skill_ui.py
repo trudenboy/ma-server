@@ -51,8 +51,8 @@ from .constants import (
     DIALOG_DEFAULT_NAME,
     DIALOG_NAME_MAX_LEN,
     DIALOG_NAME_MIN_LEN,
-    DIRECT_API_BASE_PATH,
     DIRECT_AUTH_BASE_PATH,
+    DIRECT_BACKEND_URI_PATH,
     DIRECT_OAUTH_CLIENT_ID,
     YANDEX_DIALOGS_DEVELOPER_URL,
     YANDEX_OAUTH_URL,
@@ -565,7 +565,7 @@ def _manual_fallback_entries(
         token_url = CLOUD_OAUTH_TOKEN_URL
     elif connection_type == CONNECTION_TYPE_DIRECT:
         base = base_url.rstrip("/") or "https://<YOUR_MA_HOST>"
-        backend_uri = f"{base}{DIRECT_API_BASE_PATH}"
+        backend_uri = f"{base}{DIRECT_BACKEND_URI_PATH}"
         client_id = DIRECT_OAUTH_CLIENT_ID
         client_secret = direct_client_secret or "(auto-generated on save)"
         auth_url = f"{base}{DIRECT_AUTH_BASE_PATH}/authorize"
