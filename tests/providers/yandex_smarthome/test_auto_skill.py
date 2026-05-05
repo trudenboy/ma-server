@@ -1021,9 +1021,7 @@ class TestAutoCreateSkillDialogType:
         assert result.state == SkillCreationState.DONE
         assert result.last_known_name == "Music Assistant"
         creator.create_app.assert_awaited_once()
-        # Two update_draft calls now: initial minimal draft + pre-deploy
-        # publishingSettings PATCH split.
-        assert creator.update_draft.await_count == 2
+        creator.update_draft.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_dialog_draft_uses_dialog_backend_uri(self) -> None:
@@ -1045,10 +1043,7 @@ class TestAutoCreateSkillDialogType:
             authenticator=_fake_authenticator_factory(),
             creator_factory=lambda _s: creator,
         )
-        # First update_draft call carries the initial minimal draft including
-        # backendSettings; the second call (pre-deploy) only contains
-        # publishingSettings, so we inspect call_args_list[0] specifically.
-        _, _, draft = creator.update_draft.call_args_list[0].args
+        _, _, draft = creator.update_draft.call_args.args
         assert draft["backendSettings"]["uri"] == backend_uri
         assert draft["name"] == "My Skill"
 

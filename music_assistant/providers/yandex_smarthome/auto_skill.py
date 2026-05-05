@@ -74,7 +74,6 @@ __all__ = [
     "auto_create_skill",
     "auto_rename_dialog_skill",
     "build_dialog_draft_payload",
-    "build_dialog_publishing_settings",
     "build_draft_payload",
     "build_oauth_app_payload",
     "check_preconditions",
@@ -697,25 +696,26 @@ def build_dialog_draft_payload(
     skill_name: str,
     backend_uri: str,
     logo_id: str | None,
-    developer_name: str = "Music Assistant user",  # noqa: ARG001 — kept for API parity
+    developer_name: str = "Music Assistant user",
 ) -> dict[str, Any]:
     """Compose the PATCH /draft/update body for a Yandex Dialogs custom skill.
 
-    Minimal payload that survives Yandex's silent 400-with-empty-body
-    rejection. The dev console captures showed Yandex pre-fills several
-    publishingSettings fields server-side (e.g. ``email`` from the user's
-    Passport account); sending an explicit empty value for any of them
-    appears to be invalid in some way the API doesn't bother to explain.
-    Strategy: ship only the fields we genuinely need to set (name,
-    activation, voice, backend URL, access flags) and let Yandex keep its
-    own defaults for everything else.
+    All fields and shapes were captured from a live PATCH issued by the
+    dev console after the user filled the form successfully. Notable
+    discoveries:
 
-    The publishingSettings block (category, description, examples, etc.)
-    is filled by a separate pre-deploy PATCH right before
-    ``request_deploy`` so the user does not have to fill the form by
-    hand. See :func:`build_dialog_publishing_settings`.
+    - ``structuredExamples`` shape: each entry is
+      ``{"marker": <activator>, "activationPhrase": <skill_name>,
+      "request": <phrase>, "is_valid": true}`` — NOT ``{"phrase": "..."}``
+      as we previously guessed (that wrong shape was the cause of all
+      the silent HTTP 400 + empty-body rejections from Yandex).
+    - ``description``: required non-empty.
+    - ``category``: ``"music_audio"`` (API key for "Аудио и подкасты").
+    - ``email``: empty string is OK; Yandex pre-fills it from the user's
+      Passport account on its side anyway.
     """
     return {
+        "logo2": None,
         "name": skill_name,
         "voice": "good_oksana",
         "activationPhrases": [skill_name],
@@ -726,6 +726,38 @@ def build_dialog_draft_payload(
             "uri": backend_uri,
             "functionId": "",
             "backendType": "webhook",
+        },
+        "publishingSettings": {
+            "brandVerificationWebsite": "",
+            "category": "music_audio",
+            "developerName": developer_name,
+            "explicitContent": False,
+            "structuredExamples": [
+                {
+                    "marker": "попроси",
+                    "activationPhrase": skill_name,
+                    "request": "включи Metallica",
+                    "is_valid": True,
+                },
+                {
+                    "marker": "попроси",
+                    "activationPhrase": skill_name,
+                    "request": "включи мою волну",
+                    "is_valid": True,
+                },
+                {
+                    "marker": "попроси",
+                    "activationPhrase": skill_name,
+                    "request": "включи джаз на кухне",
+                    "is_valid": True,
+                },
+            ],
+            "description": (
+                f"{skill_name}: голосовое управление Music Assistant — "
+                "поиск и воспроизведение треков, альбомов, плейлистов, "
+                "радио и Моей волны на любой колонке в системе."
+            ),
+            "email": "",
         },
         "requiredInterfaces": [],
         "exactSurfaces": [],
@@ -739,37 +771,6 @@ def build_dialog_draft_payload(
         "hideInStore": True,
         "channel": DIALOG_CHANNEL,
     }
-
-
-def build_dialog_publishing_settings(
-    *,
-    developer_name: str = "Music Assistant user",
-    user_email: str = "",
-) -> dict[str, Any]:
-    """Compose only the publishingSettings block for a separate PATCH pass.
-
-    Sent right before ``request_deploy`` so the deploy validation finds
-    everything filled. If ``user_email`` is empty the field is omitted
-    entirely (Yandex pre-fills from the Passport account; sending an
-    explicit empty string is what triggers the silent 400 we saw).
-    """
-    settings: dict[str, Any] = {
-        "publishingSettings": {
-            "brandVerificationWebsite": "",
-            "category": "music_audio",
-            "developerName": developer_name,
-            "explicitContent": False,
-            "structuredExamples": [
-                {"phrase": "включи Metallica"},
-                {"phrase": "включи мою волну"},
-                {"phrase": "включи джаз на кухне"},
-            ],
-            "description": "Free-form voice playback bridge for Music Assistant.",
-        },
-    }
-    if user_email:
-        settings["publishingSettings"]["email"] = user_email
-    return settings
 
 
 def build_oauth_app_payload(
@@ -1501,50 +1502,8 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
         state = artifacts.state
 
     if state == SkillCreationState.DEPLOY_REQUESTED:
-        if skill_type == "dialog":
-            # Right before deploy, push a separate PATCH with the
-            # publishingSettings block (category, description, examples).
-            # Sending these in the initial draft PATCH triggers Yandex's
-            # silent "HTTP 400 with empty body" rejection — we have not
-            # been able to identify the exact field that fails validation.
-            # Splitting into two PATCH passes lets the first one succeed
-            # (initial fields) and tries the publishingSettings second;
-            # if it still fails, the skill is at least created and the
-            # user can finish setup in the Yandex Dialogs dev console.
-            settings_payload = build_dialog_publishing_settings(
-                developer_name=developer_name,
-            )
-            try:
-                await creator.update_draft(csrf, skill_id, settings_payload)
-            except DialogsApiError as exc:
-                _LOGGER.warning(
-                    "auto-skill: pre-deploy publishingSettings PATCH failed "
-                    "(%s) — skill draft is created and reachable in the "
-                    "Yandex Dialogs dev console; finish required fields "
-                    "(description, category, example phrases) and click "
-                    "'Submit for moderation' there to publish.",
-                    exc,
-                )
-                artifacts = dataclasses.replace(artifacts, state=SkillCreationState.DONE)
-                await _maybe_save(progress_cb, artifacts)
-                return artifacts
         _LOGGER.info("auto-skill: [5/5] publishing skill")
-        try:
-            await creator.request_deploy(csrf, skill_id)
-        except DialogsApiError as exc:
-            if skill_type == "dialog":
-                # Same rationale: even if deploy fails, the skill exists
-                # and the user can publish from the dev console.
-                _LOGGER.warning(
-                    "auto-skill: dialog request_deploy failed (%s) — skill "
-                    "is created; complete the form fields in the Yandex "
-                    "Dialogs dev console and submit for moderation there.",
-                    exc,
-                )
-                artifacts = dataclasses.replace(artifacts, state=SkillCreationState.DONE)
-                await _maybe_save(progress_cb, artifacts)
-                return artifacts
-            raise
+        await creator.request_deploy(csrf, skill_id)
         artifacts = dataclasses.replace(artifacts, state=SkillCreationState.DONE)
         await _maybe_save(progress_cb, artifacts)
 
