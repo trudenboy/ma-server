@@ -462,18 +462,31 @@ class DialogsSkillCreator:
                     yandex_error=_extract_error_code(body),
                 )
             if resp.status not in (200, 201, 202):
-                # Empty / very short body 4xx — log response headers so the
-                # user can see what Yandex actually returned (helps diagnose
-                # e.g. wrong "channel" parameter where the API rejects the
-                # request before generating a body).
+                # Empty / very short body 4xx — log a small safe subset of
+                # response headers so the user can see what Yandex actually
+                # returned (helps diagnose e.g. wrong "channel" parameter
+                # where the API rejects the request before generating a body).
+                # Avoid dumping the full header map: it includes Set-Cookie
+                # and other potentially sensitive values.
                 if not body.strip():
+                    safe_headers = {
+                        k: resp.headers.get(k)
+                        for k in (
+                            "Content-Type",
+                            "Content-Length",
+                            "X-Request-Id",
+                            "X-RateLimit-Remaining",
+                            "X-RateLimit-Limit",
+                        )
+                        if resp.headers.get(k) is not None
+                    }
                     _LOGGER.warning(
                         "Yandex %s %s returned %s with empty body; response "
                         "headers=%s, request payload channel=%r",
                         method,
                         url,
                         resp.status,
-                        dict(resp.headers),
+                        safe_headers,
                         payload.get("channel"),
                     )
                 raise DialogsApiError(
