@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002
 """Tests for provider/dialogs.py — webhook handler."""
 
 from __future__ import annotations
@@ -90,7 +91,8 @@ def _build_request(body: dict[str, Any], secret: str = _TEST_SECRET) -> web.Requ
 
 def _response_body(resp: web.Response) -> dict[str, Any]:
     """Decode a web.json_response body into a dict for assertions."""
-    return json.loads(resp.body)  # type: ignore[arg-type]
+    decoded: dict[str, Any] = json.loads(resp.body)  # type: ignore[arg-type]
+    return decoded
 
 
 @pytest.mark.asyncio

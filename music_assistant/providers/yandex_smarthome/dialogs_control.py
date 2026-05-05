@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """Playback-control NLU + executor for the Yandex Dialogs custom skill.
 
 Handles utterances that don't carry a music query — pause/resume/next/

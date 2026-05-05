@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF003
 """HTTP handler for the Yandex Dialogs custom-skill webhook (experimental).
 
 Registers a single exact route on the MA webserver — the secret is

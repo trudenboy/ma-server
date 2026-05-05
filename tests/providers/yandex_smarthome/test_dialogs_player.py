@@ -1,3 +1,4 @@
+# ruff: noqa: RUF003
 """Tests for provider/dialogs_player.py — content resolver + play wrapper."""
 
 from __future__ import annotations

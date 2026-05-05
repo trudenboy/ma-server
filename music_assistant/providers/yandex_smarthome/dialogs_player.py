@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """Music + player resolvers for the Yandex Dialogs custom-skill webhook.
 
 `resolve_query` turns a `ParsedCommand` into a concrete URI/MediaItem ready

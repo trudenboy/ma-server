@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """Tests for provider/dialogs_control.py — playback control NLU + executor."""
 
 from __future__ import annotations

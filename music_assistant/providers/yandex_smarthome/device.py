@@ -430,7 +430,7 @@ def _invalid_numeric_result(cap_type: str, instance: str, value: Any) -> Capabil
     )
 
 
-async def execute_capability_action(
+async def execute_capability_action(  # noqa: PLR0915
     mass: Any,
     player_id: str,
     action: CapabilityAction,

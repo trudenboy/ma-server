@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF003
 """Server-side NLU parser for Yandex Dialogs custom-skill webhook commands.
 
 The plugin's Dialogs skill registers in the Yandex Dialogs UI without
