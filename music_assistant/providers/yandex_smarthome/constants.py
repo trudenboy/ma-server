@@ -9,6 +9,11 @@ import os
 # ---------------------------------------------------------------------------
 CONF_INSTANCE_NAME = "instance_name"
 CONF_CONNECTION_TYPE = "connection_type"
+# Override for MA's webserver Base URL — used when generating callback /
+# webhook URLs for Yandex. Lets users keep MA's global Base URL unset (so
+# HA Ingress / local access keep working) while still exposing a public
+# HTTPS URL only to Yandex via a reverse proxy.
+CONF_EXTERNAL_BASE_URL = "external_base_url"
 CONF_CLOUD_INSTANCE_ID = "cloud_instance_id"
 CONF_CLOUD_INSTANCE_PASSWORD = "cloud_instance_password"
 CONF_CLOUD_CONNECTION_TOKEN = "cloud_connection_token"

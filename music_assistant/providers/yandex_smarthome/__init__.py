@@ -63,6 +63,7 @@ from .constants import (
     CONF_DIRECT_CLIENT_SECRET,
     CONF_EXPOSED_PLAYERS,
     CONF_EXPOSED_PLAYLISTS,
+    CONF_EXTERNAL_BASE_URL,
     CONF_INSTANCE_NAME,
     CONF_SKILL_ID,
     CONF_SKILL_TOKEN,
@@ -142,6 +143,32 @@ def _resolve_direct_client_secret(
             if saved:
                 return str(saved)
     return str(values.get(CONF_DIRECT_CLIENT_SECRET) or "")
+
+
+def _resolve_external_base_url(
+    mass: MusicAssistant,
+    values: dict[str, ConfigValueType] | None = None,
+) -> str:
+    """Return the public-facing Base URL to use for Yandex callbacks/webhooks.
+
+    Priority:
+      1. ``CONF_EXTERNAL_BASE_URL`` from values (user-set plugin override)
+      2. ``mass.webserver.base_url`` (MA's global setting)
+
+    The override exists so users can keep MA's global Base URL pointing at
+    the local address (so HA Ingress / local UI keep working) while
+    exposing a public HTTPS URL only to Yandex via a reverse proxy.
+    Trailing slashes are stripped.
+    """
+    override = ""
+    if values is not None:
+        override = str(values.get(CONF_EXTERNAL_BASE_URL) or "").strip()
+    if override:
+        return override.rstrip("/")
+    fallback = ""
+    with contextlib.suppress(Exception):
+        fallback = str(mass.webserver.base_url)
+    return fallback.rstrip("/")
 
 
 def _resolve_dialog_webhook_secret(
@@ -256,6 +283,7 @@ async def _run_auto_create_action(
             direct_client_secret=_resolve_direct_client_secret(mass, instance_id, values),
             logo_bytes=load_default_logo_bytes(),
             session_id=session_id,
+            base_url_override=str(values.get(CONF_EXTERNAL_BASE_URL) or "") or None,
         )
     except asyncio.CancelledError:
         # Preserve cooperative cancellation so config-flow shutdown
@@ -311,9 +339,7 @@ async def _run_auto_create_dialog_action(
         webhook_secret = uuid.uuid4().hex
         values[CONF_DIALOG_WEBHOOK_SECRET] = webhook_secret
 
-    ma_base_url = ""
-    with contextlib.suppress(Exception):
-        ma_base_url = str(mass.webserver.base_url)
+    ma_base_url = _resolve_external_base_url(mass, values)
     dialog_backend_uri = _build_dialog_backend_uri(ma_base_url, webhook_secret)
 
     skill_name = str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME)
@@ -330,6 +356,7 @@ async def _run_auto_create_dialog_action(
             session_id=session_id,
             skill_type="dialog",
             dialog_backend_uri=dialog_backend_uri,
+            base_url_override=str(values.get(CONF_EXTERNAL_BASE_URL) or "") or None,
         )
     except asyncio.CancelledError:
         raise
@@ -363,9 +390,7 @@ async def _run_rename_dialog_action(
     artifacts = load_artifacts(str(artifacts_raw) if artifacts_raw else None)
 
     webhook_secret = _resolve_dialog_webhook_secret(mass, instance_id, values)
-    ma_base_url = ""
-    with contextlib.suppress(Exception):
-        ma_base_url = str(mass.webserver.base_url)
+    ma_base_url = _resolve_external_base_url(mass, values)
     dialog_backend_uri = _build_dialog_backend_uri(ma_base_url, webhook_secret)
 
     skill_name = str(values.get(CONF_DIALOG_SKILL_NAME) or DIALOG_DEFAULT_NAME)
@@ -407,9 +432,7 @@ async def get_config_entries(  # noqa: PLR0915
     artifacts = load_artifacts(artifacts_str)
     session_id_val = values.get(CONF_AUTO_CREATE_SESSION_ID)
     session_id_str = str(session_id_val) if session_id_val else None
-    ma_base_url_for_ui = ""
-    with contextlib.suppress(Exception):
-        ma_base_url_for_ui = str(mass.webserver.base_url)
+    ma_base_url_for_ui = _resolve_external_base_url(mass, values)
 
     is_registered = bool(values.get(CONF_CLOUD_INSTANCE_ID)) and bool(
         values.get(CONF_CLOUD_CONNECTION_TOKEN)
@@ -532,6 +555,35 @@ async def get_config_entries(  # noqa: PLR0915
         dialog_session_id_val = values.get(CONF_DIALOG_AUTO_CREATE_SESSION_ID)
         dialog_session_id_str = str(dialog_session_id_val) if dialog_session_id_val else None
 
+        # Plugin-local override of MA's webserver Base URL — published to
+        # Yandex but doesn't touch MA's global setting. Lets users keep the
+        # global Base URL pointing at the local IP (so HA Ingress / local
+        # frontend keep working) while still exposing a public HTTPS URL
+        # to Yandex via a reverse proxy.
+        ma_global_base_url = ""
+        with contextlib.suppress(Exception):
+            ma_global_base_url = str(mass.webserver.base_url)
+        external_url_description = (
+            "Public HTTPS URL of this MA instance, used only for Yandex "
+            "callbacks and webhooks (Yandex requires HTTPS). Set this if "
+            "you don't want to change MA's global Base URL — e.g. you reach "
+            "MA via Home Assistant Ingress and exposing a public URL "
+            "globally would break local access. Leave empty to use MA's "
+            f"Base URL ({ma_global_base_url or '<unset>'})."
+        )
+        entries.append(
+            ConfigEntry(
+                key=CONF_EXTERNAL_BASE_URL,
+                type=ConfigEntryType.STRING,
+                label="External Base URL (HTTPS, optional override)",
+                description=external_url_description,
+                required=False,
+                default_value="",
+                value=str(values.get(CONF_EXTERNAL_BASE_URL) or ""),
+                depends_on=CONF_CONNECTION_TYPE,
+                depends_on_value=CONNECTION_TYPE_DIRECT,
+            )
+        )
         entries.extend(
             build_direct_entries(
                 artifacts=artifacts,

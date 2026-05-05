@@ -384,10 +384,10 @@ def _create_skill_step_entries(
         )
     )
 
-    # direct mode prerequisite: Yandex Dialogs only accepts HTTPS
-    # backends. If MA's Base URL is not HTTPS, show the user what's
-    # wrong (and what URL we'd have used) so they can fix it in
-    # Settings → Core → Webserver → Base URL.
+    # direct mode prerequisite: Yandex requires HTTPS. If the resolved
+    # base URL (plugin override → MA global) is not HTTPS, point the user
+    # at the External Base URL field above (preferred) or MA's global
+    # Base URL setting as a fallback.
     direct_https_missing = connection_type == CONNECTION_TYPE_DIRECT and not base_url.startswith(
         "https://"
     )
@@ -397,29 +397,15 @@ def _create_skill_step_entries(
                 key="label_direct_https_warning",
                 type=ConfigEntryType.LABEL,
                 label=(
-                    f"⚠️ MA's Base URL is {base_url or '<unset>'}. "
+                    f"⚠️ Resolved Base URL is {base_url or '<unset>'}. "
                     "Direct mode requires a **publicly reachable HTTPS URL** — "
                     "Yandex refuses to talk to a non-HTTPS backend. "
-                    "Set a reverse proxy with a real certificate and "
-                    "update Settings → Core → Webserver → Base URL, then "
-                    "reopen these settings."
+                    "Set up a reverse proxy with a real certificate, then either "
+                    "fill the **External Base URL** field above (recommended — "
+                    "doesn't affect MA's local access / HA Ingress) "
+                    "or update Settings → Core → Webserver → Base URL globally. "
+                    "Save and reopen this page after."
                 ),
-                depends_on=CONF_CONNECTION_TYPE,
-                depends_on_value=connection_type,
-                category=category,
-            )
-        )
-        entries.append(
-            ConfigEntry(
-                key="current_ma_base_url",
-                type=ConfigEntryType.STRING,
-                label="Current MA Base URL (read-only)",
-                description=(
-                    "For reference. Change it in Settings → Core → Webserver "
-                    "→ Base URL; provider doesn't own this setting."
-                ),
-                required=False,
-                default_value=base_url or "",
                 depends_on=CONF_CONNECTION_TYPE,
                 depends_on_value=connection_type,
                 category=category,

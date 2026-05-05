@@ -522,33 +522,56 @@ def _extract_error_code(body: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def derive_backend_uri(mass: MusicAssistant, connection_type: str) -> str:
+def _resolve_base_url(mass: MusicAssistant, override: str | None) -> str:
+    """Pick override (plugin-local) over MA's global webserver.base_url.
+
+    ``override`` is the user's ``CONF_EXTERNAL_BASE_URL`` value if they
+    chose to set one. Empty/None falls back to ``mass.webserver.base_url``.
+    """
+    if override:
+        return override.rstrip("/")
+    return str(mass.webserver.base_url).rstrip("/")
+
+
+def derive_backend_uri(
+    mass: MusicAssistant,
+    connection_type: str,
+    *,
+    base_url_override: str | None = None,
+) -> str:
     """Return the Backend URL the skill should point at for *connection_type*.
 
     cloud_plus → yaha-cloud.ru relay (fixed URL).
-    direct     → ``{mass.webserver.base_url}`` + our API path (requires
-                 HTTPS base URL; see :func:`check_preconditions`).
+    direct     → ``{base_url}`` + our API path (requires HTTPS base URL;
+                 see :func:`check_preconditions`). ``base_url_override``,
+                 if given, takes precedence over ``mass.webserver.base_url``.
     """
     if connection_type == CONNECTION_TYPE_CLOUD_PLUS:
         return CLOUD_SKILL_WEBHOOK_TEMPLATE
     if connection_type == CONNECTION_TYPE_DIRECT:
-        base = str(mass.webserver.base_url).rstrip("/")
+        base = _resolve_base_url(mass, base_url_override)
         return f"{base}{DIRECT_API_BASE_PATH}"
     msg = f"auto-create is not supported for connection_type={connection_type!r}"
     raise ValueError(msg)
 
 
-def derive_auth_urls(mass: MusicAssistant, connection_type: str) -> tuple[str, str]:
+def derive_auth_urls(
+    mass: MusicAssistant,
+    connection_type: str,
+    *,
+    base_url_override: str | None = None,
+) -> tuple[str, str]:
     """Return (authorize_url, token_url) for the OAuth app.
 
     cloud_plus uses the yaha-cloud relay's OAuth endpoints; direct
     uses the MA webserver's own authorize/token endpoints (served by
-    provider/direct.py).
+    provider/direct.py). ``base_url_override`` takes precedence over
+    ``mass.webserver.base_url`` for the direct case.
     """
     if connection_type == CONNECTION_TYPE_CLOUD_PLUS:
         return CLOUD_OAUTH_AUTHORIZE_URL, CLOUD_OAUTH_TOKEN_URL
     if connection_type == CONNECTION_TYPE_DIRECT:
-        base = str(mass.webserver.base_url).rstrip("/")
+        base = _resolve_base_url(mass, base_url_override)
         return (
             f"{base}{DIRECT_AUTH_BASE_PATH}/authorize",
             f"{base}{DIRECT_AUTH_BASE_PATH}/token",
@@ -724,12 +747,18 @@ def check_preconditions(
     mass: MusicAssistant,
     cloud_instance_id: str,
     direct_client_secret: str,
+    base_url_override: str | None = None,
 ) -> None:
     """Validate that auto-create can run for the given connection type.
 
     Raises :class:`ValueError` with a human-readable message on failure.
     Called before any network I/O so the UI can surface the error
     without a half-created skill on Yandex's side.
+
+    ``base_url_override``, if given, takes precedence over
+    ``mass.webserver.base_url`` for the HTTPS check (so users can keep
+    MA's global Base URL local while supplying a public HTTPS URL only
+    to Yandex via the plugin override).
     """
     if connection_type == CONNECTION_TYPE_CLOUD_PLUS:
         if not cloud_instance_id:
@@ -745,7 +774,7 @@ def check_preconditions(
             msg = "Direct mode requires a generated Client Secret"
             raise ValueError(msg)
         try:
-            base = str(mass.webserver.base_url)
+            base = _resolve_base_url(mass, base_url_override)
         except Exception as exc:
             msg = f"MA webserver base URL is not available: {exc}"
             raise ValueError(msg) from exc
@@ -1087,6 +1116,7 @@ async def auto_create_skill(  # noqa: PLR0913
     session_id: str,
     skill_type: Literal["smart_home", "dialog"] = "smart_home",
     dialog_backend_uri: str | None = None,
+    base_url_override: str | None = None,
     progress_cb: Callable[[SkillCreationArtifacts], Awaitable[None]] | None = None,
     authenticator: Callable[..., AsyncIterator[aiohttp.ClientSession]] | None = None,
     creator_factory: Callable[[aiohttp.ClientSession], DialogsSkillCreator] | None = None,
@@ -1119,6 +1149,7 @@ async def auto_create_skill(  # noqa: PLR0913
         mass=mass,
         cloud_instance_id=cloud_instance_id,
         direct_client_secret=direct_client_secret,
+        base_url_override=base_url_override,
     )
 
     if skill_type == "dialog" and not dialog_backend_uri:
@@ -1149,6 +1180,7 @@ async def auto_create_skill(  # noqa: PLR0913
                 developer_name=developer_name,
                 skill_type=skill_type,
                 dialog_backend_uri=dialog_backend_uri,
+                base_url_override=base_url_override,
                 progress_cb=progress_cb,
             )
     except asyncio.CancelledError:
@@ -1174,6 +1206,7 @@ async def _run_pipeline_with_recovery(  # noqa: PLR0913
     developer_name: str,
     skill_type: Literal["smart_home", "dialog"] = "smart_home",
     dialog_backend_uri: str | None = None,
+    base_url_override: str | None = None,
     progress_cb: Callable[[SkillCreationArtifacts], Awaitable[None]] | None,
 ) -> SkillCreationArtifacts:
     """Fetch CSRF and run the pipeline, preserving partial state on failure.
@@ -1208,6 +1241,7 @@ async def _run_pipeline_with_recovery(  # noqa: PLR0913
             developer_name=developer_name,
             skill_type=skill_type,
             dialog_backend_uri=dialog_backend_uri,
+            base_url_override=base_url_override,
             progress_cb=_track,
         )
     except DialogsApiError as exc:
@@ -1229,6 +1263,7 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
     developer_name: str,
     skill_type: Literal["smart_home", "dialog"] = "smart_home",
     dialog_backend_uri: str | None = None,
+    base_url_override: str | None = None,
     progress_cb: Callable[[SkillCreationArtifacts], Awaitable[None]] | None,
 ) -> SkillCreationArtifacts:
     """Advance through states sequentially, skipping completed steps."""
@@ -1271,7 +1306,9 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
                 developer_name=developer_name,
             )
         else:
-            backend_uri = derive_backend_uri(mass, connection_type)
+            backend_uri = derive_backend_uri(
+                mass, connection_type, base_url_override=base_url_override
+            )
             draft = build_draft_payload(
                 connection_type=connection_type,
                 skill_name=skill_name,
@@ -1297,7 +1334,9 @@ async def _execute_pipeline(  # noqa: PLR0913, PLR0915
             if connection_type == CONNECTION_TYPE_CLOUD_PLUS
             else direct_client_secret
         )
-        authorize_url, token_url = derive_auth_urls(mass, connection_type)
+        authorize_url, token_url = derive_auth_urls(
+            mass, connection_type, base_url_override=base_url_override
+        )
         _LOGGER.info("auto-skill: [4/5] creating OAuth app + attaching")
         oauth_app_id = await creator.create_oauth_app(
             csrf,
