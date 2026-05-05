@@ -253,6 +253,12 @@ async def execute_control(
     Errors are logged and swallowed — Alice has already been told the
     action was accepted; we don't have a channel to surface failures
     back into the same conversation.
+
+    Note: ``list_players`` is a member of ``ControlAction`` for typing
+    convenience, but it's an *informational* query handled inline by
+    ``DialogsWebhookHandler._handle_control`` (which never calls this
+    function for it). The explicit branch below makes that contract
+    safe — a stray call won't silently no-op, it logs and returns.
     """
     pid = player.player_id
     action = control.action
@@ -278,6 +284,17 @@ async def execute_control(
             await mass.players.cmd_volume_mute(pid, True)
         elif action == "unmute":
             await mass.players.cmd_volume_mute(pid, False)
+        elif action == "list_players":
+            # Informational query — the handler builds the response
+            # text from a live `list_exposed_players(...)` call and
+            # never dispatches here. If we somehow got called for
+            # this action it's a caller bug, not something to silently
+            # ignore.
+            _LOGGER.warning(
+                "execute_control called with action='list_players'; "
+                "this is informational and should be handled by the "
+                "webhook handler, not dispatched here. Skipping.",
+            )
     except asyncio.CancelledError:
         raise
     except Exception:

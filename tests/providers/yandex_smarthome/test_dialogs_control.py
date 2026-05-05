@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -300,6 +301,28 @@ class TestExecuteControl:
         mass = self._make_mass()
         await execute_control(mass, ParsedControl(action="unmute"), self._player())
         mass.players.cmd_volume_mute.assert_awaited_once_with("p1", False)
+
+    async def test_list_players_is_a_safe_noop_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`list_players` reaching execute_control logs a warning and no-ops.
+
+        The handler is supposed to short-circuit `list_players` before
+        dispatch (it's an informational query), but the typing allows
+        it as a `ControlAction` so the explicit branch makes a stray
+        call safe rather than a silent no-op.
+        """
+        mass = self._make_mass()
+        with caplog.at_level(
+            logging.WARNING, logger="music_assistant.providers.yandex_smarthome.dialogs_control"
+        ):
+            await execute_control(mass, ParsedControl(action="list_players"), self._player())
+        # No MA command dispatched.
+        mass.player_queues.pause.assert_not_awaited()
+        mass.player_queues.resume.assert_not_awaited()
+        mass.players.cmd_volume_set.assert_not_awaited()
+        # Warning emitted.
+        assert any("list_players" in r.getMessage() for r in caplog.records)
 
     async def test_underlying_failure_is_swallowed(self) -> None:
         """An exception from the MA call is logged + swallowed (no re-raise)."""
