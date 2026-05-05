@@ -143,16 +143,16 @@ def parse_command(text: str) -> ParsedCommand:
 # Not a full lemmatizer — picks up the most frequent endings for short names.
 # Order: longest first so "ой" matches before "й".
 _INFLECTION_SUFFIXES = (
-    "ого",
+    "ого",  # noqa: RUF001
     "ому",
     "ыми",
     "ой",
     "ом",
     "ым",
     "ы",
-    "е",
-    "у",
-    "а",
+    "е",  # noqa: RUF001
+    "у",  # noqa: RUF001
+    "а",  # noqa: RUF001
     "и",
     "й",
     "ь",
