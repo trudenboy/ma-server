@@ -120,12 +120,15 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 
 
 def _without_pending(state: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of `state` with `pending_command` and `awaiting_query` removed.
+    """Return a copy of `state` with disambiguation/elicitation keys removed.
 
-    Used after the disambiguation/elicitation flow successfully completes
-    so the next turn doesn't accidentally re-enter the saved branch.
+    Strips `pending_command`, `awaiting_query`, and `awaiting_player_id`.
+    Used after the disambiguation / slot-elicit flow successfully
+    completes so the next turn doesn't accidentally re-enter the saved
+    branch.
     """
-    return {k: v for k, v in state.items() if k not in {"pending_command", "awaiting_query"}}
+    transient = {"pending_command", "awaiting_query", "awaiting_player_id"}
+    return {k: v for k, v in state.items() if k not in transient}
 
 
 # Ordinal voice-disambiguation patterns. The user picks a candidate by
@@ -242,7 +245,7 @@ class DialogsWebhookHandler:
     # Webhook entry point
     # -------------------------------------------------------------------
 
-    async def _handle_webhook(self, request: web.Request) -> web.Response:
+    async def _handle_webhook(self, request: web.Request) -> web.Response:  # noqa: PLR0915
         # Path secret already enforced by the route URL — getting here means
         # the secret matches. Still constant-time-compare it via the captured
         # path arg in case aiohttp routing ever changes.
@@ -378,6 +381,20 @@ class DialogsWebhookHandler:
         if awaiting_in and not _VERB_RE.match(command):
             command = f"включи {command}"
             self._logger.debug("Awaiting-query branch: synthesised cmd=%r", command)
+        # If slot-elicit was triggered with a player hint that resolved
+        # to a single exposed player, the follow-up turn should play on
+        # that player. Surface it as `default_id` so the resolver picks
+        # it without the user re-stating "на кухне".
+        if awaiting_in and not default_id:
+            saved_pid = session_state_in.get("awaiting_player_id") or app_state_in.get(
+                "awaiting_player_id"
+            )
+            if saved_pid:
+                default_id = str(saved_pid)
+                self._logger.debug(
+                    "Awaiting-query branch: restored hinted player as default_id=%s",
+                    default_id,
+                )
 
         # P0.3 — pending-command re-entry. If a previous turn asked the
         # user to disambiguate which player to use, the new utterance (or
@@ -434,24 +451,40 @@ class DialogsWebhookHandler:
     ) -> web.Response:
         """Slot-elicit / resolve player / disambiguate / play (or fail)."""
         # P0.4 — slot elicitation: bare verb with no actionable content.
-        if parsed.kind == "search" and not parsed.query and not parsed.player_hint:
-            self._logger.debug("Slot-elicit branch: empty query, asking 'Что включить?'")
+        # Triggers whenever the query slot is empty, even if the user
+        # specified a player hint ("включи на кухне"). Falling through
+        # would respond "Не нашёл такую музыку: ." which is confusing —
+        # the user clearly *wants* something, just didn't name it yet.
+        # If a hint resolves to a single exposed player, save its id as
+        # `awaiting_player_id` so the follow-up turn plays on it.
+        if parsed.kind == "search" and not parsed.query:
+            self._logger.debug(
+                "Slot-elicit branch: empty query (hint=%r), asking 'Что включить?'",
+                parsed.player_hint,
+            )
+            awaiting_player_id: str | None = None
+            if parsed.player_hint:
+                hinted_candidates = resolve_player_candidates(
+                    self._mass,
+                    parsed.player_hint,
+                    default_id=default_id,
+                    exposed_ids=self._exposed_player_ids,
+                )
+                if len(hinted_candidates) == 1:
+                    awaiting_player_id = hinted_candidates[0].player_id
             text = "Что включить? Можно сказать имя артиста, песни или плейлиста."
+            elicit_state: dict[str, Any] = {"awaiting_query": True}
+            if awaiting_player_id:
+                elicit_state["awaiting_player_id"] = awaiting_player_id
             return self._yandex_response(
                 incoming_session=session,
                 text=text,
                 tts=_tts_for(text),
                 end_session=False,
-                session_state={
-                    **_without_pending(session_state_in),
-                    "awaiting_query": True,
-                },
+                session_state={**_without_pending(session_state_in), **elicit_state},
                 # Mirror to application_state so the next turn can find
                 # the flag even if Yandex didn't echo `state.session`.
-                application_state={
-                    **_without_pending(app_state_in),
-                    "awaiting_query": True,
-                },
+                application_state={**_without_pending(app_state_in), **elicit_state},
             )
 
         candidates = resolve_player_candidates(

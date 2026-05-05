@@ -656,6 +656,52 @@ class TestDisambiguation:
         assert "pending_command" not in body_out["session_state"]
         assert body_out["session_state"]["last_player_id"] == "p1"
 
+    async def test_slot_elicit_with_hint_persists_player(self) -> None:
+        """'включи на кухне' (player set, no query) elicits + saves hinted player.
+
+        Previously fell through to "Не нашёл такую музыку: ." — the user
+        clearly wants something, just didn't name it. Now elicits and
+        plays the follow-up on the hinted player without re-stating it.
+        """
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Спальня"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        # Turn 1: "включи на кухне" — no query, hint=кухне
+        body1 = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи на кухне"},
+        }
+        resp1 = await handler._handle_webhook(_build_request(body1))
+        body_out1 = _response_body(resp1)
+        # Slot-elicit response with hinted player saved.
+        assert "Что включить" in body_out1["response"]["text"]
+        assert body_out1["session_state"]["awaiting_query"] is True
+        assert body_out1["session_state"]["awaiting_player_id"] == "p1"
+        assert body_out1["application_state"]["awaiting_player_id"] == "p1"
+        mass.player_queues.play_media.assert_not_awaited()
+
+        # Turn 2: "Metallica" — should play on p1 (the saved hint)
+        body2 = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "Metallica"},
+            "state": {
+                "session": {
+                    "awaiting_query": True,
+                    "awaiting_player_id": "p1",
+                },
+            },
+        }
+        await handler._handle_webhook(_build_request(body2))
+        await asyncio.sleep(0)
+        mass.player_queues.play_media.assert_awaited_once()
+        assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p1"
+
     async def test_slot_elicit_when_query_empty(self) -> None:
         """Bare verb (empty query) → 'Что включить?' + awaiting_query=True."""
         mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])

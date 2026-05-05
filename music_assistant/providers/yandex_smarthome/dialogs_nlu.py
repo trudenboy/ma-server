@@ -1,4 +1,4 @@
-# ruff: noqa: RUF001, RUF003
+# ruff: noqa: RUF001, RUF002, RUF003
 """Server-side NLU parser for Yandex Dialogs custom-skill webhook commands.
 
 The plugin's Dialogs skill registers in the Yandex Dialogs UI without
@@ -100,7 +100,34 @@ _KIND_RULES: tuple[tuple[re.Pattern[str], CommandKind, bool], ...] = (
 )
 
 
-def parse_command(text: str) -> ParsedCommand:
+# Marker words that mean "the next token(s) are content, not the title".
+# Used by `parse_command` to detect a wrong "на <hint>" split: if the
+# split-off remainder is just a marker word (e.g. "включи песню" with
+# the title "На заре" mis-split off as a player hint), the suffix
+# extraction was almost certainly wrong and we re-parse without it.
+_KIND_MARKER_WORDS: frozenset[str] = frozenset(
+    {
+        "песню",
+        "трек",
+        "композицию",
+        "композиция",
+        "альбом",
+        "пластинку",
+        "пластинка",
+        "плейлист",
+        "подборку",
+        "подборка",
+        "исполнителя",
+        "артиста",
+        "группу",
+        "группа",
+        "радио",
+        "жанр",
+    }
+)
+
+
+def parse_command(text: str, *, _split_player_hint: bool = True) -> ParsedCommand:
     """Parse a raw voice command into a structured ParsedCommand.
 
     Examples:
@@ -111,6 +138,13 @@ def parse_command(text: str) -> ParsedCommand:
       "включи мою волну"                      → kind=my_wave, query=, radio_mode=True
       "включи джаз"                           → kind=search, query=джаз
       "включи жанр джаз"                      → kind=genre, query=джаз, radio_mode=True
+      "включи песню На заре"                  → kind=track, query=на заре  (no false split)
+
+    The ``_split_player_hint`` parameter is internal: when the first
+    pass produces a suspicious split (the whole content was eaten as
+    "на <player_hint>", leaving only a marker word in the query), the
+    function recurses with the flag off to keep the suffix in the
+    query. Don't pass it from outside.
     """
     if not text:
         return ParsedCommand(kind="search", query="")
@@ -124,7 +158,7 @@ def parse_command(text: str) -> ParsedCommand:
 
     # Split off the trailing "<player>" hint suffix.
     player_hint: str | None = None
-    if match := _PLAYER_SUFFIX_RE.search(cleaned):
+    if _split_player_hint and (match := _PLAYER_SUFFIX_RE.search(cleaned)):
         player_hint = match.group("hint").strip().lower()
         cleaned = cleaned[: match.start()].strip()
 
@@ -144,6 +178,15 @@ def parse_command(text: str) -> ParsedCommand:
                 player_hint=player_hint,
                 radio_mode=radio,
             )
+
+    # Suspicious-split detector: when a player_hint was extracted AND
+    # the residual intent_part collapsed to a kind-marker word (e.g.
+    # "песню", "альбом", "плейлист"), the user probably said something
+    # like "включи песню На заре" and we mis-split "На заре" as a
+    # player hint. Re-parse without the suffix split so the title is
+    # preserved in the query.
+    if _split_player_hint and player_hint is not None and intent_part.lower() in _KIND_MARKER_WORDS:
+        return parse_command(text, _split_player_hint=False)
 
     # Fallback: unstructured search — let mass.music.search figure out
     # the type. Force radio_mode=True so when the result is an artist or

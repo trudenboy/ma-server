@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF003
 """Tests for provider/dialogs_nlu.py — voice command parser + player resolver."""
 
 from __future__ import annotations
@@ -67,6 +68,16 @@ class TestParseCommand:
             ("найти джаз на кухне", "search", "джаз", "кухне", True),
             ("открой плейлист утренний джаз", "playlist", "утренний джаз", None, False),
             ("покажи альбом Black Album", "album", "black album", None, False),
+            # Suspicious-split detector — content title starts with "На …"
+            # so the trailing "на <X>" must NOT be treated as a player hint.
+            # Without the detector "включи песню На заре" → query="песню",
+            # hint="заре" — wrong.
+            ("включи песню На заре", "track", "на заре", None, False),
+            ("включи альбом На заре", "album", "на заре", None, False),
+            ("включи плейлист На заре", "playlist", "на заре", None, False),
+            # Genuine "<query> на <player>" still works after the detector.
+            ("включи песню Yesterday на кухне", "track", "yesterday", "кухне", False),
+            ("включи песню", "search", "песню", None, True),  # no hint, just a marker
         ],
     )
     def test_parse(
