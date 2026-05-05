@@ -127,6 +127,75 @@ def _without_pending(state: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in state.items() if k not in {"pending_command", "awaiting_query"}}
 
 
+# Ordinal voice-disambiguation patterns. The user picks a candidate by
+# position ("первая", "второй", "номер три"). Used when a screenless
+# audio device makes button-tap impossible.
+_ORDINAL_PATTERNS: tuple[tuple[re.Pattern[str], int], ...] = (
+    (
+        re.compile(
+            r"^(?:номер\s+)?(?:перв(?:ая|ый|ое|ую)|один|1)\b",
+            re.IGNORECASE,
+        ),
+        0,
+    ),
+    (
+        re.compile(
+            r"^(?:номер\s+)?(?:втор(?:ая|ой|ое|ую)|два|2)\b",
+            re.IGNORECASE,
+        ),
+        1,
+    ),
+    (
+        re.compile(
+            r"^(?:номер\s+)?(?:треть(?:я|ий|е|ю)|три|3)\b",
+            re.IGNORECASE,
+        ),
+        2,
+    ),
+    (
+        re.compile(
+            r"^(?:номер\s+)?(?:четв[её]рт(?:ая|ый|ое|ую)|четыре|4)\b",
+            re.IGNORECASE,
+        ),
+        3,
+    ),
+    (
+        re.compile(
+            r"^(?:номер\s+)?(?:пят(?:ая|ый|ое|ую)|пять|5)\b",
+            re.IGNORECASE,
+        ),
+        4,
+    ),
+)
+
+
+def _parse_ordinal_choice(text: str) -> int | None:
+    """Parse 'первая' / 'второй' / 'номер три' / '2' as a 0-based index, else None.
+
+    Pattern is forgiving — accepts feminine / masculine / neuter forms and
+    Russian ordinals as well as cardinal numbers ("два") and digits.
+    """
+    if not text:
+        return None
+    cleaned = text.strip().lower()
+    if not cleaned:
+        return None
+    for pattern, index in _ORDINAL_PATTERNS:
+        if pattern.match(cleaned):
+            return index
+    return None
+
+
+# Russian ordinal labels used in the disambiguation prompt.
+_ORDINAL_LABELS: tuple[str, ...] = (
+    "первая",
+    "вторая",
+    "третья",
+    "четвёртая",
+    "пятая",
+)
+
+
 class DialogsWebhookHandler:
     """Handles incoming voice-command webhook calls from a Yandex Dialogs skill."""
 
@@ -605,11 +674,25 @@ class DialogsWebhookHandler:
         candidates: list[Any],
         session_state_in: dict[str, Any],
     ) -> web.Response:
-        """Ask the user which player to use; offer buttons for each candidate."""
+        """Ask the user which player to use — voice-first, with optional buttons.
+
+        Most Yandex Stations are screenless audio devices, so the prompt
+        has to make voice answer obvious. We enumerate candidates with
+        Russian ordinals (`первая` / `вторая` / …) so a user can say
+        either the player name (free-text fallback) or the position.
+        Buttons are kept on the response for screen surfaces, but voice
+        is the primary channel.
+        """
         # Yandex caps ItemsList at 5 anyway; cap our buttons to the same.
         capped = candidates[:5]
         names = [p.name or p.player_id for p in capped]
-        text = f"На какой колонке: {', '.join(names)}?"
+
+        # Voice prompt: ordinal-labelled list + explicit voice instruction.
+        # Example for 2 candidates:
+        #   "На какой колонке? Первая — Кухня большая, вторая — Кухня
+        #    маленькая. Скажи название или номер."
+        labelled = [f"{_ORDINAL_LABELS[i]} — {name}" for i, name in enumerate(names)]
+        text = "На какой колонке? " + ", ".join(labelled) + ". Скажи название или номер."
         buttons = [
             {
                 "title": (p.name or p.player_id)[:64],
@@ -630,6 +713,13 @@ class DialogsWebhookHandler:
                 "kind": parsed.kind,
                 "query": parsed.query[:200],
                 "radio_mode": parsed.radio_mode,
+                # Ordered list of player IDs we offered. Used by
+                # `_try_resume_pending` to (a) resolve "первая"/"вторая"
+                # to a specific player by position, (b) re-narrow
+                # free-text matching to just these candidates so a
+                # short distinguisher wins even if a third matching
+                # player exists outside the disambiguation set.
+                "candidate_ids": [p.player_id for p in capped],
             },
         }
         return self._yandex_response(
@@ -659,41 +749,102 @@ class DialogsWebhookHandler:
         parse_command flow.
         """
         chosen_player: Any = None
+        candidate_ids_raw = pending.get("candidate_ids")
+        candidate_ids: list[str] = (
+            [str(x) for x in candidate_ids_raw if isinstance(x, str)]
+            if isinstance(candidate_ids_raw, list)
+            else []
+        )
+        exposed = list_exposed_players(self._mass, exposed_ids=self._exposed_player_ids)
+        exposed_by_id = {p.player_id: p for p in exposed}
 
-        # Button press: payload.player_id is what we sent on the previous turn.
-        # Validate against the *currently exposed* player set rather than
-        # blindly trusting the payload — guards against stale or crafted
-        # payloads that target a player that's been disabled / removed /
-        # un-exposed since we offered the buttons. Payload integrity is
-        # already enforced upstream by `body.session.skill_id`, but
-        # defence-in-depth is cheap here.
-        payload = req.get("payload")
-        if isinstance(payload, dict):
-            pid = payload.get("player_id")
-            if isinstance(pid, str):
-                exposed = list_exposed_players(self._mass, exposed_ids=self._exposed_player_ids)
-                chosen_player = next((p for p in exposed if p.player_id == pid), None)
-                if chosen_player is None:
-                    self._logger.warning(
-                        "Pending replay: ButtonPressed payload player_id=%r "
-                        "not in exposed-player set; ignoring",
-                        pid,
+        # Step 1 — voice ordinal ("первая" / "второй" / "номер три") wins
+        # outright. On screenless smart speakers this is the primary
+        # channel since buttons aren't visible to the user.
+        ordinal = _parse_ordinal_choice(command)
+        if ordinal is not None:
+            target_pid: str | None = (
+                candidate_ids[ordinal] if 0 <= ordinal < len(candidate_ids) else None
+            )
+            if target_pid is not None:
+                chosen_player = exposed_by_id.get(target_pid)
+                if chosen_player is not None:
+                    self._logger.debug(
+                        "Pending replay: voice ordinal %d → player %s",
+                        ordinal,
+                        chosen_player.name or chosen_player.player_id,
                     )
+            # If the ordinal couldn't be resolved (out of range, or the
+            # indexed player is no longer exposed), the user clearly
+            # *meant* to pick from the disambiguation list — falling
+            # through to free-text would mis-interpret "третья" as a
+            # play query "search for третья". Re-ask with whichever
+            # candidates are still exposed instead.
+            if chosen_player is None:
+                still_available = [
+                    exposed_by_id[pid] for pid in candidate_ids if pid in exposed_by_id
+                ]
+                if still_available:
+                    self._logger.info(
+                        "Pending replay: ordinal=%d unresolvable; "
+                        "re-asking with %d remaining candidate(s)",
+                        ordinal,
+                        len(still_available),
+                    )
+                    return self._build_disambiguation_response(
+                        session=session,
+                        parsed=ParsedCommand(
+                            kind=str(pending.get("kind", "search")),  # type: ignore[arg-type]
+                            query=str(pending.get("query", "")),
+                            radio_mode=bool(pending.get("radio_mode", False)),
+                        ),
+                        candidates=still_available,
+                        session_state_in=session_state_in,
+                    )
+                # else: no candidates remain at all — fall through to
+                # normal flow, which will reply with "не нашёл колонку".
 
+        # Step 2 — Button press. Validate against the currently exposed
+        # set (defence-in-depth: stale or crafted payloads pointing to a
+        # non-exposed player are rejected).
         if chosen_player is None:
-            # Free-text follow-up: treat the utterance as a player hint.
+            payload = req.get("payload")
+            if isinstance(payload, dict):
+                pid = payload.get("player_id")
+                if isinstance(pid, str):
+                    chosen_player = exposed_by_id.get(pid)
+                    if chosen_player is None:
+                        self._logger.warning(
+                            "Pending replay: ButtonPressed payload player_id=%r "
+                            "not in exposed-player set; ignoring",
+                            pid,
+                        )
+
+        # Step 3 — Free-text follow-up. If we offered a specific
+        # candidate set, narrow the resolver to just those players (so a
+        # one-word distinguisher like "большая" wins even if a third
+        # unrelated player elsewhere also matches). Without a candidate
+        # set, fall back to the global exposed set.
+        if chosen_player is None:
             followup = parse_command(command)
             hint = followup.player_hint or command
+            narrowed_ids: set[str] | None
+            if candidate_ids:
+                narrowed_ids = set(candidate_ids)
+                if self._exposed_player_ids is not None:
+                    narrowed_ids &= self._exposed_player_ids
+            else:
+                narrowed_ids = self._exposed_player_ids
             candidates = resolve_player_candidates(
                 self._mass,
                 hint,
                 default_id=None,
-                exposed_ids=self._exposed_player_ids,
+                exposed_ids=narrowed_ids,
             )
             if len(candidates) == 1:
                 chosen_player = candidates[0]
             elif len(candidates) > 1:
-                # Re-ask using the same pending command.
+                # Still ambiguous — re-ask with the saved play intent.
                 return self._build_disambiguation_response(
                     session=session,
                     parsed=ParsedCommand(
