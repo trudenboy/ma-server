@@ -89,6 +89,16 @@ class TestParseControl:
             ("список колонок", "list_players", None, None),
             ("покажи колонки", "list_players", None, None),
             ("назови колонки", "list_players", None, None),
+            # forget_player — clears the saved default-player so the
+            # next play command without a hint asks again.
+            ("забудь колонку", "forget_player", None, None),
+            ("сбрось колонку", "forget_player", None, None),
+            ("забудь плеер", "forget_player", None, None),
+            ("забудь выбор", "forget_player", None, None),
+            ("сбрось выбор", "forget_player", None, None),
+            ("выбери колонку заново", "forget_player", None, None),
+            ("поменяй колонку", "forget_player", None, None),
+            ("сменить колонку", "forget_player", None, None),
             # alice prefix tolerated
             ("Алиса, пауза", "pause", None, None),
         ],

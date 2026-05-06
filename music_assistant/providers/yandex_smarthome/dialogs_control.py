@@ -35,6 +35,7 @@ ControlAction = Literal[
     "mute",
     "unmute",
     "list_players",
+    "forget_player",
 ]
 
 
@@ -72,6 +73,18 @@ _CONTROL_PATTERNS: tuple[tuple[re.Pattern[str], ControlAction], ...] = (
     (re.compile(r"^список\s+колонок$", re.IGNORECASE), "list_players"),
     (re.compile(r"^покажи\s+колонки$", re.IGNORECASE), "list_players"),
     (re.compile(r"^назови\s+колонки$", re.IGNORECASE), "list_players"),
+    # forget_player — clears the saved "default player" so the next
+    # play command without an explicit hint asks again. Useful when
+    # the user previously picked a player and now wants to change
+    # without re-stating the name on every turn.
+    (re.compile(r"^забудь\s+колонку$", re.IGNORECASE), "forget_player"),
+    (re.compile(r"^сбрось\s+колонку$", re.IGNORECASE), "forget_player"),
+    (re.compile(r"^забудь\s+плеер$", re.IGNORECASE), "forget_player"),
+    (re.compile(r"^забудь\s+выбор$", re.IGNORECASE), "forget_player"),
+    (re.compile(r"^сбрось\s+выбор$", re.IGNORECASE), "forget_player"),
+    (re.compile(r"^выбери\s+колонку\s+заново$", re.IGNORECASE), "forget_player"),
+    (re.compile(r"^поменяй\s+колонку$", re.IGNORECASE), "forget_player"),
+    (re.compile(r"^сменить\s+колонку$", re.IGNORECASE), "forget_player"),
     # mute / unmute — explicit "звук" disambiguates from play-verb "включи"
     (re.compile(r"^включи\s+звук$", re.IGNORECASE), "unmute"),
     (re.compile(r"^сделай\s+звук$", re.IGNORECASE), "unmute"),
@@ -239,6 +252,8 @@ def control_confirmation(control: ParsedControl) -> str:
         return "Звук выключен."
     if action == "unmute":
         return "Звук включен."
+    if action == "forget_player":
+        return "Хорошо, забыл колонку. В следующий раз спрошу."
     # list_players (the only remaining action; Literal is exhaustive)
     return "Готово."  # placeholder; handler computes the real text
 
@@ -294,6 +309,15 @@ async def execute_control(
                 "execute_control called with action='list_players'; "
                 "this is informational and should be handled by the "
                 "webhook handler, not dispatched here. Skipping.",
+            )
+        elif action == "forget_player":
+            # State-management query — the handler clears the cached
+            # default-player from session/application/cache state and
+            # never dispatches here. Defensive branch.
+            _LOGGER.warning(
+                "execute_control called with action='forget_player'; "
+                "this is a state-management op handled by the webhook "
+                "handler, not dispatched here. Skipping.",
             )
     except asyncio.CancelledError:
         raise

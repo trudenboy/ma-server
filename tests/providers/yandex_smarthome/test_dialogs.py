@@ -509,6 +509,52 @@ class TestControlCommandsIntegration:
         body_out = _response_body(resp)
         assert "Не нашёл колонку «гостиной»" in body_out["response"]["text"]
 
+    async def test_forget_player_clears_state_tiers(self) -> None:
+        """'забудь колонку' clears last_player_id from session/application/cache.
+
+        After the user picks a player via disambiguation, every later play
+        command without an explicit hint plays on it (by design — sticky
+        default for ergonomics). Saying 'забудь колонку' resets that so
+        the next ambiguous command asks again.
+        """
+        mass = self._setup_mass_with_control_methods(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Спальня"),
+            ]
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        # Pre-seed cache with a stale default-player.
+        handler._state_cache["user:u1"] = (
+            {"last_player_id": "p1"},
+            time.monotonic(),
+        )
+        body = {
+            "session": {
+                "skill_id": "skill-uuid-1",
+                "session_id": "s1",
+                "new": False,
+                "user": {"user_id": "u1"},
+            },
+            "request": {"command": "забудь колонку"},
+            "state": {
+                "session": {"last_player_id": "p1"},
+                "application": {"last_player_id": "p1"},
+            },
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert "Хорошо" in body_out["response"]["text"]
+        # last_player_id removed from session and application state.
+        assert "last_player_id" not in body_out["session_state"]
+        assert "last_player_id" not in body_out["application_state"]
+        # user_state_update sets preferred_player_id to None (Yandex
+        # protocol: None = delete the key from merged user state).
+        assert body_out["user_state_update"] == {"preferred_player_id": None}
+        # Cache rewritten with no last_player_id.
+        cached = handler._cache_get({"user": {"user_id": "u1"}})
+        assert "last_player_id" not in cached
+
     async def test_list_players_returns_player_names(self) -> None:
         """'сколько колонок видишь' → response with the count and names of exposed players."""
         mass = self._setup_mass_with_control_methods(

@@ -683,6 +683,33 @@ class DialogsWebhookHandler:
                 session_state=session_state_in,
             )
 
+        # forget_player clears the saved default-player from all three
+        # state tiers (session / application / cache) AND emits a
+        # `user_state_update` with `preferred_player_id: None` so the
+        # next play command without an explicit hint asks the user to
+        # pick again. Doesn't need a target — purely state management.
+        if control.action == "forget_player":
+            self._logger.info("Control forget_player → clearing last_player_id from all tiers")
+            new_session_state = {k: v for k, v in session_state_in.items() if k != "last_player_id"}
+            new_app_state = {k: v for k, v in app_state_in.items() if k != "last_player_id"}
+            user_obj_forget = session.get("user") or {}
+            user_state_update_forget: dict[str, Any] | None = None
+            if isinstance(user_obj_forget, dict) and user_obj_forget.get("user_id"):
+                # Yandex spec: a key set to None in `user_state_update`
+                # tells the platform to delete it from the merged
+                # user-scoped state.
+                user_state_update_forget = {"preferred_player_id": None}
+            text = control_confirmation(control)
+            return self._yandex_response(
+                incoming_session=session,
+                text=text,
+                tts=_tts_for(text),
+                end_session=False,
+                session_state=new_session_state,
+                application_state=new_app_state,
+                user_state_update=user_state_update_forget,
+            )
+
         player = resolve_player(
             self._mass,
             control.player_hint,
