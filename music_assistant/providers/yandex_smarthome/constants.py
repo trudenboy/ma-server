@@ -20,11 +20,21 @@ CONF_SKILL_TOKEN = "skill_token"
 CONF_EXPOSED_PLAYERS = "exposed_players"
 CONF_EXPOSED_PLAYLISTS = "exposed_playlists"
 
+# Auto-create-skill feature state (round-trips through the config form)
+CONF_AUTO_CREATE_ARTIFACTS = "auto_create_artifacts"
+CONF_AUTO_CREATE_SESSION_ID = "auto_create_session_id"
+# Cached Yandex Passport x_token from the first successful Device Flow.
+# Reused on subsequent auto-create runs so the user does not have to confirm
+# the device code every time. Long-lived (months); automatically refreshed
+# on use. Cleared if Yandex returns 401 on refresh.
+CONF_AUTH_X_TOKEN = "auth_x_token"
+
 # ---------------------------------------------------------------------------
 # Config actions
 # ---------------------------------------------------------------------------
 CONF_ACTION_REGISTER = "register_cloud"
 CONF_ACTION_GET_OTP = "get_otp"
+CONF_ACTION_AUTO_CREATE = "auto_create_skill"
 
 # ---------------------------------------------------------------------------
 # Connection types
