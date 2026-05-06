@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
+from typing import cast
+
+from ya_dialogs_api import DIALOG_CHANNEL as _LIB_DIALOG_CHANNEL
+from ya_dialogs_api import Channel
+
+_LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Config entry keys (user-facing)
@@ -30,12 +37,19 @@ CONF_DIALOG_SKILL_TOKEN = "dialog_skill_token"
 CONF_DIALOG_WEBHOOK_SECRET = "dialog_webhook_secret"
 CONF_DIALOG_AUTO_CREATE_ARTIFACTS = "dialog_auto_create_artifacts"
 CONF_DIALOG_AUTO_CREATE_SESSION_ID = "dialog_auto_create_session_id"
+# Persisted DeviceCodeSession (JSON) so the auto-create button can advance
+# the Device Flow state machine across multiple clicks. Cleared after a
+# successful poll, on expiry, or on Cancel.
+CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION = "dialog_auto_create_device_session"
 
 # ---------------------------------------------------------------------------
 # Config actions (config-flow buttons)
 # ---------------------------------------------------------------------------
 CONF_ACTION_AUTO_CREATE_DIALOG = "auto_create_dialog_skill"
 CONF_ACTION_RENAME_DIALOG_SKILL = "rename_dialog_skill"
+# Cancel an in-flight Device Flow / drop partial artifacts. Visible only when
+# DEVICE_FLOW_STARTED or FAILED. Cached x_token is preserved across cancel.
+CONF_ACTION_CANCEL_DIALOG_SKILL_FLOW = "cancel_dialog_skill_flow"
 
 # ---------------------------------------------------------------------------
 # Webhook routing
@@ -53,7 +67,18 @@ DIALOG_DEFAULT_NAME = "Music Assistant"
 # Yandex Dialogs app-store-api channel string for the custom dialog skill.
 # Captured from dev console DevTools (POST /apps): channel="aliceSkill".
 # Override via MA_YANDEX_DIALOG_CHANNEL env var if Yandex changes the contract.
-DIALOG_CHANNEL = os.environ.get("MA_YANDEX_DIALOG_CHANNEL", "aliceSkill")
+# Validated against ya_dialogs_api.Channel — invalid values fall back to the
+# library default with a warning rather than producing a silent type lie.
+_dialog_channel_raw = os.environ.get("MA_YANDEX_DIALOG_CHANNEL", _LIB_DIALOG_CHANNEL)
+if _dialog_channel_raw not in ("smartHome", "aliceSkill"):
+    _LOGGER.warning(
+        "MA_YANDEX_DIALOG_CHANNEL=%r is not a recognised Yandex Channel "
+        "wire value; falling back to %r",
+        _dialog_channel_raw,
+        _LIB_DIALOG_CHANNEL,
+    )
+    _dialog_channel_raw = _LIB_DIALOG_CHANNEL
+DIALOG_CHANNEL: Channel = cast("Channel", _dialog_channel_raw)
 DIALOG_NAME_MIN_LEN = 2
 DIALOG_NAME_MAX_LEN = 64
 
