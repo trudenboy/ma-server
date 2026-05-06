@@ -21,9 +21,10 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from ya_dialogs_api import SecretStr
+
 from music_assistant.models.plugin import PluginProvider
 
-from ._compat import SecretStr
 from .cloud import CloudManager
 from .constants import (
     CLOUD_CALLBACK_URL,
@@ -31,9 +32,6 @@ from .constants import (
     CONF_CLOUD_INSTANCE_ID,
     CONF_CLOUD_INSTANCE_PASSWORD,
     CONF_CONNECTION_TYPE,
-    CONF_DIALOG_SKILL_ENABLED,
-    CONF_DIALOG_SKILL_ID,
-    CONF_DIALOG_WEBHOOK_SECRET,
     CONF_DIRECT_ACCESS_TOKEN,
     CONF_DIRECT_CLIENT_SECRET,
     CONF_EXPOSED_PLAYERS,
@@ -47,7 +45,6 @@ from .constants import (
     MAX_INPUT_SOURCES,
     YANDEX_DIALOGS_CALLBACK_BASE,
 )
-from .dialogs import DialogsWebhookHandler
 from .direct import DirectConnectionHandler
 from .handlers import (
     build_response,
@@ -72,7 +69,6 @@ class YandexSmartHomePlugin(PluginProvider):
     _cloud_manager: CloudManager | None = None
     _state_notifier: StateNotifier | None = None
     _direct_handler: DirectConnectionHandler | None = None
-    _dialogs_handler: DialogsWebhookHandler | None = None
     _cloud_task: Any = None
     _user_id: str = ""
 
@@ -98,11 +94,6 @@ class YandexSmartHomePlugin(PluginProvider):
         )
         self._direct_access_token = str(self.config.get_value(CONF_DIRECT_ACCESS_TOKEN) or "")
         self._direct_client_secret = str(self.config.get_value(CONF_DIRECT_CLIENT_SECRET) or "")
-
-        # Dialog skill (experimental, direct-mode only)
-        self._dialog_skill_enabled = bool(self.config.get_value(CONF_DIALOG_SKILL_ENABLED))
-        self._dialog_skill_id = str(self.config.get_value(CONF_DIALOG_SKILL_ID) or "")
-        self._dialog_webhook_secret = str(self.config.get_value(CONF_DIALOG_WEBHOOK_SECRET) or "")
 
         # Parse exposed players filter
         exposed_raw = self.config.get_value(CONF_EXPOSED_PLAYERS) or []
@@ -275,26 +266,6 @@ class YandexSmartHomePlugin(PluginProvider):
                 "skill' in the plugin settings to complete setup."
             )
 
-        # Experimental: Dialogs voice skill webhook handler
-        if self._dialog_skill_enabled:
-            if self._dialog_skill_id and self._dialog_webhook_secret:
-                self._dialogs_handler = DialogsWebhookHandler(
-                    mass=self.mass,
-                    skill_id=self._dialog_skill_id,
-                    webhook_secret=self._dialog_webhook_secret,
-                    exposed_player_ids=self._exposed_ids,
-                )
-                self._dialogs_handler.register_routes()
-                self.logger.info(
-                    "Dialogs voice skill enabled (experimental), skill_id=%s",
-                    self._dialog_skill_id,
-                )
-            else:
-                self.logger.warning(
-                    "Dialogs voice skill is enabled but dialog_skill_id or "
-                    "dialog_webhook_secret is not configured — skipping"
-                )
-
         self.logger.info("Direct connection mode started")
 
     async def _handle_cloud_request(self, request: CloudRequest) -> dict[str, Any]:
@@ -368,10 +339,6 @@ class YandexSmartHomePlugin(PluginProvider):
         if self._state_notifier:
             await self._state_notifier.stop()
             self._state_notifier = None
-
-        if self._dialogs_handler:
-            self._dialogs_handler.unregister_routes()
-            self._dialogs_handler = None
 
         if self._direct_handler:
             self._direct_handler.unregister_routes()

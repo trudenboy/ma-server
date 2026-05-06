@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 # ---------------------------------------------------------------------------
 # Config entry keys
 # ---------------------------------------------------------------------------
@@ -22,21 +20,11 @@ CONF_SKILL_TOKEN = "skill_token"
 CONF_EXPOSED_PLAYERS = "exposed_players"
 CONF_EXPOSED_PLAYLISTS = "exposed_playlists"
 
-# Auto-create-skill feature state (round-trips through the config form)
-CONF_AUTO_CREATE_ARTIFACTS = "auto_create_artifacts"
-CONF_AUTO_CREATE_SESSION_ID = "auto_create_session_id"
-# Cached Yandex Passport x_token from the first successful Device Flow.
-# Reused on subsequent auto-create runs (Smart Home + Dialog) so the user
-# does not have to confirm the device code every time. Long-lived (months);
-# automatically refreshed on use. Cleared if Yandex returns 401 on refresh.
-CONF_AUTH_X_TOKEN = "auth_x_token"
-
 # ---------------------------------------------------------------------------
 # Config actions
 # ---------------------------------------------------------------------------
 CONF_ACTION_REGISTER = "register_cloud"
 CONF_ACTION_GET_OTP = "get_otp"
-CONF_ACTION_AUTO_CREATE = "auto_create_skill"
 
 # ---------------------------------------------------------------------------
 # Connection types
@@ -146,28 +134,3 @@ ERROR_DEVICE_UNREACHABLE = "DEVICE_UNREACHABLE"
 ERROR_INVALID_ACTION = "INVALID_ACTION"
 ERROR_INTERNAL_ERROR = "INTERNAL_ERROR"
 ERROR_DEVICE_NOT_FOUND = "DEVICE_NOT_FOUND"
-
-# ---------------------------------------------------------------------------
-# Dialog skill (Yandex Dialogs custom skill — free-form voice playback) — experimental
-# ---------------------------------------------------------------------------
-CONF_DIALOG_SKILL_ENABLED = "dialog_skill_enabled"
-CONF_DIALOG_SKILL_NAME = "dialog_skill_name"
-CONF_DIALOG_SKILL_ID = "dialog_skill_id"
-CONF_DIALOG_SKILL_TOKEN = "dialog_skill_token"
-CONF_DIALOG_WEBHOOK_SECRET = "dialog_webhook_secret"
-CONF_DIALOG_AUTO_CREATE_ARTIFACTS = "dialog_auto_create_artifacts"
-CONF_DIALOG_AUTO_CREATE_SESSION_ID = "dialog_auto_create_session_id"
-
-CONF_ACTION_AUTO_CREATE_DIALOG = "auto_create_dialog_skill"
-CONF_ACTION_RENAME_DIALOG_SKILL = "rename_dialog_skill"
-
-DIALOG_WEBHOOK_BASE_PATH = "/api/yandex_dialogs/webhook"
-DIALOG_RESOLVE_TIMEOUT = 2.5
-DIALOG_DEFAULT_NAME = "Music Assistant"
-# Yandex Dialogs app-store-api channel string for the custom dialog skill.
-# Smart Home uses "smartHome"; the Dialogs custom-skill channel value was captured
-# from the dev console DevTools (POST /apps): channel="aliceSkill".
-# Override via MA_YANDEX_DIALOG_CHANNEL env var if Yandex changes the contract.
-DIALOG_CHANNEL = os.environ.get("MA_YANDEX_DIALOG_CHANNEL", "aliceSkill")
-DIALOG_NAME_MIN_LEN = 2
-DIALOG_NAME_MAX_LEN = 64
