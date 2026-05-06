@@ -803,14 +803,20 @@ def _common_tail_entries(
             type=ConfigEntryType.STRING,
             label=f"Exposed Playlists (max {MAX_INPUT_SOURCES})",
             description=(
-                "Pick up to "
-                f"{MAX_INPUT_SOURCES} playlists from your MA library — they appear "
-                "as input_source mode slots one..ten on every exposed player, in the "
-                "order you select them. Alice triggers them by ordinal only "
-                "(«Alice, switch <player> source to five»); the Yandex Smart Home "
-                "API does not allow naming mode values, so remember the order you "
-                "picked. If the list is empty, save the form and reopen it once "
-                "your music providers have finished loading their library."
+                f"Pick up to {MAX_INPUT_SOURCES} playlists from your MA library — "
+                "they fill the input_source mode slots after each player's native "
+                "sources. The total slot count is capped at "
+                f"{MAX_INPUT_SOURCES}: native sources go first (in the player's own "
+                "order), then playlists fill the remainder in the order you select "
+                "them here. A player that already exposes "
+                f"{MAX_INPUT_SOURCES} or more native sources gets none of the "
+                "picked playlists, and the playlist→slot mapping varies between "
+                "players that have different native-source counts. Alice triggers "
+                "slots by ordinal only («Alice, switch <player> source to five»); "
+                "the Yandex Smart Home API does not allow naming mode values, so "
+                "remember the order you picked. If the list is empty, save the "
+                "form and reopen it once your music providers have finished "
+                "loading their library."
             ),
             required=False,
             multi_value=True,

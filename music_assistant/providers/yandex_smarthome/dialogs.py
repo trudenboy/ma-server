@@ -25,11 +25,20 @@ A request is rejected with 404 if the secret doesn't match (no leak via
 401 timing) and with 401 if the skill_id doesn't match (configured
 skill received a payload from a different skill — should never happen).
 
-Session memory: the handler does not keep any in-process LRU. The
-"last player used" default is round-tripped through Yandex's three
-state buckets (priority: ``state.session`` → ``state.application`` →
-``state.user``), which survives plugin reloads and even MA restarts
-for the application/user tiers.
+Session memory: three-tier strategy.
+
+  1. Yandex state envelope — primary. ``state.session`` (per
+     conversation), ``state.application`` (per device), ``state.user``
+     (per Yandex account, only when account-linked). The application
+     and user tiers persist across plugin reloads and MA restarts.
+  2. In-process cache — third-tier fallback for surfaces that don't
+     reliably echo the state envelope back (notably some Yandex
+     Station configurations). LRU keyed by ``user.user_id`` →
+     ``application.application_id`` → ``session_id``, with a 5-min
+     TTL matching Alice's session inactivity timeout.
+
+Reads check tiers in the order above. Writes mirror to all
+applicable tiers via ``_yandex_response``.
 """
 
 from __future__ import annotations
@@ -192,10 +201,12 @@ _ORDINAL_LABELS: tuple[str, ...] = (
 
 # In-process state cache (TTL + LRU). Third-tier fallback when Yandex
 # doesn't echo `state.session` / `state.application` back on the next
-# turn — a documented quirk of Yandex Station devices in particular,
-# where the disambiguation flow looped indefinitely until v1.8.8 added
-# this cache. The cache is keyed by the most stable identifier from
-# the request envelope (preference: `session.user.user_id` →
+# turn — a quirk reproduced from the Yandex Station dev-console
+# emulator, where the request body for every turn after the first
+# arrived without any `state.*` field at all. Without this cache the
+# disambiguation flow would loop indefinitely on those surfaces.
+# The cache is keyed by the most stable identifier from the request
+# envelope (preference: `session.user.user_id` →
 # `session.application.application_id` → `session.session_id`).
 _STATE_CACHE_TTL_SEC = 300  # 5 min — Alice session inactivity timeout
 _STATE_CACHE_MAX = 200
