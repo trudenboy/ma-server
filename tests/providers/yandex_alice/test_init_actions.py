@@ -19,8 +19,14 @@ from ya_dialogs_api import (
     dump_artifacts,
 )
 
-import provider
-from music_assistant.providers.yandex_alice import (
+from music_assistant.providers import yandex_alice
+from music_assistant.providers.yandex_alice import get_config_entries
+from music_assistant.providers.yandex_alice.auto_create import (
+    AutoCreateOutcome,
+    LocalAutoCreateStage,
+)
+from music_assistant.providers.yandex_alice.auto_update import AutoUpdateOutcome
+from music_assistant.providers.yandex_alice.constants import (
     CONF_ACTION_AUTO_CREATE_DIALOG,
     CONF_ACTION_CANCEL_DIALOG_SKILL_FLOW,
     CONF_ACTION_RENAME_DIALOG_SKILL,
@@ -31,13 +37,7 @@ from music_assistant.providers.yandex_alice import (
     CONF_DIALOG_SKILL_NAME,
     CONF_EXTERNAL_BASE_URL,
     CONF_INSTANCE_NAME,
-    get_config_entries,
 )
-from music_assistant.providers.yandex_alice.auto_create import (
-    AutoCreateOutcome,
-    LocalAutoCreateStage,
-)
-from music_assistant.providers.yandex_alice.auto_update import AutoUpdateOutcome
 
 
 def _make_mass() -> MagicMock:
@@ -50,7 +50,7 @@ def _make_mass() -> MagicMock:
 @pytest.fixture(autouse=True)
 def _stub_playlists(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty playlist options for all tests in this module."""
-    monkeypatch.setattr(provider, "fetch_playlist_options", AsyncMock(return_value=[]))
+    monkeypatch.setattr(yandex_alice, "fetch_playlist_options", AsyncMock(return_value=[]))
 
 
 def _entries_by_key(entries: tuple[Any, ...]) -> dict[str, Any]:
@@ -88,7 +88,7 @@ class TestDefaultForm:
             skill_id="sk-1",
             last_known_name="My Skill",
         )
-        values = {
+        values: dict[str, Any] = {
             CONF_AUTH_X_TOKEN: "tok",
             CONF_DIALOG_AUTO_CREATE_ARTIFACTS: dump_artifacts(artifacts),
         }
@@ -118,7 +118,7 @@ class TestAutoCreateAction:
             stage=LocalAutoCreateStage.DEVICE_FLOW_STARTED,
         )
         step_mock = AsyncMock(return_value=outcome)
-        monkeypatch.setattr(provider, "run_auto_create_step", step_mock)
+        monkeypatch.setattr(yandex_alice, "run_auto_create_step", step_mock)
 
         values: dict[str, Any] = {
             CONF_INSTANCE_NAME: "Music Assistant",
@@ -132,6 +132,7 @@ class TestAutoCreateAction:
         )
 
         step_mock.assert_awaited_once()
+        assert step_mock.await_args is not None
         kwargs = step_mock.await_args.kwargs
         assert kwargs["skill_name"] == "MA Test"
         assert kwargs["backend_uri"].startswith(
@@ -142,7 +143,7 @@ class TestAutoCreateAction:
     async def test_https_required_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """http:// base URL → FAILED before run_auto_create_step is called."""
         step_mock = AsyncMock()
-        monkeypatch.setattr(provider, "run_auto_create_step", step_mock)
+        monkeypatch.setattr(yandex_alice, "run_auto_create_step", step_mock)
 
         values: dict[str, Any] = {
             CONF_INSTANCE_NAME: "MA",
@@ -167,7 +168,7 @@ class TestAutoCreateAction:
         """If artifacts.state was DONE, dispatcher resets to NONE before stepping."""
         captured_artifacts: list[SkillCreationArtifacts] = []
 
-        async def _capture(**kwargs):
+        async def _capture(**kwargs: Any) -> AutoCreateOutcome:
             captured_artifacts.append(kwargs["artifacts"])
             return AutoCreateOutcome(
                 artifacts=SkillCreationArtifacts(),
@@ -179,7 +180,7 @@ class TestAutoCreateAction:
                 stage=LocalAutoCreateStage.IDLE,
             )
 
-        monkeypatch.setattr(provider, "run_auto_create_step", _capture)
+        monkeypatch.setattr(yandex_alice, "run_auto_create_step", _capture)
 
         done = SkillCreationArtifacts(
             state=SkillCreationState.DONE,
@@ -216,7 +217,7 @@ class TestAutoCreateAction:
             user_message="✅",
             stage=LocalAutoCreateStage.DONE,
         )
-        monkeypatch.setattr(provider, "run_auto_create_step", AsyncMock(return_value=outcome))
+        monkeypatch.setattr(yandex_alice, "run_auto_create_step", AsyncMock(return_value=outcome))
 
         values: dict[str, Any] = {CONF_EXTERNAL_BASE_URL: "https://ma.example.com"}
         await get_config_entries(
@@ -234,7 +235,7 @@ class TestAutoCreateAction:
         """skill_id in values + artifacts NONE → pre-set to APP_CREATED to skip create_app."""
         captured_artifacts: list[SkillCreationArtifacts] = []
 
-        async def _capture(**kwargs):
+        async def _capture(**kwargs: Any) -> AutoCreateOutcome:
             captured_artifacts.append(kwargs["artifacts"])
             return AutoCreateOutcome(
                 artifacts=kwargs["artifacts"],
@@ -246,7 +247,7 @@ class TestAutoCreateAction:
                 stage=LocalAutoCreateStage.PIPELINE_RUNNING,
             )
 
-        monkeypatch.setattr(provider, "run_auto_create_step", _capture)
+        monkeypatch.setattr(yandex_alice, "run_auto_create_step", _capture)
 
         # Empty artifacts but skill_id present (config restored from backup)
         values: dict[str, Any] = {
@@ -285,7 +286,7 @@ class TestRenameAction:
             user_message="✅ обновлён",
         )
         update_mock = AsyncMock(return_value=result)
-        monkeypatch.setattr(provider, "run_auto_update", update_mock)
+        monkeypatch.setattr(yandex_alice, "run_auto_update", update_mock)
 
         values: dict[str, Any] = {
             CONF_DIALOG_SKILL_NAME: "New Name",
@@ -306,6 +307,7 @@ class TestRenameAction:
         )
 
         update_mock.assert_awaited_once()
+        assert update_mock.await_args is not None
         kwargs = update_mock.await_args.kwargs
         assert kwargs["skill_name"] == "New Name"
         assert kwargs["cached_x_token"] == "tok"
@@ -322,7 +324,7 @@ class TestRenameAction:
             x_token="",
             user_message="auth expired",
         )
-        monkeypatch.setattr(provider, "run_auto_update", AsyncMock(return_value=result))
+        monkeypatch.setattr(yandex_alice, "run_auto_update", AsyncMock(return_value=result))
 
         values: dict[str, Any] = {
             CONF_AUTH_X_TOKEN: "stale",
@@ -399,7 +401,7 @@ class TestStableWebhookSecret:
         """Two consecutive clicks see the same backend_uri/secret (no regen)."""
         captured_uris: list[str] = []
 
-        async def _capture(**kwargs):
+        async def _capture(**kwargs: Any) -> AutoCreateOutcome:
             captured_uris.append(kwargs["backend_uri"])
             return AutoCreateOutcome(
                 artifacts=SkillCreationArtifacts(),
@@ -411,7 +413,7 @@ class TestStableWebhookSecret:
                 stage=LocalAutoCreateStage.IDLE,
             )
 
-        monkeypatch.setattr(provider, "run_auto_create_step", _capture)
+        monkeypatch.setattr(yandex_alice, "run_auto_create_step", _capture)
 
         # First click: no secret in values → dispatcher generates + writes back.
         values: dict[str, Any] = {CONF_EXTERNAL_BASE_URL: "https://ma.example.com"}
@@ -452,7 +454,7 @@ class TestDeriveStageRespectsCachedToken:
             state=SkillCreationState.APP_CREATED,
             skill_id="sk-partial",
         )
-        values = {
+        values: dict[str, Any] = {
             CONF_DIALOG_AUTO_CREATE_ARTIFACTS: dump_artifacts(artifacts),
             # No CONF_AUTH_X_TOKEN → next click will hit Device Flow
         }
@@ -468,7 +470,7 @@ class TestDeriveStageRespectsCachedToken:
             state=SkillCreationState.APP_CREATED,
             skill_id="sk-partial",
         )
-        values = {
+        values: dict[str, Any] = {
             CONF_DIALOG_AUTO_CREATE_ARTIFACTS: dump_artifacts(artifacts),
             CONF_AUTH_X_TOKEN: "tok",
         }
@@ -495,7 +497,7 @@ class TestDeviceFlowStartedHintOnReload:
                 "expires_at_epoch": 9999999999.0,
             }
         )
-        values = {CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION: device_session}
+        values: dict[str, Any] = {CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION: device_session}
         entries = await get_config_entries(_make_mass(), values=values)
         keys = _entries_by_key(entries)
 

@@ -10,10 +10,15 @@ silently re-trigger user-code prompts mid-pipeline).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import pytest
 from ya_passport_auth.exceptions import InvalidCredentialsError
 
 from music_assistant.providers.yandex_alice import auth_session
+
+if TYPE_CHECKING:
+    from ya_passport_auth import SecretStr
 
 
 class TestMakeCachedAuthenticatorValidation:
@@ -36,9 +41,9 @@ class TestCachedAuthenticatedSession:
     @pytest.mark.asyncio
     async def test_calls_refresh_passport_cookies(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Inside the CM, refresh_passport_cookies is invoked exactly once with the token."""
-        captured_token = []
+        captured_token: list[str] = []
 
-        async def _fake_refresh(self, x_token):
+        async def _fake_refresh(self: Any, x_token: SecretStr) -> None:
             captured_token.append(x_token.get_secret())
 
         # Patch PassportClient.refresh_passport_cookies on the class to avoid touching network.
@@ -58,7 +63,7 @@ class TestCachedAuthenticatedSession:
     ) -> None:
         """Yandex 401 → InvalidCredentialsError propagates out, no Device Flow fallback."""
 
-        async def _failing_refresh(self, x_token):
+        async def _failing_refresh(self: Any, x_token: SecretStr) -> None:
             msg = "x_token rejected"
             raise InvalidCredentialsError(msg)
 
@@ -84,19 +89,20 @@ class TestPassportClientSession:
     @pytest.mark.asyncio
     async def test_yields_client_and_closes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The contextmanager yields a PassportClient that gets closed on exit."""
-        close_called = []
+        close_called: list[bool] = []
 
         class _FakePassportClient:
-            def __init__(self):
+            def __init__(self) -> None:
                 pass
 
-            async def close(self):
+            async def close(self) -> None:
                 close_called.append(True)
 
+        from collections.abc import AsyncIterator
         from contextlib import asynccontextmanager
 
         @asynccontextmanager
-        async def _fake_create(config=None):
+        async def _fake_create(config: Any = None) -> AsyncIterator[_FakePassportClient]:
             client = _FakePassportClient()
             try:
                 yield client
@@ -122,7 +128,7 @@ class TestMakeCachedAuthenticatorFactory:
         """Each call to the factory opens a fresh refresh_passport_cookies-loaded session."""
         refresh_calls: list[str] = []
 
-        async def _fake_refresh(self, x_token):
+        async def _fake_refresh(self: Any, x_token: SecretStr) -> None:
             refresh_calls.append(x_token.get_secret())
 
         monkeypatch.setattr(

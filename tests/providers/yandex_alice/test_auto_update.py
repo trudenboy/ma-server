@@ -127,6 +127,7 @@ class TestRunAutoUpdateHappyPath:
             artifacts=SkillCreationArtifacts(state=SkillCreationState.DONE, skill_id="sk-1"),
         )
 
+        assert skill_mock.await_args is not None
         kwargs = skill_mock.await_args.kwargs
         assert kwargs["channel"] == "aliceSkill"
         assert kwargs["skill_name"] == "My Skill"
