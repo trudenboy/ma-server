@@ -38,6 +38,8 @@ import asyncio
 import logging
 import re
 import secrets
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -188,6 +190,17 @@ _ORDINAL_LABELS: tuple[str, ...] = (
 )
 
 
+# In-process state cache (TTL + LRU). Third-tier fallback when Yandex
+# doesn't echo `state.session` / `state.application` back on the next
+# turn — a documented quirk of Yandex Station devices in particular,
+# where the disambiguation flow looped indefinitely until v1.8.8 added
+# this cache. The cache is keyed by the most stable identifier from
+# the request envelope (preference: `session.user.user_id` →
+# `session.application.application_id` → `session.session_id`).
+_STATE_CACHE_TTL_SEC = 300  # 5 min — Alice session inactivity timeout
+_STATE_CACHE_MAX = 200
+
+
 class DialogsWebhookHandler:
     """Handles incoming voice-command webhook calls from a Yandex Dialogs skill."""
 
@@ -217,6 +230,63 @@ class DialogsWebhookHandler:
         self._exposed_player_ids = exposed_player_ids
         self._logger = logger or _LOGGER
         self._unregister_callbacks: list[Callable[[], None]] = []
+        # In-process state cache; see _STATE_CACHE_TTL_SEC / _MAX.
+        self._state_cache: OrderedDict[str, tuple[dict[str, Any], float]] = OrderedDict()
+
+    def _cache_key(self, session: dict[str, Any]) -> str | None:
+        """Pick the most stable identifier for the in-process state cache.
+
+        Preference order: ``session.user.user_id`` (per Yandex account,
+        most specific) → ``session.application.application_id`` (per
+        device) → ``session.session_id`` (per conversation). Returns
+        ``None`` if none are available — caller skips caching.
+        """
+        user = session.get("user")
+        if isinstance(user, dict):
+            uid = user.get("user_id")
+            if isinstance(uid, str) and uid:
+                return f"user:{uid}"
+        app = session.get("application")
+        if isinstance(app, dict):
+            aid = app.get("application_id")
+            if isinstance(aid, str) and aid:
+                return f"app:{aid}"
+        sid = session.get("session_id")
+        if isinstance(sid, str) and sid:
+            return f"session:{sid}"
+        return None
+
+    def _cache_get(self, session: dict[str, Any]) -> dict[str, Any]:
+        """Return the cached state for this caller, or {} if absent / expired."""
+        key = self._cache_key(session)
+        if key is None:
+            return {}
+        entry = self._state_cache.get(key)
+        if entry is None:
+            return {}
+        state, ts = entry
+        if time.monotonic() - ts > _STATE_CACHE_TTL_SEC:
+            self._state_cache.pop(key, None)
+            return {}
+        # LRU touch.
+        self._state_cache.move_to_end(key)
+        return state
+
+    def _cache_put(self, session: dict[str, Any], state: dict[str, Any]) -> None:
+        """Save state for this caller (LRU + TTL eviction).
+
+        Pass an empty / cleared state dict (rather than skipping the
+        call) when the action explicitly drops pending/awaiting — this
+        ensures the cache reflects the post-action state and a stale
+        pending_command doesn't resurface on the next turn.
+        """
+        key = self._cache_key(session)
+        if key is None:
+            return
+        self._state_cache[key] = (dict(state), time.monotonic())
+        self._state_cache.move_to_end(key)
+        while len(self._state_cache) > _STATE_CACHE_MAX:
+            self._state_cache.popitem(last=False)
 
     def register_routes(self) -> None:
         """Register the webhook route on mass.webserver."""
@@ -285,36 +355,47 @@ class DialogsWebhookHandler:
             )
             return web.Response(status=401)
 
-        # State buckets (P0.1 — replace in-memory LRU with Yandex state).
+        # State buckets. Three-tier read priority:
+        #   1. ``state.session``  — per-conversation, set by us last turn.
+        #   2. ``state.application`` — per-device, mirrored fallback.
+        #   3. In-process cache — server-side LRU keyed by user_id /
+        #      application_id, last-resort for surfaces (notably the
+        #      Yandex Station dev console emulator) that don't echo
+        #      `state.*` back at all.
         state = body.get("state") or {}
         if not isinstance(state, dict):
             state = {}
         session_state_in = _safe_dict(state.get("session"))
         app_state_in = _safe_dict(state.get("application"))
         user_state_in = _safe_dict(state.get("user"))
+        cached_state = self._cache_get(session)
 
         default_id_raw = (
             session_state_in.get("last_player_id")
             or app_state_in.get("last_player_id")
             or user_state_in.get("preferred_player_id")
+            or cached_state.get("last_player_id")
         )
         default_id = str(default_id_raw) if default_id_raw else None
 
         is_new = bool(session.get("new"))
         command = str(req.get("command") or "").strip()
 
-        # Pending-command / awaiting-query lookups read from `state.session`
-        # first and fall back to `state.application`. Some Yandex devices
-        # (notably screenless Stations under certain settings) don't
-        # consistently echo `state.session` back across SimpleUtterance
-        # turns — the application tier is per-device, persists across
-        # session resets, and is honoured by every Yandex surface we've
-        # tested. Writes mirror to both buckets in the response builders.
+        # Pending-command / awaiting-query lookups follow the same
+        # three-tier order as default_id: session → application →
+        # in-process cache. Yandex Station devices in particular
+        # sometimes drop both `state.session` AND `state.application`
+        # between SimpleUtterance turns — the cache is what makes
+        # disambiguation actually work on those surfaces.
         pending_in = session_state_in.get("pending_command")
         if not isinstance(pending_in, dict):
             pending_in = app_state_in.get("pending_command")
-        awaiting_in = bool(session_state_in.get("awaiting_query")) or bool(
-            app_state_in.get("awaiting_query")
+        if not isinstance(pending_in, dict):
+            pending_in = cached_state.get("pending_command")
+        awaiting_in = (
+            bool(session_state_in.get("awaiting_query"))
+            or bool(app_state_in.get("awaiting_query"))
+            or bool(cached_state.get("awaiting_query"))
         )
 
         # Single summary log per incoming request — surfaces the wire-shape
@@ -323,13 +404,15 @@ class DialogsWebhookHandler:
         # tokens and DEBUG is opt-in, so they're included as-is.
         self._logger.debug(
             "Webhook recv: cmd=%r req_type=%s is_new=%s pending=%s "
-            "(session=%s app=%s) awaiting=%s default_player=%s session_id=%s",
+            "(session=%s app=%s cache=%s) awaiting=%s default_player=%s "
+            "session_id=%s",
             command,
             req.get("type", "SimpleUtterance"),
             is_new,
             bool(pending_in),
             bool(session_state_in.get("pending_command")),
             bool(app_state_in.get("pending_command")),
+            bool(cached_state.get("pending_command")),
             awaiting_in,
             default_id,
             session.get("session_id", ""),
@@ -386,8 +469,10 @@ class DialogsWebhookHandler:
         # that player. Surface it as `default_id` so the resolver picks
         # it without the user re-stating "на кухне".
         if awaiting_in and not default_id:
-            saved_pid = session_state_in.get("awaiting_player_id") or app_state_in.get(
-                "awaiting_player_id"
+            saved_pid = (
+                session_state_in.get("awaiting_player_id")
+                or app_state_in.get("awaiting_player_id")
+                or cached_state.get("awaiting_player_id")
             )
             if saved_pid:
                 default_id = str(saved_pid)
@@ -959,8 +1044,8 @@ class DialogsWebhookHandler:
     # Yandex Dialogs response envelope
     # -------------------------------------------------------------------
 
-    @staticmethod
     def _yandex_response(
+        self,
         *,
         incoming_session: dict[str, Any],
         text: str,
@@ -977,6 +1062,12 @@ class DialogsWebhookHandler:
         Yandex spec; ``user_state_update`` is merged into the existing
         user-scoped state (set keys to None to clear). Omit a parameter
         to leave that bucket unchanged on Yandex's side.
+
+        Side effect: any time we set ``session_state`` or
+        ``application_state``, the merged value is also written to the
+        in-process state cache as a third-tier fallback (see
+        ``_cache_put``). The cache is what makes disambiguation work
+        on Yandex Station devices that don't echo `state.*` back.
         """
         # Yandex envelopes carry two user_id fields: the deprecated root
         # `session.user_id` (always present in current API revisions for
@@ -1011,4 +1102,17 @@ class DialogsWebhookHandler:
             payload["application_state"] = application_state
         if user_state_update is not None:
             payload["user_state_update"] = user_state_update
+
+        # Mirror state into the in-process cache. Prefer session_state
+        # (most specific to the current conversation); fall back to
+        # application_state if only that was set. We store a merged
+        # snapshot so reads on the next turn pick up everything.
+        cache_state: dict[str, Any] = {}
+        if application_state is not None:
+            cache_state.update(application_state)
+        if session_state is not None:
+            cache_state.update(session_state)
+        if cache_state or session_state is not None or application_state is not None:
+            self._cache_put(incoming_session, cache_state)
+
         return web.json_response(payload)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -12,7 +13,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp.test_utils import make_mocked_request
 
-from music_assistant.providers.yandex_smarthome.dialogs import DialogsWebhookHandler, _tts_for
+from music_assistant.providers.yandex_smarthome.dialogs import (
+    _STATE_CACHE_TTL_SEC,
+    DialogsWebhookHandler,
+    _tts_for,
+)
 
 if TYPE_CHECKING:
     from aiohttp import web
@@ -1014,6 +1019,107 @@ class TestDisambiguation:
         assert body_out["response"]["end_session"] is False
         assert body_out["session_state"]["pending_command"]["candidate_ids"] == ["p1"]
         mass.player_queues.play_media.assert_not_awaited()
+
+    async def test_in_process_cache_recovers_when_yandex_drops_state(self) -> None:
+        """Reproduce the screenless-Station bug from the dev console transcript.
+
+        Yandex doesn't echo `state.session` OR `state.application` back
+        on the next turn, despite us setting both on the previous
+        response. The in-process state cache (keyed by user.user_id /
+        application_id) is the third-tier fallback that recovers.
+        """
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Проигрыватель"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        sess_common = {
+            "skill_id": "skill-uuid-1",
+            "user": {"user_id": "yandex-user-1"},
+            "application": {"application_id": "yandex-app-1"},
+        }
+        # Turn 1: disambig fires + saves cache entry.
+        await handler._handle_webhook(
+            _build_request(
+                {
+                    "session": {**sess_common, "session_id": "s1", "new": False},
+                    "request": {"command": "включи джаз"},
+                }
+            )
+        )
+        await asyncio.sleep(0)
+        cached = handler._cache_get(
+            {
+                "user": {"user_id": "yandex-user-1"},
+                "application": {"application_id": "yandex-app-1"},
+            }
+        )
+        assert cached["pending_command"]["query"] == "джаз"
+        # Turn 2: NO `state` field in request — mimics dev-console emulator.
+        await handler._handle_webhook(
+            _build_request(
+                {
+                    "session": {**sess_common, "session_id": "s1", "new": False},
+                    "request": {"command": "кухня"},
+                }
+            )
+        )
+        await asyncio.sleep(0)
+        # Played the pending command (джаз) on p1 (Кухня).
+        mass.player_queues.play_media.assert_awaited_once()
+        assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p1"
+
+    async def test_in_process_cache_resolves_via_ordinal(self) -> None:
+        """Same as above, but turn 2 says '2' (ordinal) — also resolves via cache."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Проигрыватель"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        sess_common = {
+            "skill_id": "skill-uuid-1",
+            "user": {"user_id": "yandex-user-1"},
+            "application": {"application_id": "yandex-app-1"},
+        }
+        await handler._handle_webhook(
+            _build_request(
+                {
+                    "session": {**sess_common, "session_id": "s1", "new": False},
+                    "request": {"command": "включи джаз"},
+                }
+            )
+        )
+        await asyncio.sleep(0)
+        await handler._handle_webhook(
+            _build_request(
+                {
+                    "session": {**sess_common, "session_id": "s1", "new": False},
+                    "request": {"command": "2"},
+                }
+            )
+        )
+        await asyncio.sleep(0)
+        assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p2"
+
+    async def test_in_process_cache_ttl_expiry(self) -> None:
+        """Cached state expires after `_STATE_CACHE_TTL_SEC`; later calls don't see it."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        # Inject an expired entry.
+        handler._state_cache["user:u1"] = (
+            {"pending_command": {"kind": "search", "query": "old"}},
+            time.monotonic() - _STATE_CACHE_TTL_SEC - 1,
+        )
+        assert handler._cache_get({"user": {"user_id": "u1"}}) == {}
+        assert "user:u1" not in handler._state_cache
 
     async def test_pending_command_falls_back_to_application_state(self) -> None:
         """Yandex didn't echo `state.session` but kept `state.application` — still resolves.
