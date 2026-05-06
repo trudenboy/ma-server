@@ -7,6 +7,7 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from music_assistant_models.enums import RepeatMode
 
 from music_assistant.providers.yandex_smarthome.dialogs_control import (
     ParsedControl,
@@ -99,6 +100,61 @@ class TestParseControl:
             ("выбери колонку заново", "forget_player", None, None),
             ("поменяй колонку", "forget_player", None, None),
             ("сменить колонку", "forget_player", None, None),
+            # now_playing — info query
+            ("что играет", "now_playing", None, None),
+            ("что сейчас играет", "now_playing", None, None),
+            ("что слушаем", "now_playing", None, None),
+            ("что мы слушаем", "now_playing", None, None),
+            ("что за песня", "now_playing", None, None),
+            ("что за трек", "now_playing", None, None),
+            ("какой трек", "now_playing", None, None),
+            ("какой сейчас трек", "now_playing", None, None),
+            ("что играет на кухне", "now_playing", None, "кухне"),
+            # shuffle on/off
+            ("перемешай", "shuffle_on", None, None),
+            ("включи перемешивание", "shuffle_on", None, None),
+            ("случайный порядок", "shuffle_on", None, None),
+            ("в случайном порядке", "shuffle_on", None, None),
+            ("выключи перемешивание", "shuffle_off", None, None),
+            ("не перемешивай", "shuffle_off", None, None),
+            ("по порядку", "shuffle_off", None, None),
+            ("перемешай на кухне", "shuffle_on", None, "кухне"),
+            # repeat one/all/off
+            ("повтор песни", "repeat_one", None, None),
+            ("повтори песню", "repeat_one", None, None),
+            ("повтори трек", "repeat_one", None, None),
+            ("повтор эту", "repeat_one", None, None),
+            ("повтор всё", "repeat_all", None, None),
+            ("повтори все", "repeat_all", None, None),
+            ("повтор очередь", "repeat_all", None, None),
+            ("повторяй", "repeat_all", None, None),
+            ("включи повтор", "repeat_all", None, None),
+            ("выключи повтор", "repeat_off", None, None),
+            ("не повторяй", "repeat_off", None, None),
+            # seek_forward (with optional unit)
+            ("вперёд 30", "seek_forward", 30, None),
+            ("вперед 30", "seek_forward", 30, None),
+            ("перемотай вперёд 30", "seek_forward", 30, None),
+            ("перемотай вперёд на 30", "seek_forward", 30, None),
+            ("перемотай вперёд на 30 секунд", "seek_forward", 30, None),
+            ("перемотай вперёд на 1 минуту", "seek_forward", 60, None),
+            ("перемотай вперёд на 2 минуты", "seek_forward", 120, None),
+            # seek_back
+            ("назад 30", "seek_back", 30, None),
+            ("перемотай назад 30", "seek_back", 30, None),
+            ("перемотай назад на 1 минуту", "seek_back", 60, None),
+            ("назад на 5 секунд", "seek_back", 5, None),
+            # seek_start
+            ("к началу", "seek_start", None, None),
+            ("в начало", "seek_start", None, None),
+            ("перемотай к началу", "seek_start", None, None),
+            ("начни заново", "seek_start", None, None),
+            ("начни трек заново", "seek_start", None, None),
+            # transfer (target captured into player_hint)
+            ("переведи на спальню", "transfer", None, "спальню"),
+            ("перенеси на спальню", "transfer", None, "спальню"),
+            ("продолжи в спальне", "transfer", None, "спальне"),
+            ("переведи музыку на кухню", "transfer", None, "кухню"),
             # alice prefix tolerated
             ("Алиса, пауза", "pause", None, None),
         ],
@@ -214,6 +270,14 @@ class TestControlConfirmation:
             ("volume_set", 50, "Громкость 50."),
             ("mute", None, "Звук выключен."),
             ("unmute", None, "Звук включен."),
+            ("shuffle_on", None, "Включил перемешивание."),
+            ("shuffle_off", None, "Выключил перемешивание."),
+            ("repeat_off", None, "Выключил повтор."),
+            ("repeat_one", None, "Повтор песни."),
+            ("repeat_all", None, "Повтор очереди."),
+            ("seek_forward", 60, "Перемотал на 60 секунд вперёд."),
+            ("seek_back", 30, "Перемотал на 30 секунд назад."),
+            ("seek_start", None, "Перемотал к началу."),
         ],
     )
     def test_confirmation(self, action: str, value: int | None, expected: str) -> None:
@@ -234,6 +298,10 @@ class TestExecuteControl:
         mass.player_queues.stop = AsyncMock()
         mass.player_queues.next = AsyncMock()
         mass.player_queues.previous = AsyncMock()
+        mass.player_queues.set_shuffle = AsyncMock()
+        mass.player_queues.set_repeat = MagicMock()  # NB: sync, not async
+        mass.player_queues.skip = AsyncMock()
+        mass.player_queues.seek = AsyncMock()
         mass.players = MagicMock()
         mass.players.cmd_volume_up = AsyncMock()
         mass.players.cmd_volume_down = AsyncMock()
@@ -333,6 +401,76 @@ class TestExecuteControl:
         mass.players.cmd_volume_set.assert_not_awaited()
         # Warning emitted.
         assert any("list_players" in r.getMessage() for r in caplog.records)
+
+    async def test_shuffle_on(self) -> None:
+        """action=shuffle_on invokes set_shuffle(True)."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="shuffle_on"), self._player())
+        mass.player_queues.set_shuffle.assert_awaited_once_with("p1", shuffle_enabled=True)
+
+    async def test_shuffle_off(self) -> None:
+        """action=shuffle_off invokes set_shuffle(False)."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="shuffle_off"), self._player())
+        mass.player_queues.set_shuffle.assert_awaited_once_with("p1", shuffle_enabled=False)
+
+    async def test_repeat_off(self) -> None:
+        """action=repeat_off invokes set_repeat(RepeatMode.OFF) — sync, not awaited."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="repeat_off"), self._player())
+        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.OFF)
+
+    async def test_repeat_one(self) -> None:
+        """action=repeat_one invokes set_repeat(RepeatMode.ONE)."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="repeat_one"), self._player())
+        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ONE)
+
+    async def test_repeat_all(self) -> None:
+        """action=repeat_all invokes set_repeat(RepeatMode.ALL)."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="repeat_all"), self._player())
+        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ALL)
+
+    async def test_seek_forward(self) -> None:
+        """action=seek_forward(value=N) invokes skip(qid, +N)."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="seek_forward", value=60), self._player())
+        mass.player_queues.skip.assert_awaited_once_with("p1", seconds=60)
+
+    async def test_seek_back_negates_value(self) -> None:
+        """action=seek_back(value=N) invokes skip(qid, -N) — value is positive at parse time."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="seek_back", value=30), self._player())
+        mass.player_queues.skip.assert_awaited_once_with("p1", seconds=-30)
+
+    async def test_seek_start(self) -> None:
+        """action=seek_start invokes seek(qid, position=0) — absolute reset."""
+        mass = self._make_mass()
+        await execute_control(mass, ParsedControl(action="seek_start"), self._player())
+        mass.player_queues.seek.assert_awaited_once_with("p1", position=0)
+
+    async def test_now_playing_is_safe_noop(self, caplog: pytest.LogCaptureFixture) -> None:
+        """`now_playing` reaching execute_control logs warning and no-ops (handler dispatches)."""
+        mass = self._make_mass()
+        with caplog.at_level(
+            logging.WARNING, logger="music_assistant.providers.yandex_smarthome.dialogs_control"
+        ):
+            await execute_control(mass, ParsedControl(action="now_playing"), self._player())
+        mass.player_queues.skip.assert_not_awaited()
+        assert any("now_playing" in r.getMessage() for r in caplog.records)
+
+    async def test_transfer_is_safe_noop(self, caplog: pytest.LogCaptureFixture) -> None:
+        """`transfer` reaching execute_control logs warning and no-ops (handler dispatches)."""
+        mass = self._make_mass()
+        with caplog.at_level(
+            logging.WARNING, logger="music_assistant.providers.yandex_smarthome.dialogs_control"
+        ):
+            await execute_control(
+                mass, ParsedControl(action="transfer", player_hint="спальню"), self._player()
+            )
+        mass.player_queues.skip.assert_not_awaited()
+        assert any("transfer" in r.getMessage() for r in caplog.records)
 
     async def test_underlying_failure_is_swallowed(self) -> None:
         """An exception from the MA call is logged + swallowed (no re-raise)."""

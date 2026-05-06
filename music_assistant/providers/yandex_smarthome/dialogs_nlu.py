@@ -26,6 +26,9 @@ _LOGGER = logging.getLogger(__name__)
 CommandKind = Literal["track", "artist", "album", "playlist", "my_wave", "genre", "search"]
 
 
+EnqueueOption = Literal["replace", "next", "add"]
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedCommand:
     """Result of classifying a Yandex Dialogs voice command."""
@@ -34,6 +37,12 @@ class ParsedCommand:
     query: str
     player_hint: str | None = None
     radio_mode: bool = False
+    # When set, `play_for_alice` passes a matching `QueueOption` to
+    # `mass.player_queues.play_media` so the new media is added to /
+    # inserted into the existing queue instead of replacing it. Default
+    # `None` keeps the historical REPLACE behaviour (start playing
+    # immediately, replacing the current queue).
+    enqueue_option: EnqueueOption | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +78,15 @@ _VERB_RE = re.compile(
     r"открой(?:те)?|открыть|"
     r"покажи(?:те)?|показать"
     r")(?:\s+|$)",
+    re.IGNORECASE,
+)
+
+# Enqueue verbs — when one of these is the command's leading verb, set
+# `enqueue_option="add"` (or "next") on the resulting ParsedCommand
+# instead of the default REPLACE-the-queue behaviour. The verb is
+# stripped from the rest of the command exactly like `_VERB_RE` does.
+_ENQUEUE_VERB_RE = re.compile(
+    r"^(?:алиса[, ]+)?(?:добавь(?:те)?|добавить)(?:\s+|$)",
     re.IGNORECASE,
 )
 
@@ -162,21 +180,40 @@ def parse_command(text: str, *, _split_player_hint: bool = True) -> ParsedComman
         player_hint = match.group("hint").strip().lower()
         cleaned = cleaned[: match.start()].strip()
 
+    # Detect enqueue-verb prefix ("добавь X") BEFORE the regular verb
+    # strip so we know to set `enqueue_option="add"`. The verb itself
+    # is stripped here so the regular `_VERB_RE.sub` below has nothing
+    # to do — the residual is the kind+query intent part.
+    enqueue_option: EnqueueOption | None = None
+    if enq_match := _ENQUEUE_VERB_RE.match(cleaned):
+        enqueue_option = "add"
+        cleaned = cleaned[enq_match.end() :].strip()
+
     # Strip the imperative verb at the start (e.g. "play this", "turn on that").
+    # No-op if `_ENQUEUE_VERB_RE` already consumed the verb.
     intent_part = _VERB_RE.sub("", cleaned).strip()
 
     if not intent_part:
-        return ParsedCommand(kind="search", query="", player_hint=player_hint)
+        return ParsedCommand(
+            kind="search",
+            query="",
+            player_hint=player_hint,
+            enqueue_option=enqueue_option,
+        )
 
     # Try kind rules in order.
     for pattern, kind, radio in _KIND_RULES:
         if rule_match := pattern.match(intent_part):
             query = rule_match.group(1).strip() if rule_match.groups() else ""
+            # For add-to-queue the "radio mode" intent is incoherent
+            # (you don't add a station, you add a track). Force off.
+            effective_radio = False if enqueue_option == "add" else radio
             return ParsedCommand(
                 kind=kind,
                 query=query.lower(),
                 player_hint=player_hint,
-                radio_mode=radio,
+                radio_mode=effective_radio,
+                enqueue_option=enqueue_option,
             )
 
     # Suspicious-split detector: when a player_hint was extracted AND
@@ -192,12 +229,14 @@ def parse_command(text: str, *, _split_player_hint: bool = True) -> ParsedComman
     # the type. Force radio_mode=True so when the result is an artist or
     # a single track, MA starts a radio based on it instead of playing
     # one item and stopping (matches the typical user expectation
-    # "включи <X>" → "play <X> music").
+    # "включи <X>" → "play <X> music"). For add-to-queue, radio_mode
+    # is incoherent — force off.
     return ParsedCommand(
         kind="search",
         query=intent_part.lower(),
         player_hint=player_hint,
-        radio_mode=True,
+        radio_mode=enqueue_option != "add",
+        enqueue_option=enqueue_option,
     )
 
 

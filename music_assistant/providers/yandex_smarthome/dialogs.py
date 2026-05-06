@@ -656,7 +656,7 @@ class DialogsWebhookHandler:
     # Control execution helper (P0.6)
     # -------------------------------------------------------------------
 
-    def _handle_control(
+    def _handle_control(  # noqa: PLR0915
         self,
         *,
         session: dict[str, Any],
@@ -681,6 +681,135 @@ class DialogsWebhookHandler:
                 tts=_tts_for(text),
                 end_session=False,
                 session_state=session_state_in,
+            )
+
+        # now_playing — info query about the current track. Reads
+        # `mass.player_queues.get(pid).current_item.name` (already
+        # pre-formatted as "Artist - Title" or stream title for radio).
+        if control.action == "now_playing":
+            target_player = resolve_player(
+                self._mass,
+                control.player_hint,
+                default_id=default_id,
+                exposed_ids=self._exposed_player_ids,
+            )
+            if target_player is None:
+                if control.player_hint:
+                    text = f"Не нашёл колонку «{control.player_hint}». Скажи, например: на кухне."
+                else:
+                    text = "Скажи, на какой колонке. Например: что играет на кухне."
+                return self._yandex_response(
+                    incoming_session=session,
+                    text=text,
+                    tts=_tts_for(text),
+                    end_session=False,
+                    session_state=session_state_in,
+                )
+            queue = None
+            try:
+                queue = self._mass.player_queues.get(target_player.player_id)
+            except Exception:
+                self._logger.debug("player_queues.get failed", exc_info=True)
+            current = getattr(queue, "current_item", None) if queue is not None else None
+            current_name = getattr(current, "name", None) if current is not None else None
+            display_name = target_player.name or target_player.player_id
+            if current_name:
+                text = f"Сейчас играет: {current_name}."
+            else:
+                text = f"На {display_name} сейчас ничего не играет."
+            self._logger.debug(
+                "Control now_playing on %s → %r",
+                target_player.player_id,
+                current_name,
+            )
+            return self._yandex_response(
+                incoming_session=session,
+                text=text,
+                tts=_tts_for(text),
+                end_session=False,
+                session_state=session_state_in,
+            )
+
+        # transfer — moves the queue from the saved default player to
+        # the named target player. SOURCE = `default_id` (last-used);
+        # TARGET = `control.player_hint` (parsed from "переведи на X").
+        if control.action == "transfer":
+            if not default_id:
+                text = "Не понял, откуда переводить. Сначала включи музыку на колонке."
+                return self._yandex_response(
+                    incoming_session=session,
+                    text=text,
+                    tts=_tts_for(text),
+                    end_session=False,
+                    session_state=session_state_in,
+                )
+            target_candidates = resolve_player_candidates(
+                self._mass,
+                control.player_hint,
+                default_id=None,
+                exposed_ids=self._exposed_player_ids,
+            )
+            if not target_candidates:
+                hint = control.player_hint or "(не указано)"
+                text = f"Не нашёл колонку «{hint}». Скажи, например: на кухне."
+                return self._yandex_response(
+                    incoming_session=session,
+                    text=text,
+                    tts=_tts_for(text),
+                    end_session=False,
+                    session_state=session_state_in,
+                )
+            if len(target_candidates) > 1:
+                # Multi-match: reuse the disambiguation flow, but the
+                # pending intent for replay is "transfer this queue".
+                # We don't currently support resuming a transfer through
+                # `_try_resume_pending` (it's coupled to play intent),
+                # so for now just respond with a clarification.
+                names = ", ".join(p.name or p.player_id for p in target_candidates[:5])
+                text = f"Не понял на какую колонку. Уточни: {names}?"
+                return self._yandex_response(
+                    incoming_session=session,
+                    text=text,
+                    tts=_tts_for(text),
+                    end_session=False,
+                    session_state=session_state_in,
+                )
+            target = target_candidates[0]
+            target_name = target.name or target.player_id
+            if target.player_id == default_id:
+                text = f"Уже играет на {target_name}."
+                return self._yandex_response(
+                    incoming_session=session,
+                    text=text,
+                    tts=_tts_for(text),
+                    end_session=False,
+                    session_state=session_state_in,
+                )
+            self._logger.info(
+                "Control transfer: %s → %s",
+                default_id,
+                target.player_id,
+            )
+            self._mass.create_task(
+                self._mass.player_queues.transfer_queue(
+                    source_queue_id=default_id,
+                    target_queue_id=target.player_id,
+                )
+            )
+            new_session_state = {**session_state_in, "last_player_id": target.player_id}
+            new_app_state = {**app_state_in, "last_player_id": target.player_id}
+            user_obj_t = session.get("user") or {}
+            user_state_update_t: dict[str, Any] | None = None
+            if isinstance(user_obj_t, dict) and user_obj_t.get("user_id"):
+                user_state_update_t = {"preferred_player_id": target.player_id}
+            text = f"Перевожу на {target_name}."
+            return self._yandex_response(
+                incoming_session=session,
+                text=text,
+                tts=_tts_for(text),
+                session_state=new_session_state,
+                application_state=new_app_state,
+                user_state_update=user_state_update_t,
             )
 
         # forget_player clears the saved default-player from all three
@@ -819,6 +948,7 @@ class DialogsWebhookHandler:
                 player.player_id,
                 media,
                 radio_mode=parsed.radio_mode,
+                enqueue_option=parsed.enqueue_option,
             )
         )
 
@@ -839,7 +969,13 @@ class DialogsWebhookHandler:
             user_state_update = {"preferred_player_id": player.player_id}
 
         spoken_query = parsed.query or "музыку"
-        text = f"Включаю {spoken_query} на {player.name or player.player_id}."
+        player_label = player.name or player.player_id
+        if parsed.enqueue_option == "add":
+            text = f"Добавил {spoken_query} в очередь на {player_label}."
+        elif parsed.enqueue_option == "next":
+            text = f"Поставил {spoken_query} следующим на {player_label}."
+        else:
+            text = f"Включаю {spoken_query} на {player_label}."
         return self._yandex_response(
             incoming_session=session,
             text=text,
@@ -898,7 +1034,7 @@ class DialogsWebhookHandler:
         # per-device — it survives session resets and is honoured on
         # every surface we've tested. Reads in `_handle_webhook` merge
         # the two tiers (session preferred, application as fallback).
-        pending_command = {
+        pending_command: dict[str, Any] = {
             "kind": parsed.kind,
             "query": parsed.query[:200],
             "radio_mode": parsed.radio_mode,
@@ -910,6 +1046,12 @@ class DialogsWebhookHandler:
             # disambiguation set.
             "candidate_ids": [p.player_id for p in capped],
         }
+        # Preserve the enqueue option (add / next) across the
+        # disambiguation re-entry — without this an ambiguous
+        # "добавь Iron Maiden" would resume as REPLACE after the
+        # user picks the player, defeating the add-to-queue intent.
+        if parsed.enqueue_option is not None:
+            pending_command["enqueue_option"] = parsed.enqueue_option
         new_session_state = {
             **_without_pending(session_state_in),
             "pending_command": pending_command,
@@ -952,6 +1094,11 @@ class DialogsWebhookHandler:
             if isinstance(candidate_ids_raw, list)
             else []
         )
+        # Preserve enqueue intent (add / next) across the disambiguation
+        # re-entry; otherwise an ambiguous "добавь Iron Maiden" would
+        # replay as REPLACE after the user picks a player.
+        enqueue_raw = pending.get("enqueue_option")
+        pending_enqueue: str | None = enqueue_raw if isinstance(enqueue_raw, str) else None
         exposed = list_exposed_players(self._mass, exposed_ids=self._exposed_player_ids)
         exposed_by_id = {p.player_id: p for p in exposed}
 
@@ -1007,6 +1154,7 @@ class DialogsWebhookHandler:
                         kind=str(pending.get("kind", "search")),  # type: ignore[arg-type]
                         query=str(pending.get("query", "")),
                         radio_mode=bool(pending.get("radio_mode", False)),
+                        enqueue_option=pending_enqueue,  # type: ignore[arg-type]
                     ),
                     candidates=candidates,
                     session_state_in=session_state_in,
@@ -1055,6 +1203,7 @@ class DialogsWebhookHandler:
                                 kind=str(pending.get("kind", "search")),  # type: ignore[arg-type]
                                 query=str(pending.get("query", "")),
                                 radio_mode=bool(pending.get("radio_mode", False)),
+                                enqueue_option=pending_enqueue,  # type: ignore[arg-type]
                             ),
                             candidates=still_available,
                             session_state_in=session_state_in,
@@ -1069,6 +1218,7 @@ class DialogsWebhookHandler:
             kind=str(pending.get("kind", "search")),  # type: ignore[arg-type]
             query=str(pending.get("query", "")),
             radio_mode=bool(pending.get("radio_mode", False)),
+            enqueue_option=pending_enqueue,  # type: ignore[arg-type]
         )
         return await self._play_with_player(
             session=session,

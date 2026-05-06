@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp.test_utils import make_mocked_request
+from music_assistant_models.enums import QueueOption, RepeatMode
 
 from music_assistant.providers.yandex_smarthome.dialogs import (
     _STATE_CACHE_TTL_SEC,
@@ -440,6 +441,12 @@ class TestControlCommandsIntegration:
         mass.player_queues.stop = AsyncMock()
         mass.player_queues.next = AsyncMock()
         mass.player_queues.previous = AsyncMock()
+        mass.player_queues.set_shuffle = AsyncMock()
+        mass.player_queues.set_repeat = MagicMock()  # NB: sync
+        mass.player_queues.skip = AsyncMock()
+        mass.player_queues.seek = AsyncMock()
+        mass.player_queues.transfer_queue = AsyncMock()
+        mass.player_queues.get = MagicMock(return_value=None)
         mass.players.cmd_volume_up = AsyncMock()
         mass.players.cmd_volume_down = AsyncMock()
         mass.players.cmd_volume_set = AsyncMock()
@@ -630,6 +637,231 @@ class TestControlCommandsIntegration:
         text = body_out["response"]["text"]
         assert "(не указано)" not in text
         assert "на какой колонке" in text.lower()
+
+    # -------------------------------------------------------------------
+    # v1.9.0 — six new commands
+    # -------------------------------------------------------------------
+
+    async def test_now_playing_returns_track(self) -> None:
+        """'что играет на кухне' → reads queue.current_item.name."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        # Mock a queue with a current item.
+        queue = MagicMock()
+        queue.current_item = MagicMock(name="The Beatles - Let It Be")
+        queue.current_item.name = "The Beatles - Let It Be"
+        mass.player_queues.get = MagicMock(return_value=queue)
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "что играет на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert "The Beatles - Let It Be" in body_out["response"]["text"]
+        # No MA mutation.
+        mass.player_queues.pause.assert_not_awaited()
+        mass.player_queues.play_media.assert_not_awaited()
+
+    async def test_now_playing_idle_queue(self) -> None:
+        """'что играет' on an idle queue → 'ничего не играет'."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        queue = MagicMock()
+        queue.current_item = None
+        mass.player_queues.get = MagicMock(return_value=queue)
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "что играет на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert "ничего не играет" in body_out["response"]["text"]
+
+    async def test_shuffle_on(self) -> None:
+        """'перемешай на кухне' → set_shuffle(p1, True)."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "перемешай на кухне"},
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.set_shuffle.assert_awaited_once_with("p1", shuffle_enabled=True)
+
+    async def test_shuffle_off(self) -> None:
+        """'выключи перемешивание на кухне' → set_shuffle(p1, False)."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "выключи перемешивание на кухне"},
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.set_shuffle.assert_awaited_once_with("p1", shuffle_enabled=False)
+
+    async def test_repeat_one(self) -> None:
+        """'повтор песни на кухне' → set_repeat(p1, RepeatMode.ONE) — sync, not awaited."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "повтор песни на кухне"},
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ONE)
+
+    async def test_seek_forward_minute(self) -> None:
+        """'перемотай вперёд на 1 минуту на кухне' → skip(p1, 60)."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "перемотай вперёд на 1 минуту на кухне"},
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.skip.assert_awaited_once_with("p1", seconds=60)
+
+    async def test_seek_back_seconds(self) -> None:
+        """'назад на 30 секунд на кухне' → skip(p1, -30)."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "перемотай назад на 30 секунд на кухне"},
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.skip.assert_awaited_once_with("p1", seconds=-30)
+
+    async def test_seek_start(self) -> None:
+        """'к началу на кухне' → seek(p1, position=0)."""
+        mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "к началу на кухне"},
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.seek.assert_awaited_once_with("p1", position=0)
+
+    async def test_transfer_to_target(self) -> None:
+        """'переведи на спальню' with default=p1 → transfer_queue(p1, p2); last_player_id→p2."""
+        mass = self._setup_mass_with_control_methods(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Спальня"),
+            ]
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "переведи на спальню"},
+            "state": {"session": {"last_player_id": "p1"}},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.transfer_queue.assert_awaited_once_with(
+            source_queue_id="p1", target_queue_id="p2"
+        )
+        body_out = _response_body(resp)
+        assert "Спальня" in body_out["response"]["text"]
+        assert body_out["session_state"]["last_player_id"] == "p2"
+        assert body_out["application_state"]["last_player_id"] == "p2"
+
+    async def test_transfer_no_default_replies_with_hint(self) -> None:
+        """Transfer without saved last_player_id replies with 'сначала включи'."""
+        mass = self._setup_mass_with_control_methods(
+            [MockPlayer(player_id="p1", name="Кухня"), MockPlayer(player_id="p2", name="Спальня")]
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "переведи на спальню"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert "Сначала включи" in body_out["response"]["text"]
+        mass.player_queues.transfer_queue.assert_not_awaited()
+
+    async def test_transfer_to_same_player(self) -> None:
+        """'переведи на кухню' when default already = кухня → 'уже играет'."""
+        mass = self._setup_mass_with_control_methods(
+            [MockPlayer(player_id="p1", name="Кухня"), MockPlayer(player_id="p2", name="Спальня")]
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "переведи на кухню"},
+            "state": {"session": {"last_player_id": "p1"}},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert "Уже играет" in body_out["response"]["text"]
+        mass.player_queues.transfer_queue.assert_not_awaited()
+
+    async def test_add_to_queue_preserved_through_disambiguation(self) -> None:
+        """Ambiguous "добавь Iron Maiden" → disambiguation → user picks → ADD survives.
+
+        Without this fix, the disambiguation flow rebuilt ParsedCommand
+        from `pending_command` without `enqueue_option`, so the replay
+        would hit play_media() without `option` (default REPLACE)
+        instead of `QueueOption.ADD`.
+        """
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня большая"),
+                MockPlayer(player_id="p2", name="Кухня маленькая"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        # Turn 1: ambiguous "добавь Iron Maiden на кухне" → disambig prompt.
+        body1 = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "добавь Iron Maiden на кухне"},
+        }
+        resp1 = await handler._handle_webhook(_build_request(body1))
+        body_out1 = _response_body(resp1)
+        # Pending command must carry enqueue_option across the prompt.
+        assert body_out1["session_state"]["pending_command"]["enqueue_option"] == "add"
+        mass.player_queues.play_media.assert_not_awaited()
+        # Turn 2: ordinal "первая" → replay pending → play_media with ADD option.
+        body2 = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "первая"},
+            "state": {"session": body_out1["session_state"]},
+        }
+        await handler._handle_webhook(_build_request(body2))
+        await asyncio.sleep(0)
+        mass.player_queues.play_media.assert_awaited_once()
+        assert mass.player_queues.play_media.call_args.kwargs["option"] == QueueOption.ADD
+
+    async def test_add_to_queue_uses_queue_option_add(self) -> None:
+        """'добавь Metallica на кухне' → play_media(option=QueueOption.ADD)."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")], search_track=track)
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "добавь Metallica на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.play_media.assert_awaited_once()
+        call_kwargs = mass.player_queues.play_media.call_args.kwargs
+        assert call_kwargs["queue_id"] == "p1"
+        assert call_kwargs["option"] == QueueOption.ADD
+        # radio_mode forced off for add-to-queue.
+        assert call_kwargs["radio_mode"] is False
+        body_out = _response_body(resp)
+        assert "Добавил" in body_out["response"]["text"]
+        assert "в очередь" in body_out["response"]["text"]
 
 
 # ---------------------------------------------------------------------------

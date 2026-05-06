@@ -15,7 +15,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from music_assistant_models.enums import MediaType
+from music_assistant_models.enums import MediaType, QueueOption
 
 from .dialogs_nlu import _normalize_player_token
 
@@ -258,14 +258,38 @@ async def _resolve_genre(mass: MusicAssistant, query: str) -> MediaItemType | st
 # ---------------------------------------------------------------------------
 
 
+_ENQUEUE_TO_QUEUE_OPTION: dict[str, QueueOption] = {
+    "add": QueueOption.ADD,
+    "next": QueueOption.NEXT,
+    "replace": QueueOption.REPLACE,
+}
+
+
 async def play_for_alice(
     mass: MusicAssistant,
     player_id: str,
     media: MediaItemType | str,
     *,
     radio_mode: bool = False,
+    enqueue_option: str | None = None,
 ) -> None:
-    """Power the player on if needed, then start playback via player_queues."""
+    """Power the player on if needed, then start playback via player_queues.
+
+    ``enqueue_option`` (None / "replace" / "next" / "add") is mapped to
+    the matching :class:`QueueOption` and forwarded to
+    ``mass.player_queues.play_media``. ``None`` lets MA pick the
+    per-media-type default (typically REPLACE) — the historical
+    behaviour.
+
+    Power-on policy: regardless of ``enqueue_option``, an off player
+    gets ``cmd_power(True)``. Voice intent is unambiguous — the user
+    just asked for music, so a player that's been off needs to wake up.
+    MA's ``play_media`` will then sequence ADD/NEXT correctly (queue
+    grows; playback may or may not start depending on current queue
+    state). If the user wants to enqueue without disturbing playback
+    on a different player, they should name that other player
+    explicitly via the ``на <player>`` suffix.
+    """
     player = mass.players.get_player(player_id)
     if player is not None and _has_feature(player, "power"):
         powered = getattr(player, "powered", None)
@@ -277,4 +301,13 @@ async def play_for_alice(
             except Exception as exc:
                 _LOGGER.warning("cmd_power(True) on %s failed: %s", player_id, exc)
 
-    await mass.player_queues.play_media(queue_id=player_id, media=media, radio_mode=radio_mode)
+    play_kwargs: dict[str, Any] = {
+        "queue_id": player_id,
+        "media": media,
+        "radio_mode": radio_mode,
+    }
+    if enqueue_option is not None:
+        mapped = _ENQUEUE_TO_QUEUE_OPTION.get(enqueue_option)
+        if mapped is not None:
+            play_kwargs["option"] = mapped
+    await mass.player_queues.play_media(**play_kwargs)

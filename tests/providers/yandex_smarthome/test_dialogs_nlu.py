@@ -78,6 +78,11 @@ class TestParseCommand:
             # Genuine "<query> на <player>" still works after the detector.
             ("включи песню Yesterday на кухне", "track", "yesterday", "кухне", False),
             ("включи песню", "search", "песню", None, True),  # no hint, just a marker
+            # add-to-queue: "добавь" verb sets enqueue_option="add"; radio_mode forced off.
+            ("добавь Metallica", "search", "metallica", None, False),
+            ("добавь песню Yesterday", "track", "yesterday", None, False),
+            ("добавьте альбом Black Album", "album", "black album", None, False),
+            ("добавить Iron Maiden на кухне", "search", "iron maiden", "кухне", False),
         ],
     )
     def test_parse(
@@ -102,6 +107,15 @@ class TestParseCommand:
     def test_just_alice(self) -> None:
         """Bare 'алиса' without a verb keeps the full word as query."""
         assert parse_command("алиса").query == "алиса"
+
+    def test_enqueue_option_set_for_dobavi(self) -> None:
+        """'добавь Metallica' → enqueue_option='add' (None for regular 'включи')."""
+        assert parse_command("добавь Metallica").enqueue_option == "add"
+        assert parse_command("добавьте альбом Black Album").enqueue_option == "add"
+        assert parse_command("добавить Iron Maiden").enqueue_option == "add"
+        # Regular play verbs leave it as None (default REPLACE behaviour).
+        assert parse_command("включи Metallica").enqueue_option is None
+        assert parse_command("поставь Metallica").enqueue_option is None
 
 
 # ---------------------------------------------------------------------------

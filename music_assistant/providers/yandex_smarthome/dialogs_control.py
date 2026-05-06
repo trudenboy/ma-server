@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from music_assistant_models.enums import RepeatMode
+
 from .dialogs_nlu import _PUNCT_RE, _SPACE_RE
 
 if TYPE_CHECKING:
@@ -36,6 +38,17 @@ ControlAction = Literal[
     "unmute",
     "list_players",
     "forget_player",
+    # v1.9.0 — six new actions
+    "now_playing",  # info — handler reads queue.current_item.name
+    "shuffle_on",
+    "shuffle_off",
+    "repeat_off",
+    "repeat_one",
+    "repeat_all",
+    "seek_forward",  # value = positive seconds
+    "seek_back",  # value = positive seconds; negated when dispatched
+    "seek_start",  # absolute seek to 0
+    "transfer",  # player_hint = TARGET player; SOURCE is the saved default
 ]
 
 
@@ -85,6 +98,42 @@ _CONTROL_PATTERNS: tuple[tuple[re.Pattern[str], ControlAction], ...] = (
     (re.compile(r"^выбери\s+колонку\s+заново$", re.IGNORECASE), "forget_player"),
     (re.compile(r"^поменяй\s+колонку$", re.IGNORECASE), "forget_player"),
     (re.compile(r"^сменить\s+колонку$", re.IGNORECASE), "forget_player"),
+    # now_playing — info query about the current track (no MA mutation)
+    (re.compile(r"^что\s+(?:сейчас\s+)?играет$", re.IGNORECASE), "now_playing"),
+    (re.compile(r"^что\s+(?:мы\s+)?слушаем$", re.IGNORECASE), "now_playing"),
+    (re.compile(r"^что\s+за\s+(?:песня|трек|композиция)$", re.IGNORECASE), "now_playing"),
+    (re.compile(r"^какой\s+(?:сейчас\s+)?(?:трек|играет)$", re.IGNORECASE), "now_playing"),
+    # shuffle_on / shuffle_off
+    (re.compile(r"^перемешай$", re.IGNORECASE), "shuffle_on"),
+    (re.compile(r"^включи\s+перемешивание$", re.IGNORECASE), "shuffle_on"),
+    (re.compile(r"^случайный\s+порядок$", re.IGNORECASE), "shuffle_on"),
+    (re.compile(r"^в\s+случайном\s+порядке$", re.IGNORECASE), "shuffle_on"),
+    (re.compile(r"^выключи\s+перемешивание$", re.IGNORECASE), "shuffle_off"),
+    (re.compile(r"^не\s+перемешивай$", re.IGNORECASE), "shuffle_off"),
+    (re.compile(r"^по\s+порядку$", re.IGNORECASE), "shuffle_off"),
+    # repeat — order matters: more-specific (with object) first, then bare verbs
+    (
+        re.compile(
+            r"^повтор(?:и)?\s+(?:песн[июя]|трек(?:а)?|композицию|композиция|эту|эту\s+песню)$",
+            re.IGNORECASE,
+        ),
+        "repeat_one",
+    ),
+    (
+        re.compile(
+            r"^повтор(?:и)?\s+(?:всё|все|очередь|плейлист|список)$",
+            re.IGNORECASE,
+        ),
+        "repeat_all",
+    ),
+    (re.compile(r"^повторяй$", re.IGNORECASE), "repeat_all"),
+    (re.compile(r"^включи\s+повтор$", re.IGNORECASE), "repeat_all"),
+    (re.compile(r"^выключи\s+повтор$", re.IGNORECASE), "repeat_off"),
+    (re.compile(r"^не\s+повторяй$", re.IGNORECASE), "repeat_off"),
+    # seek_start — absolute seek to position 0 (start of current track)
+    (re.compile(r"^(?:перемотай\s+)?к\s+началу$", re.IGNORECASE), "seek_start"),
+    (re.compile(r"^(?:перемотай\s+)?в\s+начало$", re.IGNORECASE), "seek_start"),
+    (re.compile(r"^начни\s+(?:трек\s+)?заново$", re.IGNORECASE), "seek_start"),
     # mute / unmute — explicit "звук" disambiguates from play-verb "включи"
     (re.compile(r"^включи\s+звук$", re.IGNORECASE), "unmute"),
     (re.compile(r"^сделай\s+звук$", re.IGNORECASE), "unmute"),
@@ -130,6 +179,40 @@ _VOLUME_SET_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Seek forward / backward with numeric amount + optional unit. Unit defaults
+# to seconds when missing. "Минут[уы]" multiplies by 60.
+_SEEK_FORWARD_RE = re.compile(
+    r"^(?:перемотай\s+|перемотать\s+|промотай\s+)?"
+    r"(?:вперёд|вперед)\s+(?:на\s+)?(?P<n>\d{1,4})"
+    r"(?:\s+(?P<unit>сек(?:унд[уы]?)?|мин(?:ут[уы]?)?))?$",
+    re.IGNORECASE,
+)
+_SEEK_BACK_RE = re.compile(
+    r"^(?:перемотай\s+|перемотать\s+|промотай\s+)?"
+    r"назад\s+(?:на\s+)?(?P<n>\d{1,4})"
+    r"(?:\s+(?P<unit>сек(?:унд[уы]?)?|мин(?:ут[уы]?)?))?$",
+    re.IGNORECASE,
+)
+
+# Transfer playback to a target player. The target name is captured into
+# `player_hint`; SOURCE comes from the caller's `default_id`.
+_TRANSFER_RE = re.compile(
+    r"^(?:переведи|перенеси|продолжи)\s+(?:музыку\s+)?(?:на|в)\s+(?P<target>.+)$",
+    re.IGNORECASE,
+)
+
+
+def _seek_seconds(match: re.Match[str]) -> int | None:
+    """Parse the digit + optional unit out of a seek-pattern match."""
+    try:
+        n = int(match.group("n"))
+    except (TypeError, ValueError):
+        return None
+    unit = (match.group("unit") or "").lower()
+    if unit.startswith("мин"):
+        n *= 60
+    return n
+
 
 def _try_match(cleaned: str, player_hint: str | None) -> ParsedControl | None:
     """Match `cleaned` against control patterns; return ParsedControl or None."""
@@ -144,6 +227,23 @@ def _try_match(cleaned: str, player_hint: str | None) -> ParsedControl | None:
             action="volume_set",
             value=max(0, min(100, value)),
             player_hint=player_hint,
+        )
+    if smatch := _SEEK_FORWARD_RE.match(cleaned):
+        seconds = _seek_seconds(smatch)
+        if seconds is not None:
+            return ParsedControl(action="seek_forward", value=seconds, player_hint=player_hint)
+    if smatch := _SEEK_BACK_RE.match(cleaned):
+        seconds = _seek_seconds(smatch)
+        if seconds is not None:
+            return ParsedControl(action="seek_back", value=seconds, player_hint=player_hint)
+    if tmatch := _TRANSFER_RE.match(cleaned):
+        # For transfer, the captured group goes into `player_hint` —
+        # it's the TARGET. The handler resolves it; SOURCE is `default_id`.
+        # `player_hint` from the caller's "на <X>" suffix split is
+        # ignored here (transfer phrases already include the target).
+        return ParsedControl(
+            action="transfer",
+            player_hint=tmatch.group("target").strip().lower(),
         )
     for pattern, action in _CONTROL_PATTERNS:
         if pattern.match(cleaned):
@@ -225,7 +325,7 @@ def format_list_players(players: list[Any]) -> str:
     return f"Вижу {n} {word}: {names}."
 
 
-def control_confirmation(control: ParsedControl) -> str:
+def control_confirmation(control: ParsedControl) -> str:  # noqa: PLR0911
     """User-facing confirmation text for a control action.
 
     Caveat: ``list_players`` is **not** confirmed here — the handler builds
@@ -254,11 +354,28 @@ def control_confirmation(control: ParsedControl) -> str:
         return "Звук включен."
     if action == "forget_player":
         return "Хорошо, забыл колонку. В следующий раз спрошу."
-    # list_players (the only remaining action; Literal is exhaustive)
-    return "Готово."  # placeholder; handler computes the real text
+    if action == "shuffle_on":
+        return "Включил перемешивание."
+    if action == "shuffle_off":
+        return "Выключил перемешивание."
+    if action == "repeat_off":
+        return "Выключил повтор."
+    if action == "repeat_one":
+        return "Повтор песни."
+    if action == "repeat_all":
+        return "Повтор очереди."
+    if action == "seek_forward":
+        return f"Перемотал на {control.value} секунд вперёд."
+    if action == "seek_back":
+        return f"Перемотал на {control.value} секунд назад."
+    if action == "seek_start":
+        return "Перемотал к началу."
+    # list_players / now_playing / transfer — handler computes the real
+    # text (live data) and never calls this. Placeholder for safety.
+    return "Готово."
 
 
-async def execute_control(
+async def execute_control(  # noqa: PLR0915
     mass: MusicAssistant,
     control: ParsedControl,
     player: Any,
@@ -318,6 +435,32 @@ async def execute_control(
                 "execute_control called with action='forget_player'; "
                 "this is a state-management op handled by the webhook "
                 "handler, not dispatched here. Skipping.",
+            )
+        elif action == "shuffle_on":
+            await mass.player_queues.set_shuffle(pid, shuffle_enabled=True)
+        elif action == "shuffle_off":
+            await mass.player_queues.set_shuffle(pid, shuffle_enabled=False)
+        elif action == "repeat_off":
+            # NB: set_repeat is sync, not async — do NOT await.
+            mass.player_queues.set_repeat(pid, RepeatMode.OFF)
+        elif action == "repeat_one":
+            mass.player_queues.set_repeat(pid, RepeatMode.ONE)
+        elif action == "repeat_all":
+            mass.player_queues.set_repeat(pid, RepeatMode.ALL)
+        elif action == "seek_forward":
+            await mass.player_queues.skip(pid, seconds=control.value or 0)
+        elif action == "seek_back":
+            await mass.player_queues.skip(pid, seconds=-(control.value or 0))
+        elif action == "seek_start":
+            await mass.player_queues.seek(pid, position=0)
+        elif action in ("now_playing", "transfer"):
+            # Live-data / multi-player actions — the handler builds the
+            # response from queue.current_item / transfer_queue and
+            # never dispatches here. Defensive branch.
+            _LOGGER.warning(
+                "execute_control called with action=%r — handled by webhook "
+                "handler, not dispatched here. Skipping.",
+                action,
             )
     except asyncio.CancelledError:
         raise
