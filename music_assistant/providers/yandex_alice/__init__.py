@@ -119,38 +119,22 @@ def _name_drifted(artifacts: SkillCreationArtifacts, skill_name: str) -> bool:
     )
 
 
-async def _resolve_saved_value(
-    mass: MusicAssistant,
-    instance_id: str | None,
+def _resolve_saved_value(
     values: dict[str, ConfigValueType],
     key: str,
 ) -> str:
-    """Read a config value: form ``values`` first, then persisted provider config.
+    """Read a config value from form ``values`` (string-coerced).
 
-    Frontend may not echo SECURE_STRING entries back in ``values`` between
-    action clicks. Falling through to ``mass.config.get_provider_config``
-    keeps the source of truth stable for keys the user already saved
-    (cached x_token, generated webhook secret, persisted artifacts blob).
-
-    ``mass.config.get_provider_config`` is async in current MA, so this
-    helper is async too. Returns ``""`` when neither source has a value,
-    the instance_id is missing, or the MA config API raises (e.g. on a
-    fresh provider instance that has not been saved yet).
+    Earlier versions also fell through to ``mass.config.get_provider_config``
+    for keys the frontend may not echo back. That call deadlocks against the
+    config controller's own lock when MA opens the provider settings page —
+    `get_config_entries` is invoked by MA *while* it holds the config lock,
+    and the recursive read blocks indefinitely. So we now rely solely on
+    ``values``, and stabilise critical SECURE_STRING fields by writing the
+    derived value back into ``values`` early in the dispatcher (so subsequent
+    action clicks within the same form session see the same value).
     """
-    fresh = values.get(key)
-    if fresh:
-        return str(fresh)
-    if not instance_id:
-        return ""
-    try:
-        cfg = await mass.config.get_provider_config(instance_id)
-    except Exception:
-        return ""
-    try:
-        saved = cfg.get_value(key)
-    except Exception:
-        return ""
-    return str(saved or "")
+    return str(values.get(key) or "")
 
 
 async def get_config_entries(  # noqa: PLR0915
@@ -183,9 +167,8 @@ async def get_config_entries(  # noqa: PLR0915
     # SECURE_STRING fields between action clicks, and regenerating the
     # secret per call would orphan webhooks already registered with Yandex
     # against an earlier (now-discarded) secret.
-    existing_secret = (
-        await _resolve_saved_value(mass, instance_id, values, CONF_DIALOG_WEBHOOK_SECRET)
-    ).strip()
+    _ = instance_id  # reserved for future per-instance config lookups
+    existing_secret = _resolve_saved_value(values, CONF_DIALOG_WEBHOOK_SECRET).strip()
     default_secret = existing_secret or _generate_webhook_secret()
     # Stabilise inside this dispatch: any backend_uri assembled below uses
     # the same secret as the form will save on user click.
@@ -195,13 +178,10 @@ async def get_config_entries(  # noqa: PLR0915
 
     # ---- Pull persistent auto-create / auth state ----
     artifacts = load_artifacts(
-        (await _resolve_saved_value(mass, instance_id, values, CONF_DIALOG_AUTO_CREATE_ARTIFACTS))
-        or None
+        _resolve_saved_value(values, CONF_DIALOG_AUTO_CREATE_ARTIFACTS) or None
     )
-    cached_x_token = await _resolve_saved_value(mass, instance_id, values, CONF_AUTH_X_TOKEN)
-    device_session_blob = await _resolve_saved_value(
-        mass, instance_id, values, CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION
-    )
+    cached_x_token = _resolve_saved_value(values, CONF_AUTH_X_TOKEN)
+    device_session_blob = _resolve_saved_value(values, CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION)
 
     # Skill name priority: explicit dialog skill name → instance name → default.
     skill_name = (
