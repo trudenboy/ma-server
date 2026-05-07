@@ -253,12 +253,13 @@ def register_device_code_route(
 
     page_path = _device_code_page_path(session_id)
     status_path = _device_code_status_path(session_id)
-    # Both URLs returned to the FE are *path-relative* — that lets the
-    # browser resolve them against whatever origin the user is hitting
-    # MA on (e.g. `https://ma.example.com`, `http://localhost:8095`),
-    # not against ``webserver.base_url`` which can resolve to the docker
-    # bridge IP and break the popup link.
-    status_url = status_path
+    # Build full URLs via ``mass.webserver.base_url`` — that handle is
+    # already ingress-aware in HA add-on mode (matches the yandex-music
+    # provider's auth flow), so the URLs include the add-on prefix
+    # ``/<addon-slug>/`` when MA is reached through HA ingress.
+    base = (getattr(webserver, "base_url", "") or "").rstrip("/")
+    page_url = f"{base}{page_path}" if base else page_path
+    status_url = f"{base}{status_path}" if base else status_path
     page_html = _build_device_code_page(
         user_code=user_code,
         verification_url=verification_url,
@@ -302,7 +303,7 @@ def register_device_code_route(
         _LOGGER.warning("auth_page: failed to register device-code route: %r", exc)
         return ""
 
-    return page_path
+    return page_url
 
 
 def unregister_device_code_route(mass: MusicAssistant, *, session_id: str) -> None:
