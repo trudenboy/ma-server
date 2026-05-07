@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from .constants import DIALOG_NAME_MAX_LEN, DIALOG_NAME_MIN_LEN, DIALOG_WEBHOOK_BASE_PATH
+from .url_helpers import is_public_https_url
 
 
 def validate_skill_name(value: object) -> bool:
@@ -58,19 +59,27 @@ def validate_activation_phrase(value: object) -> bool:
 def build_backend_uri(base_url: str, webhook_secret: str) -> str:
     """Compose the public webhook URL Yandex must call.
 
-    Yandex requires HTTPS — the dev-console rejects plain http:// at draft-update
-    time, but we surface the rejection up-front so the user sees a clear error
-    before the Device Flow even starts.
+    Yandex sends voice phrases directly from its cloud to the URL we
+    register, so the host must be reachable from the public internet.
+    We require HTTPS *and* reject private / loopback / link-local hosts
+    up front — otherwise auto-create would happily register a URL Yandex
+    can't reach (e.g. ``https://192.168.1.10`` or ``https://localhost``)
+    and the user would only discover the failure once moderation finishes.
 
     Raises:
-        ValueError: ``base_url`` is empty / not HTTPS, or ``webhook_secret`` is empty.
+        ValueError: ``base_url`` is empty / not a public HTTPS URL, or
+            ``webhook_secret`` is empty.
     """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         msg = "External base URL is empty — set a public HTTPS URL for Yandex first"
         raise ValueError(msg)
-    if not base.lower().startswith("https://"):
-        msg = f"External base URL must use HTTPS (got: {base!r})"
+    if not is_public_https_url(base):
+        msg = (
+            f"External base URL must be a public HTTPS endpoint Yandex can "
+            f"reach over the internet (got: {base!r}). Private IPs, loopback "
+            f"and link-local addresses are rejected."
+        )
         raise ValueError(msg)
     secret = (webhook_secret or "").strip()
     if not secret:

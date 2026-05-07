@@ -24,6 +24,7 @@ import json
 import aiohttp
 
 from .constants import DIALOG_WEBHOOK_BASE_PATH
+from .url_helpers import is_public_https_url
 
 __all__ = ["probe_webhook_reachability"]
 
@@ -53,12 +54,23 @@ def _build_test_envelope() -> dict[str, object]:
 
 
 def _validate_inputs(base_url: str, webhook_secret: str) -> tuple[bool, str] | None:
-    """Pre-network sanity check; returns failure tuple or None to continue."""
+    """Pre-network sanity check; returns failure tuple or None to continue.
+
+    Rejects private / loopback / link-local hosts up front: Yandex's cloud
+    cannot reach them, and the probe itself would falsely report
+    ``localhost`` or ``192.168.x.x`` as "reachable" simply because the
+    request loops back to the same machine.
+    """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         return False, "External base URL is empty — fill it in first."
-    if not base.lower().startswith("https://"):
-        return False, f"External base URL must use HTTPS (got: {base!r})."
+    if not is_public_https_url(base):
+        return (
+            False,
+            f"External base URL must be a public HTTPS endpoint Yandex can "
+            f"reach over the internet (got: {base!r}). Private IPs, loopback "
+            f"and link-local addresses are rejected.",
+        )
     if not webhook_secret.strip():
         return False, "Webhook secret is empty — open the form once to auto-generate."
     return None
