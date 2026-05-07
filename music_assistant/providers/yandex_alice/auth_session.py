@@ -48,8 +48,7 @@ async def cached_authenticated_session(x_token: str) -> AsyncIterator[aiohttp.Cl
     ``refresh_passport_cookies`` propagates so the caller can clear the
     cached token and start a fresh Device Flow on the next click.
 
-    Raises:
-        ValueError: ``x_token`` is empty.
+    :raises ValueError: ``x_token`` is empty.
     """
     if not x_token:
         msg = "x_token is empty — cached authenticator requires an existing token"

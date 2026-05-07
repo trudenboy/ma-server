@@ -240,6 +240,412 @@ class TestDialogsWebhookHandler:
         assert call_kwargs["queue_id"] == "p1"
         assert call_kwargs["media"] is track
 
+    async def test_dangerous_context_log_redacts_command(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Flagged content must NOT leak into DEBUG logs even at operator's request.
+
+        Copilot review on PR #18: the structured "Webhook recv" line was
+        emitting `cmd=...` and `raw=...` *before* the dangerous_context
+        refusal branch, so flagged phrases ended up in
+        $HOME/.musicassistant/musicassistant.log when DEBUG was on.
+        """
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = self._make_handler(mass)
+        sensitive = "очень плохая фраза которую яндекс пометил"
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": sensitive,
+                "original_utterance": sensitive,
+                "markup": {"dangerous_context": True},
+            },
+        }
+        with caplog.at_level("DEBUG", logger="music_assistant.providers.yandex_alice.dialogs"):
+            await handler._handle_webhook(_build_request(body))
+        # Flagged content must not be present in any log record.
+        for record in caplog.records:
+            assert sensitive not in record.getMessage()
+        # Confirm we DID emit the structured log line (with the redaction marker)
+        # — silent skip would also satisfy the negative assertion above and is
+        # not what we want.
+        assert any("redacted: dangerous_context" in r.getMessage() for r in caplog.records)
+
+    async def test_unexpected_inner_exception_returns_graceful_fallback(self) -> None:
+        """An unexpected raise from inner dispatch surfaces as a Russian fallback, not HTTP 500.
+
+        Flagged in the upstream PR review (#3843, @chrisuthe): only the
+        ``request.json()`` parse was guarded; everything afterwards
+        (parsers, search, dispatch) bubbled to aiohttp → HTTP 500 →
+        Alice silence. The handler now wraps the post-auth body in
+        ``try / except`` to keep the user-facing response intact.
+        """
+        # Make `mass.players.all_players` raise — this triggers inside the
+        # play-resolve path so the exception happens DEEP in dispatch,
+        # well past the auth gate and parser pass.
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        mass.players.all_players = MagicMock(side_effect=RuntimeError("boom"))
+        handler = self._make_handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи Metallica на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        # Critical: 200 OK with a Russian fallback, NOT HTTP 500.
+        assert resp.status == 200
+        body_out = _response_body(resp)
+        assert "что-то пошло не так" in body_out["response"]["text"].lower()
+        # Session continues so the user can re-issue a command.
+        assert body_out["response"]["end_session"] is False
+
+
+@pytest.mark.asyncio
+class TestSuggestionButtons:
+    """Phase 1 / P1.3: play- and control-success responses surface follow-up buttons on screen."""
+
+    def _make_handler(self, mass: MagicMock) -> DialogsWebhookHandler:
+        return DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+
+    async def test_play_success_emits_buttons_on_screen(self) -> None:
+        """Play-success on screened surface includes Следующая/Пауза/Громче/Тише buttons."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")], search_track=track)
+        handler = self._make_handler(mass)
+        body = {
+            "meta": {"interfaces": {"screen": {}}},
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи Metallica на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        assert resp.status == 200
+        body_out = _response_body(resp)
+        button_titles = [b["title"] for b in body_out["response"]["buttons"]]
+        assert button_titles == ["Следующая", "Пауза", "Громче", "Тише"]
+
+    async def test_play_success_no_buttons_voice_only(self) -> None:
+        """Play-success on a voice-only surface omits buttons entirely."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")], search_track=track)
+        handler = self._make_handler(mass)
+        body = {
+            # No meta.interfaces — voice-only (Yandex Mini etc.)
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи Metallica на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        body_out = _response_body(resp)
+        assert "buttons" not in body_out["response"]
+
+    async def test_control_success_emits_buttons_on_screen(self) -> None:
+        """Control-success (e.g. pause) on screened surface includes the same buttons."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        mass.player_queues.pause = AsyncMock()
+        handler = self._make_handler(mass)
+        body = {
+            "meta": {"interfaces": {"screen": {}}},
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "пауза на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        body_out = _response_body(resp)
+        button_titles = [b["title"] for b in body_out["response"]["buttons"]]
+        assert button_titles == ["Следующая", "Пауза", "Громче", "Тише"]
+
+
+@pytest.mark.asyncio
+class TestPlatformIntentDispatch:
+    """Phase 2: request.nlu.intents pre-classification takes precedence over regex."""
+
+    def _handler(self, mass: MagicMock) -> DialogsWebhookHandler:
+        return DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+
+    async def test_control_pause_via_platform_intent(self) -> None:
+        """`request.nlu.intents['control.pause']` → ParsedControl(action='pause')."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        mass.player_queues.pause = AsyncMock()
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "пауза",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        assert resp.status == 200
+        # Pause was dispatched even though command="пауза" would also match regex.
+        mass.player_queues.pause.assert_awaited_once_with("p1")
+
+    async def test_play_my_wave_via_platform_intent(self) -> None:
+        """`request.nlu.intents['play.my_wave']` → ParsedCommand(kind='my_wave')."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        # _resolve_my_wave returns None when yandex_music provider absent → handler
+        # surfaces "не нашёл такую музыку" but still went through the my_wave path.
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                # `command` is the noisy raw — wouldn't normally classify as my_wave,
+                # but the platform intent overrides it.
+                "command": "что-то совсем другое",
+                "nlu": {"intents": {"play.my_wave": {}}},
+            },
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        body_out = _response_body(resp)
+        # Platform path responded — it didn't fall through to "не понял".
+        # When yandex_music isn't available, the response is a graceful
+        # "не нашёл такую музыку" rather than "не понял команду".
+        assert "не понял" not in body_out["response"]["text"].lower()
+
+    async def test_unrecognised_intent_falls_back_to_regex(self) -> None:
+        """Unknown form_name in intents → falls through to parse_control / parse_command."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        mass.player_queues.pause = AsyncMock()
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "пауза",
+                # Unknown intent form_name — regex should pick it up instead.
+                "nlu": {"intents": {"unknown.intent": {}}},
+            },
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        # Regex parse_control caught "пауза" and dispatched.
+        mass.player_queues.pause.assert_awaited_once_with("p1")
+
+    async def test_empty_intents_block_falls_back_to_regex(self) -> None:
+        """Empty `intents={}` (no grammar match) → regex parser still runs."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        mass.player_queues.next = AsyncMock()
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "следующая",
+                "nlu": {"intents": {}},
+            },
+        }
+        await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        mass.player_queues.next.assert_awaited_once_with("p1")
+
+
+@pytest.mark.asyncio
+class TestBuiltInIntents:
+    """Phase 2 follow-up: YANDEX.REJECT / YANDEX.HELP handling in pending flows."""
+
+    def _handler(self, mass: MagicMock) -> DialogsWebhookHandler:
+        return DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+
+    async def test_reject_in_pending_disambiguation_cancels(self) -> None:
+        """YANDEX.REJECT clears pending_command and ends session with confirmation."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "отмена",
+                "nlu": {"intents": {"YANDEX.REJECT": {}}},
+            },
+            "state": {
+                "session": {
+                    "pending_command": {
+                        "kind": "search",
+                        "query": "metallica",
+                        "radio_mode": True,
+                        "candidate_ids": ["p1", "p2"],
+                    }
+                }
+            },
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is True
+        assert "отменил" in body_out["response"]["text"].lower()
+        # pending_command cleared from session_state on response.
+        assert "pending_command" not in body_out["session_state"]
+        mass.player_queues.play_media.assert_not_awaited()
+
+    async def test_reject_in_awaiting_query_cancels(self) -> None:
+        """YANDEX.REJECT in slot-elicit ('Что включить?') also exits cleanly."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "неважно",
+                "nlu": {"intents": {"YANDEX.REJECT": {}}},
+            },
+            "state": {"session": {"awaiting_query": True}},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is True
+        assert "awaiting_query" not in body_out["session_state"]
+
+    async def test_reject_with_no_pending_falls_through(self) -> None:
+        """YANDEX.REJECT outside of any prompt context → falls through to normal flow.
+
+        The intent isn't a free-standing 'cancel app' signal — the user
+        could just be talking. If parse_command also can't make sense of
+        'отмена', it lands as a normal "не нашёл" search response.
+        """
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "отмена",
+                "nlu": {"intents": {"YANDEX.REJECT": {}}},
+            },
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        # NOT the cancel response — handler fell through to play-search.
+        assert "отменил" not in body_out["response"]["text"].lower()
+
+    async def test_help_in_pending_emits_disambiguation_hint(self) -> None:
+        """YANDEX.HELP during disambiguation tells the user how to answer."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "помоги",
+                "nlu": {"intents": {"YANDEX.HELP": {}}},
+            },
+            "state": {
+                "session": {
+                    "pending_command": {
+                        "kind": "search",
+                        "query": "metallica",
+                        "radio_mode": True,
+                        "candidate_ids": ["p1", "p2"],
+                    }
+                }
+            },
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is False
+        assert "колонки" in body_out["response"]["text"].lower()
+
+    async def test_help_in_awaiting_emits_query_hint(self) -> None:
+        """YANDEX.HELP during slot-elicit suggests example queries."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "что я могу",
+                "nlu": {"intents": {"YANDEX.HELP": {}}},
+            },
+            "state": {"session": {"awaiting_query": True}},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is False
+        assert "артиста" in body_out["response"]["text"].lower()
+
+    async def test_help_clean_state_emits_generic_hint(self) -> None:
+        """YANDEX.HELP with no in-flight prompt → generic example."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        handler = self._handler(mass)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {
+                "command": "помощь",
+                "nlu": {"intents": {"YANDEX.HELP": {}}},
+            },
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        body_out = _response_body(resp)
+        assert "включи рок" in body_out["response"]["text"].lower()
+
+
+@pytest.mark.asyncio
+class TestVoiceContinuation:
+    """Phase 1 / P1.4: opt-in `end_session=false` after play / control success."""
+
+    async def test_play_success_ends_session_by_default(self) -> None:
+        """Without the toggle, play-success closes the session (today's UX)."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")], search_track=track)
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи Metallica на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is True
+
+    async def test_play_success_keeps_session_open_when_continuation_on(self) -> None:
+        """With continuation on, play-success keeps the conversation alive."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")], search_track=track)
+        handler = DialogsWebhookHandler(
+            mass,
+            skill_id="skill-uuid-1",
+            webhook_secret=_TEST_SECRET,
+            voice_continuation=True,
+        )
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи Metallica на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is False
+
+    async def test_control_success_keeps_session_open_when_continuation_on(self) -> None:
+        """Continuation also applies to control-success (pause / volume / etc.)."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        mass.player_queues.pause = AsyncMock()
+        handler = DialogsWebhookHandler(
+            mass,
+            skill_id="skill-uuid-1",
+            webhook_secret=_TEST_SECRET,
+            voice_continuation=True,
+        )
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "пауза на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is False
+
+    async def test_stop_action_ends_session_even_with_continuation_on(self) -> None:
+        """`стоп / выключи` always closes the session regardless of the toggle."""
+        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
+        mass.player_queues.stop = AsyncMock()
+        handler = DialogsWebhookHandler(
+            mass,
+            skill_id="skill-uuid-1",
+            webhook_secret=_TEST_SECRET,
+            voice_continuation=True,
+        )
+        body = {
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "стоп на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        await asyncio.sleep(0)
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is True
+
 
 # ---------------------------------------------------------------------------
 # Yandex state envelope (P0.1) + tts split (P0.2)
@@ -384,9 +790,9 @@ class TestStatePersistence:
 class TestTtsHelper:
     """Tests for _tts_for stress-mark substitution."""
 
-    def test_known_word_gets_stress_mark(self) -> None:
-        """A known word from the dict has `+` injected before the stressed vowel."""
-        assert _tts_for("Включаю Metallica") == "Включ+аю Metallica"
+    def test_known_russian_word_gets_stress_mark(self) -> None:
+        """A known Russian word has `+` injected before the stressed vowel."""
+        assert _tts_for("Включаю джаз") == "Включ+аю джаз"
 
     def test_unknown_word_passes_through(self) -> None:
         """A word not in the dict is unchanged."""
@@ -402,6 +808,26 @@ class TestTtsHelper:
         assert _tts_for("включаю джаз") == "включ+аю джаз"
         # Capitalised original.
         assert _tts_for("Включаю джаз") == "Включ+аю джаз"
+
+    def test_foreign_band_transliterated(self) -> None:
+        """Latin band names are transliterated to Cyrillic with stress marks."""
+        # Single-word foreign band (regex pass).
+        assert _tts_for("Включаю Metallica") == "Включ+аю Мет+аллика"
+        # Lowercase form preserved.
+        assert _tts_for("включаю metallica") == "включ+аю мет+аллика"
+
+    def test_foreign_phrase_transliterated(self) -> None:
+        """Multi-word foreign band names are matched via the phrase pass."""
+        result = _tts_for("Включаю Iron Maiden на кухне")
+        assert "+айрон м+эйден" in result.lower()
+        # Russian response words still get their stress mark in the same call.
+        assert "Включ+аю" in result
+
+    def test_phrase_pass_handles_overlap(self) -> None:
+        """Longer phrases match before shorter sub-phrases (declared order)."""
+        # "imagine dragons" must win over the single-word "imagine" entry.
+        result = _tts_for("Imagine Dragons")
+        assert "имадж+ин др+агонс" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -874,7 +1300,7 @@ class TestDisambiguation:
     """End-to-end tests for the disambiguation prompt + pending-command replay."""
 
     async def test_multiple_matches_returns_disambiguation_prompt(self) -> None:
-        """Two candidates → response carries buttons + pending_command, end_session=False."""
+        """Two candidates on a screened surface → response carries buttons + pending_command."""
         track = MagicMock(uri="library://track/1", spec_set=["uri"])
         mass = _make_mass(
             [
@@ -885,6 +1311,7 @@ class TestDisambiguation:
         )
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
+            "meta": {"interfaces": {"screen": {}}},
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
             "request": {"command": "включи Metallica на кухне"},
         }
@@ -904,6 +1331,33 @@ class TestDisambiguation:
         assert pending["candidate_ids"] == ["p1", "p2"]
         # Nothing is played yet.
         mass.player_queues.play_media.assert_not_awaited()
+
+    async def test_disambiguation_voice_only_omits_buttons(self) -> None:
+        """Voice-only surface (no meta.interfaces.screen) → prompt without buttons."""
+        track = MagicMock(uri="library://track/1", spec_set=["uri"])
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня большая"),
+                MockPlayer(player_id="p2", name="Кухня маленькая"),
+            ],
+            search_track=track,
+        )
+        handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
+        body = {
+            # No meta.interfaces — defaults to voice-only (Yandex Mini etc.)
+            "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
+            "request": {"command": "включи Metallica на кухне"},
+        }
+        resp = await handler._handle_webhook(_build_request(body))
+        assert resp.status == 200
+        body_out = _response_body(resp)
+        assert body_out["response"]["end_session"] is False
+        # Voice prompt with ordinals is still present, just without buttons.
+        assert "buttons" not in body_out["response"]
+        assert "первая" in body_out["response"]["text"].lower()
+        # Pending command still saved for voice-ordinal resolution.
+        pending = body_out["session_state"]["pending_command"]
+        assert pending["candidate_ids"] == ["p1", "p2"]
 
     async def test_button_press_resolves_pending(self) -> None:
         """ButtonPressed payload.player_id triggers a play of the saved pending_command."""
@@ -1079,6 +1533,7 @@ class TestDisambiguation:
         )
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
+            "meta": {"interfaces": {"screen": {}}},
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
             "request": {"command": "включи Metallica"},
         }
@@ -1152,6 +1607,7 @@ class TestDisambiguation:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         # Simulate the awaiting_query → ambiguous-resolution turn.
         body = {
+            "meta": {"interfaces": {"screen": {}}},
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
             "request": {"command": "Metallica на кухне"},
             "state": {"session": {"awaiting_query": True}},
@@ -1243,6 +1699,7 @@ class TestDisambiguation:
         )
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
+            "meta": {"interfaces": {"screen": {}}},
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
             "request": {"command": "третья"},
             "state": {
@@ -1452,6 +1909,7 @@ class TestDisambiguation:
         )
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
+            "meta": {"interfaces": {"screen": {}}},
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
             "request": {"command": "включи джаз"},
         }

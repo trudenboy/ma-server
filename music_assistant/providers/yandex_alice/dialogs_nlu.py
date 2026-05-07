@@ -349,9 +349,9 @@ def resolve_player_candidates(
     decision: chosen tier, candidate count, and the names of the
     candidates returned.
 
-    Returns:
-        A list with all players in the best non-empty tier. ``[]`` if
-        nothing matched. ``[player]`` for an unambiguous resolution.
+    :returns: A list with all players in the best non-empty tier.
+        ``[]`` if nothing matched. ``[player]`` for an unambiguous
+        resolution.
     """
     candidates = list_exposed_players(mass, exposed_ids=exposed_ids)
 

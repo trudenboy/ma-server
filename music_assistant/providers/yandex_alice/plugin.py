@@ -22,6 +22,7 @@ from music_assistant.models.plugin import PluginProvider
 
 from .constants import (
     CONF_DIALOG_SKILL_ID,
+    CONF_DIALOG_VOICE_CONTINUATION,
     CONF_DIALOG_WEBHOOK_SECRET,
     CONF_EXPOSED_PLAYERS,
     CONF_INSTANCE_NAME,
@@ -44,6 +45,11 @@ class YandexAlicePlugin(PluginProvider):
             self._exposed_player_ids: set[str] | None = {str(item) for item in exposed_raw}
         else:
             self._exposed_player_ids = None
+        # Voice continuation (P1.4) — power-user toggle, no UI surface yet.
+        # Read directly from the config bag; absent → False (today's behaviour).
+        self._voice_continuation = bool(
+            self.config.get_value(CONF_DIALOG_VOICE_CONTINUATION) or False
+        )
 
     async def loaded_in_mass(self) -> None:
         """Register the Dialogs webhook route once the webserver is up.
@@ -60,6 +66,7 @@ class YandexAlicePlugin(PluginProvider):
             skill_id=self._dialog_skill_id,
             webhook_secret=self._dialog_webhook_secret,
             exposed_player_ids=self._exposed_player_ids,
+            voice_continuation=self._voice_continuation,
         )
         self._dialogs_handler.register_routes()
 

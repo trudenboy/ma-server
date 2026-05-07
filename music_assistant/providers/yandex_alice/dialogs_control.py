@@ -34,6 +34,7 @@ ControlAction = Literal[
     "volume_up",
     "volume_down",
     "volume_set",
+    "volume_relative",  # value = signed delta (+20, -5); executor reads current vol + clamps
     "mute",
     "unmute",
     "list_players",
@@ -179,6 +180,58 @@ _VOLUME_SET_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Relative-volume phrasings without the keyword "громкость". The verb is
+# matched even when no digit is captured — the digit slot is filled from
+# the regex group OR from `request.nlu.entities[YANDEX.NUMBER]` (passed
+# in via `parse_control(text, entities=...)`). When neither yields a
+# number, these patterns intentionally fall through to the bare
+# "прибавь"/"убавь" → volume_up/volume_down rules in `_CONTROL_PATTERNS`.
+# Yandex normalises spelled-out numbers in `request.command` (тридцать → 30)
+# so the regex covers most phrasings; the entity is the defensive fallback.
+_VOLUME_INC_RE = re.compile(
+    r"^(?:сделай\s+)?(?:прибавь(?:те)?|прибавить)"
+    r"(?:\s+(?:на\s+)?(?P<n>\d{1,3})(?:\s+процентов)?)?$",
+    re.IGNORECASE,
+)
+_VOLUME_DEC_RE = re.compile(
+    r"^(?:сделай\s+)?(?:убавь(?:те)?|убавить)"
+    r"(?:\s+(?:на\s+)?(?P<n>\d{1,3})(?:\s+процентов)?)?$",
+    re.IGNORECASE,
+)
+_VOLUME_NUM_INC_RE = re.compile(
+    r"^на\s+(?P<n>\d{1,3})\s+(?:громче|погромче)$",
+    re.IGNORECASE,
+)
+_VOLUME_NUM_DEC_RE = re.compile(
+    r"^на\s+(?P<n>\d{1,3})\s+(?:тише|потише)$",
+    re.IGNORECASE,
+)
+
+
+def _yandex_number(entities: list[Any] | None) -> int | None:
+    """Return the first integer YANDEX.NUMBER value from request entities, or None.
+
+    Yandex's normalised `request.command` already converts most spelled-out
+    Russian numbers to digits, but the entity is the authoritative fallback
+    for phrasings the regex didn't anchor on a digit position. The list
+    type is `list[Any]` because the values come from network JSON and we
+    defend against mixed-type elements.
+    """
+    if not entities:
+        return None
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        if ent.get("type") != "YANDEX.NUMBER":
+            continue
+        value = ent.get("value")
+        if isinstance(value, bool):  # bool is a subclass of int — exclude it
+            continue
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None
+
+
 # Seek forward / backward with numeric amount + optional unit. Unit defaults
 # to seconds when missing. "Минут[уы]" multiplies by 60.
 _SEEK_FORWARD_RE = re.compile(
@@ -214,8 +267,17 @@ def _seek_seconds(match: re.Match[str]) -> int | None:
     return n
 
 
-def _try_match(cleaned: str, player_hint: str | None) -> ParsedControl | None:
-    """Match `cleaned` against control patterns; return ParsedControl or None."""
+def _try_match(
+    cleaned: str,
+    player_hint: str | None,
+    entities: list[Any] | None = None,
+) -> ParsedControl | None:
+    """Match `cleaned` against control patterns; return ParsedControl or None.
+
+    `entities` is `request.nlu.entities` from the Yandex envelope. When a
+    relative-volume verb matches without a captured digit, we fall back to
+    `YANDEX.NUMBER` from there before deciding to surface `volume_relative`.
+    """
     if not cleaned:
         return None
     if vmatch := _VOLUME_SET_RE.match(cleaned):
@@ -228,6 +290,40 @@ def _try_match(cleaned: str, player_hint: str | None) -> ParsedControl | None:
             value=max(0, min(100, value)),
             player_hint=player_hint,
         )
+    # Relative-volume — try INCREASE forms ("прибавь N", "на N громче"),
+    # then DECREASE ("убавь N", "на N тише"). When the verb matches but
+    # the digit slot is empty, fall back to YANDEX.NUMBER from the
+    # request envelope. If neither yields a number, return None so the
+    # bare-verb fallthrough in `_CONTROL_PATTERNS` handles "прибавь" /
+    # "убавь" as volume_up / volume_down.
+    for pattern, sign in (
+        (_VOLUME_INC_RE, +1),
+        (_VOLUME_NUM_INC_RE, +1),
+        (_VOLUME_DEC_RE, -1),
+        (_VOLUME_NUM_DEC_RE, -1),
+    ):
+        if rel_match := pattern.match(cleaned):
+            n: int | None = None
+            try:
+                raw = rel_match.group("n")
+                if raw is not None:
+                    n = int(raw)
+            except (IndexError, TypeError, ValueError):
+                n = None
+            if n is None:
+                n = _yandex_number(entities)
+            if n is not None:
+                # Clamp the magnitude so an absurd "прибавь на 999" doesn't
+                # underflow/overflow downstream arithmetic. ``0`` stays
+                # ``0`` — "прибавь на 0" is a valid (if pointless) no-op
+                # rather than the user's spoken zero being silently
+                # promoted to one.
+                magnitude = max(0, min(100, abs(n)))
+                return ParsedControl(
+                    action="volume_relative",
+                    value=sign * magnitude,
+                    player_hint=player_hint,
+                )
     if smatch := _SEEK_FORWARD_RE.match(cleaned):
         seconds = _seek_seconds(smatch)
         if seconds is not None:
@@ -254,7 +350,10 @@ def _try_match(cleaned: str, player_hint: str | None) -> ParsedControl | None:
 _NA_BOUNDARY_RE = re.compile(r"\s+на\s+", re.IGNORECASE)
 
 
-def parse_control(text: str) -> ParsedControl | None:
+def parse_control(
+    text: str,
+    entities: list[Any] | None = None,
+) -> ParsedControl | None:
     """Classify a voice utterance as a control command, or None to fall through.
 
     Tries each `на`-boundary in the cleaned text as a possible
@@ -262,6 +361,10 @@ def parse_control(text: str) -> ParsedControl | None:
     (cleaned, None) for the whole-phrase case so that "поставь на
     паузу" still matches `pause` with no hint, even when the phrase
     contains "на" inside the action keywords.
+
+    `entities` is the (optional) `request.nlu.entities` array from the
+    Yandex Dialogs envelope, used as a fallback source for `YANDEX.NUMBER`
+    when a relative-volume verb matched without a captured digit.
     """
     if not text:
         return None
@@ -272,7 +375,7 @@ def parse_control(text: str) -> ParsedControl | None:
         return None
 
     # Whole-phrase first (no hint).
-    if direct := _try_match(cleaned, player_hint=None):
+    if direct := _try_match(cleaned, player_hint=None, entities=entities):
         return direct
 
     # Then try each "на " split from right to left, so e.g.
@@ -283,7 +386,7 @@ def parse_control(text: str) -> ParsedControl | None:
         hint = cleaned[m.end() :].strip().lower()
         if not rest or not hint:
             continue
-        if matched := _try_match(rest, player_hint=hint):
+        if matched := _try_match(rest, player_hint=hint, entities=entities):
             return matched
     return None
 
@@ -296,9 +399,8 @@ def parse_control(text: str) -> ParsedControl | None:
 def _plural_ru(n: int, forms: tuple[str, str, str]) -> str:
     """Pick the correct Russian quantitative form for `n`.
 
-    Args:
-        n: The number.
-        forms: ``(form_for_1, form_for_2_to_4, form_for_5_plus)``.
+    :param n: The number.
+    :param forms: ``(form_for_1, form_for_2_to_4, form_for_5_plus)``.
 
     Russian quantitative agreement:
       1, 21, 31, … → form_for_1 (e.g. "колонку")
@@ -348,6 +450,13 @@ def control_confirmation(control: ParsedControl) -> str:  # noqa: PLR0911
         return "Тише."
     if action == "volume_set":
         return f"Громкость {control.value}."
+    if action == "volume_relative":
+        delta = control.value or 0
+        if delta > 0:
+            return f"Громче на {delta}."
+        if delta < 0:
+            return f"Тише на {-delta}."
+        return "Готово."
     if action == "mute":
         return "Звук выключен."
     if action == "unmute":
@@ -412,6 +521,17 @@ async def execute_control(  # noqa: PLR0915
         elif action == "volume_set":
             value = max(0, min(100, control.value or 0))
             await mass.players.cmd_volume_set(pid, value)
+        elif action == "volume_relative":
+            # Read current volume, apply signed delta, clamp [0, 100].
+            # Falls back to 50 if the player exposes no volume_level
+            # (some virtual players do); the user feedback ("Громче на 20")
+            # then becomes a no-op rather than mis-targeting.
+            delta = control.value or 0
+            current = getattr(player, "volume_level", None)
+            if not isinstance(current, (int, float)):
+                current = 50
+            new_value = max(0, min(100, int(current) + int(delta)))
+            await mass.players.cmd_volume_set(pid, new_value)
         elif action == "mute":
             await mass.players.cmd_volume_mute(pid, True)
         elif action == "unmute":

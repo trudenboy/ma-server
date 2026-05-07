@@ -190,6 +190,122 @@ class TestParseControl:
         assert parse_control(phrase) is None
 
 
+class TestParseControlVolumeRelative:
+    """volume_relative — phrasings with a number, fed by regex or YANDEX.NUMBER."""
+
+    @pytest.mark.parametrize(
+        ("phrase", "expected_value", "expected_hint"),
+        [
+            # increase forms — regex captures the digit (Yandex normalises
+            # spelled-out numbers in `request.command`).
+            ("прибавь 20", 20, None),
+            ("прибавь на 20", 20, None),
+            ("прибавь на 20 процентов", 20, None),
+            ("прибавьте на 5", 5, None),
+            ("сделай прибавь 10", 10, None),
+            ("на 15 громче", 15, None),
+            ("на 5 погромче", 5, None),
+            # decrease forms (regex)
+            ("убавь 10", -10, None),
+            ("убавь на 25", -25, None),
+            ("убавьте 5", -5, None),
+            ("на 20 тише", -20, None),
+            ("на 30 потише", -30, None),
+            # with player hint
+            ("прибавь на 10 на кухне", 10, "кухне"),
+            ("убавь 5 на спальне", -5, "спальне"),
+            # clamping (magnitude > 100 caps at 100)
+            ("прибавь на 999", 100, None),
+        ],
+    )
+    def test_relative_with_digit(
+        self, phrase: str, expected_value: int, expected_hint: str | None
+    ) -> None:
+        """Relative-volume phrasings with a captured digit produce signed deltas."""
+        result = parse_control(phrase)
+        assert result is not None, f"phrase={phrase!r}"
+        assert result.action == "volume_relative", f"phrase={phrase!r}"
+        assert result.value == expected_value, f"phrase={phrase!r}"
+        assert result.player_hint == expected_hint, f"phrase={phrase!r}"
+
+    @pytest.mark.parametrize(
+        ("phrase", "sign"),
+        [
+            ("прибавь", +1),
+            ("убавь", -1),
+            ("сделай прибавь", +1),
+        ],
+    )
+    def test_relative_uses_yandex_number_when_regex_misses_digit(
+        self, phrase: str, sign: int
+    ) -> None:
+        """Verb matched without a digit → fall back to YANDEX.NUMBER entity."""
+        entities = [{"type": "YANDEX.NUMBER", "value": 12, "tokens": {"start": 0, "end": 1}}]
+        result = parse_control(phrase, entities=entities)
+        assert result is not None
+        assert result.action == "volume_relative"
+        assert result.value == sign * 12
+
+    def test_bare_verb_without_entity_falls_through_to_volume_up(self) -> None:
+        """Without a digit and without YANDEX.NUMBER, "прибавь" stays on volume_up."""
+        # No entities provided → relative pattern matches but yields no number,
+        # so the fallthrough lands on the bare-verb _CONTROL_PATTERNS rule.
+        result = parse_control("прибавь")
+        assert result is not None
+        assert result.action == "volume_up"
+        assert result.value is None
+
+    def test_bare_decrease_falls_through_to_volume_down(self) -> None:
+        """Bare "убавь" without number stays on volume_down (existing behaviour)."""
+        result = parse_control("убавь")
+        assert result is not None
+        assert result.action == "volume_down"
+
+    def test_entity_fallback_skips_non_number_entities(self) -> None:
+        """Only YANDEX.NUMBER counts; other entity types are ignored."""
+        entities = [
+            {"type": "YANDEX.GEO", "value": {"city": "Москва"}},
+            {"type": "YANDEX.FIO", "value": {"first_name": "Иван"}},
+        ]
+        result = parse_control("прибавь", entities=entities)
+        assert result is not None
+        assert result.action == "volume_up"  # no number found → fallthrough
+
+    def test_entity_fallback_first_number_wins(self) -> None:
+        """When several YANDEX.NUMBER entities are present, the first wins."""
+        entities = [
+            {"type": "YANDEX.NUMBER", "value": 7},
+            {"type": "YANDEX.NUMBER", "value": 99},
+        ]
+        result = parse_control("прибавь", entities=entities)
+        assert result is not None
+        assert result.action == "volume_relative"
+        assert result.value == 7
+
+    def test_volume_set_still_wins_with_keyword(self) -> None:
+        """volume_set with the explicit "громкость" keyword still matches first."""
+        result = parse_control("громкость 30")
+        assert result is not None
+        assert result.action == "volume_set"
+        assert result.value == 30
+
+    @pytest.mark.parametrize(
+        ("phrase", "expected_value"),
+        [
+            ("прибавь на 0", 0),
+            ("убавь 0", 0),
+            ("на 0 громче", 0),
+            ("на 0 тише", 0),
+        ],
+    )
+    def test_zero_magnitude_passes_through_as_zero(self, phrase: str, expected_value: int) -> None:
+        """Zero magnitude is preserved (not promoted to ±1) — Copilot review on PR #18."""
+        result = parse_control(phrase)
+        assert result is not None
+        assert result.action == "volume_relative"
+        assert result.value == expected_value
+
+
 class TestPluralRu:
     """Tests for the Russian quantitative-form picker."""
 
@@ -367,6 +483,47 @@ class TestExecuteControl:
         mass = self._make_mass()
         await execute_control(mass, ParsedControl(action="volume_set", value=None), self._player())
         mass.players.cmd_volume_set.assert_awaited_once_with("p1", 0)
+
+    async def test_volume_relative_increase(self) -> None:
+        """volume_relative reads current volume and bumps by signed delta."""
+        mass = self._make_mass()
+        player = self._player()
+        player.volume_level = 40
+        await execute_control(mass, ParsedControl(action="volume_relative", value=20), player)
+        mass.players.cmd_volume_set.assert_awaited_once_with("p1", 60)
+
+    async def test_volume_relative_decrease(self) -> None:
+        """volume_relative with negative delta lowers the current level."""
+        mass = self._make_mass()
+        player = self._player()
+        player.volume_level = 70
+        await execute_control(mass, ParsedControl(action="volume_relative", value=-15), player)
+        mass.players.cmd_volume_set.assert_awaited_once_with("p1", 55)
+
+    async def test_volume_relative_clamps_high(self) -> None:
+        """Resulting volume above 100 is clamped to 100."""
+        mass = self._make_mass()
+        player = self._player()
+        player.volume_level = 90
+        await execute_control(mass, ParsedControl(action="volume_relative", value=50), player)
+        mass.players.cmd_volume_set.assert_awaited_once_with("p1", 100)
+
+    async def test_volume_relative_clamps_low(self) -> None:
+        """Resulting volume below 0 is clamped to 0."""
+        mass = self._make_mass()
+        player = self._player()
+        player.volume_level = 5
+        await execute_control(mass, ParsedControl(action="volume_relative", value=-30), player)
+        mass.players.cmd_volume_set.assert_awaited_once_with("p1", 0)
+
+    async def test_volume_relative_missing_volume_level_uses_default(self) -> None:
+        """Player without a volume_level (virtual / unsupported) defaults to 50."""
+        mass = self._make_mass()
+        player = self._player()
+        # Explicitly drop volume_level so getattr returns None.
+        del player.volume_level
+        await execute_control(mass, ParsedControl(action="volume_relative", value=10), player)
+        mass.players.cmd_volume_set.assert_awaited_once_with("p1", 60)
 
     async def test_mute(self) -> None:
         """action=mute invokes cmd_volume_mute(True)."""

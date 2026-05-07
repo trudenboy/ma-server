@@ -346,9 +346,8 @@ async def perform_device_auth(
     any other channel results in a popup the frontend isn't listening
     for, so it never appears.
 
-    Raises:
-        LoginFailed: the Device Flow timed out, was rejected by
-            Yandex, or another Passport-level error escaped.
+    :raises LoginFailed: the Device Flow timed out, was rejected by
+        Yandex, or another Passport-level error escaped.
     """
     if not session_id:
         raise LoginFailed(

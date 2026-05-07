@@ -59,11 +59,13 @@ from .constants import (
     DIALOG_WEBHOOK_BASE_PATH,
 )
 from .dialogs_control import (
+    ParsedControl,
     control_confirmation,
     execute_control,
     format_list_players,
     parse_control,
 )
+from .dialogs_grammar import parse_platform_intent
 from .dialogs_nlu import (
     _VERB_RE,
     ParsedCommand,
@@ -73,6 +75,7 @@ from .dialogs_nlu import (
     resolve_player_candidates,
 )
 from .dialogs_player import play_for_alice, resolve_query
+from .tts_dictionary import PHRASE_REPLACEMENTS, WORD_REPLACEMENTS
 
 if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
@@ -81,41 +84,51 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-# Static stress-mark dictionary for common response words (P0.2).
-# Keys are case-insensitive whole-word matches; the marker is `+` placed
-# directly before the stressed vowel — Yandex Alice TTS supports this
-# inline syntax. Keep small and high-confidence; band/track names are
-# left as-is (those need a separate phoneme dict — P2.3).
-_TTS_STRESS_MARKS: dict[str, str] = {
-    "включаю": "включ+аю",
-    "ставлю": "ст+авлю",
-    "пауза": "п+ауза",
-    "продолжаю": "продолж+аю",
-    "следующая": "сл+едующая",
-    "предыдущая": "пред+ыдущая",
-    "громче": "гр+омче",
-    "тише": "т+ише",
-    "громкость": "гр+омкость",
-    "колонке": "кол+онке",
-    "колонку": "кол+онку",
-}
-
-_TTS_WORD_RE = re.compile(r"[А-Яа-яЁё]+")
+# P0.2 — TTS pronunciation hints. The `_tts_for` helper rewrites known
+# words to add `+` stress markers (Russian) or Cyrillic transliterations
+# (foreign artist names) so Alice's TTS reads them naturally. Tables
+# live in `tts_dictionary.py` for easier PR contributions; the regex
+# matches BOTH Latin and Cyrillic words because foreign artist names
+# arrive in Latin (e.g., the user said "Metallica" → command keeps it
+# Latin → response text says "Metallica" → tts says "мет+аллика").
+_TTS_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+")
 
 
 def _tts_for(text: str) -> str:
-    """Add `+` stress markers to known words for cleaner Alice TTS.
+    """Add `+` stress markers and foreign-name transliterations for Alice TTS.
 
-    Pure substitution — unknown words pass through unchanged. The map is
-    intentionally small (high-confidence Russian response words only);
-    expand via PRs as patterns emerge.
+    Two passes:
+      1. Multi-word phrase replacement (longest first via the table's
+         declared order). Required for "Iron Maiden", "Pink Floyd" etc.
+         which the per-word regex cannot match across whitespace.
+      2. Per-word substitution against ``WORD_REPLACEMENTS`` — covers
+         Russian response stresses and single-word foreign names.
+
+    Unknown words pass through unchanged. The map is intentionally small
+    and curated — every entry is maintenance debt; add via PR when a
+    real-user log shows Alice mispronouncing a specific word.
     """
     if not text:
         return text
 
+    # Phrase pass — case-insensitive whole-substring replacement. Walks
+    # the table in declared order so longer phrases (e.g. "red hot chili
+    # peppers") match before any sub-string entries. Result drops the
+    # original casing on the matched span — for TTS-only output that's
+    # acceptable (Alice doesn't render visual casing on voice surfaces;
+    # screen surfaces read `text`, not `tts`).
+    lowered = text.lower()
+    if any(phrase in lowered for phrase, _ in PHRASE_REPLACEMENTS):
+        for phrase, replacement in PHRASE_REPLACEMENTS:
+            idx = lowered.find(phrase)
+            while idx != -1:
+                text = text[:idx] + replacement + text[idx + len(phrase) :]
+                lowered = text.lower()
+                idx = lowered.find(phrase, idx + len(replacement))
+
     def _sub(match: re.Match[str]) -> str:
         word = match.group(0)
-        replacement = _TTS_STRESS_MARKS.get(word.lower())
+        replacement = WORD_REPLACEMENTS.get(word.lower())
         if replacement is None:
             return word
         if word[:1].isupper():
@@ -128,6 +141,38 @@ def _tts_for(text: str) -> str:
 def _safe_dict(value: Any) -> dict[str, Any]:
     """Return value if it's a dict, else an empty dict (defensive parsing)."""
     return value if isinstance(value, dict) else {}
+
+
+# Suggestion buttons appended to play-/control-success responses on
+# screened surfaces (mobile Alice, station-max, navigator, smart-screen).
+# Lets the user tap a follow-up without saying the activation phrase
+# again. `hide=False` keeps them on screen until tapped or the next
+# response replaces them. Voice-only surfaces (Mini, Pro, dumb speakers)
+# don't render buttons — so we omit the field entirely on those.
+_PLAYBACK_SUGGESTION_BUTTONS: list[dict[str, Any]] = [
+    {"title": "Следующая", "hide": False},
+    {"title": "Пауза", "hide": False},
+    {"title": "Громче", "hide": False},
+    {"title": "Тише", "hide": False},
+]
+
+
+def _has_screen(meta: Any) -> bool:
+    """Return True if the calling surface has a display.
+
+    Yandex sets ``meta.interfaces.screen = {}`` (empty dict, present-as-key)
+    on devices that can render visual elements: mobile Alice, station-max,
+    station-2, navigator, smart-screen, tv-app. Audio-only surfaces
+    (station-mini, station-pro, dumb speakers) omit the key entirely.
+    Used to gate ``buttons`` / ``card`` emission so we don't ship UI
+    bits to surfaces that ignore them.
+    """
+    if not isinstance(meta, dict):
+        return False
+    interfaces = meta.get("interfaces")
+    if not isinstance(interfaces, dict):
+        return False
+    return "screen" in interfaces
 
 
 def _without_pending(state: dict[str, Any]) -> dict[str, Any]:
@@ -222,23 +267,30 @@ class DialogsWebhookHandler:
         skill_id: str,
         webhook_secret: str,
         exposed_player_ids: set[str] | None = None,
+        voice_continuation: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
         """Initialize the handler.
 
-        Args:
-            mass: MusicAssistant instance.
-            skill_id: Configured ``CONF_DIALOG_SKILL_ID``; payloads with a
-                different ``session.skill_id`` are rejected.
-            webhook_secret: Random secret embedded in the webhook URL.
-            exposed_player_ids: Optional restriction set; only these players
-                are addressable by voice (passed to the player resolver).
-            logger: Optional logger override.
+        :param mass: MusicAssistant instance.
+        :param skill_id: Configured ``CONF_DIALOG_SKILL_ID``; payloads
+            with a different ``session.skill_id`` are rejected.
+        :param webhook_secret: Random secret embedded in the webhook URL.
+        :param exposed_player_ids: Optional restriction set; only these
+            players are addressable by voice (passed to the player resolver).
+        :param voice_continuation: When True, play- and control-success
+            responses keep the conversation open (``end_session=False``)
+            so the user can issue follow-ups without re-saying the
+            activation phrase. Default False preserves today's voice-UX.
+            Stop / pause-with-no-resume utterances still close the session
+            via the existing control path.
+        :param logger: Optional logger override.
         """
         self._mass = mass
         self._skill_id = skill_id
         self._webhook_secret = webhook_secret
         self._exposed_player_ids = exposed_player_ids
+        self._voice_continuation = voice_continuation
         self._logger = logger or _LOGGER
         self._unregister_callbacks: list[Callable[[], None]] = []
         # In-process state cache; see _STATE_CACHE_TTL_SEC / _MAX.
@@ -354,7 +406,7 @@ class DialogsWebhookHandler:
     # Webhook entry point
     # -------------------------------------------------------------------
 
-    async def _handle_webhook(self, request: web.Request) -> web.Response:  # noqa: PLR0915
+    async def _handle_webhook(self, request: web.Request) -> web.Response:
         # Path secret already enforced by the route URL — getting here means
         # the secret matches. Still constant-time-compare it via the captured
         # path arg in case aiohttp routing ever changes.
@@ -389,6 +441,10 @@ class DialogsWebhookHandler:
         req = body.get("request") or {}
         if not isinstance(req, dict):
             req = {}
+        meta = body.get("meta") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        has_screen = _has_screen(meta)
 
         # skill_id sanity check — reject if absent or mismatched.
         incoming_skill_id = str(session.get("skill_id") or "")
@@ -406,6 +462,51 @@ class DialogsWebhookHandler:
         # that resolve into a player action. Health signal only.
         self._authenticated_call_count += 1
 
+        # Wrap post-auth dispatch so any unexpected exception (parser,
+        # search, MA dispatch, response builder) surfaces as a graceful
+        # Russian fallback instead of an aiohttp HTTP 500 → Alice silence.
+        # Logs the original exception for the operator to debug from
+        # `$HOME/.musicassistant/musicassistant.log`. Flagged in the
+        # upstream PR review (#3843, @chrisuthe) as a regression risk.
+        try:
+            return await self._handle_authenticated_request(
+                body=body, session=session, req=req, has_screen=has_screen
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._logger.exception(
+                "Unhandled error in dialog webhook handler — "
+                "responding with generic fallback (session_id=%s)",
+                session.get("session_id", ""),
+            )
+            text = "Что-то пошло не так. Попробуй ещё раз."
+            return self._yandex_response(
+                incoming_session=session,
+                text=text,
+                tts=_tts_for(text),
+                end_session=False,
+            )
+
+    async def _handle_authenticated_request(  # noqa: PLR0915
+        self,
+        *,
+        body: dict[str, Any],
+        session: dict[str, Any],
+        req: dict[str, Any],
+        has_screen: bool,
+    ) -> web.Response:
+        """Dispatch the request body once authentication has cleared.
+
+        Wrapped in ``try / except`` by the caller so any unexpected raise
+        from a parser, the resolver, or MA dispatch lands as a graceful
+        fallback response rather than HTTP 500. Returns ``web.Response``.
+
+        :param body: Parsed JSON envelope.
+        :param session: ``body["session"]`` already coerced to dict.
+        :param req: ``body["request"]`` already coerced to dict.
+        :param has_screen: Result of :func:`_has_screen` on the request.
+        """
         # State buckets. Three-tier read priority:
         #   1. ``state.session``  — per-conversation, set by us last turn.
         #   2. ``state.application`` — per-device, mirrored fallback.
@@ -431,6 +532,17 @@ class DialogsWebhookHandler:
 
         is_new = bool(session.get("new"))
         command = str(req.get("command") or "").strip()
+        original_utterance = str(req.get("original_utterance") or "").strip()
+
+        # request.markup.dangerous_context — Yandex flags suicide/violence/
+        # hate content before passing the phrase through. If raised, refuse
+        # gracefully without engaging music search; passing flagged content
+        # to mass.music.search is bad PR (and may surface a result keyed off
+        # the flagged words).
+        markup = req.get("markup") or {}
+        if not isinstance(markup, dict):
+            markup = {}
+        dangerous_context = bool(markup.get("dangerous_context"))
 
         # Pending-command / awaiting-query lookups follow the same
         # three-tier order as default_id: session → application →
@@ -453,11 +565,30 @@ class DialogsWebhookHandler:
         # bits we route on. Sensitive fields (skill_id, webhook_secret,
         # raw payload IDs) are excluded; user/session IDs are opaque
         # tokens and DEBUG is opt-in, so they're included as-is.
+        # `original_utterance` is logged when it differs from the
+        # normalised `command` (Yandex strips punctuation and converts
+        # spelled-out numbers; the raw form helps misclassification
+        # post-mortems).
+        # Flagged content (`dangerous_context=true`) is redacted from
+        # both `cmd` and the raw suffix — Yandex flags suicide / hate /
+        # violence phrasings and we don't want to persist any of that
+        # in DEBUG logs even at the operator's request.
+        if dangerous_context:
+            cmd_for_log: str | None = "<redacted: dangerous_context>"
+            raw_suffix = ""
+        else:
+            cmd_for_log = command
+            raw_suffix = (
+                f" raw={original_utterance!r}"
+                if original_utterance and original_utterance != command
+                else ""
+            )
         self._logger.debug(
-            "Webhook recv: cmd=%r req_type=%s is_new=%s pending=%s "
+            "Webhook recv: cmd=%r%s req_type=%s is_new=%s pending=%s "
             "(session=%s app=%s cache=%s) awaiting=%s default_player=%s "
-            "session_id=%s",
-            command,
+            "dangerous=%s session_id=%s",
+            cmd_for_log,
+            raw_suffix,
             req.get("type", "SimpleUtterance"),
             is_new,
             bool(pending_in),
@@ -466,6 +597,7 @@ class DialogsWebhookHandler:
             bool(cached_state.get("pending_command")),
             awaiting_in,
             default_id,
+            dangerous_context,
             session.get("session_id", ""),
         )
 
@@ -489,6 +621,24 @@ class DialogsWebhookHandler:
                 session_state=session_state_in,
             )
 
+        if dangerous_context:
+            # Refuse gracefully and end session. Don't engage NLU or search
+            # so a flagged phrase never lands in mass.music.search results
+            # or in our logs as an "intent". Drop pending/awaiting state
+            # so the next conversation starts clean.
+            self._logger.info(
+                "Dropping flagged-content request (dangerous_context=true); session_id=%s",
+                session.get("session_id", ""),
+            )
+            text = "Не понял команду."
+            return self._yandex_response(
+                incoming_session=session,
+                text=text,
+                tts=_tts_for(text),
+                end_session=True,
+                session_state=_without_pending(session_state_in),
+            )
+
         # P0.6 — try control commands (pause/next/volume/...) FIRST, on
         # the raw command. Doing this before the awaiting-query synthesis
         # lets the user pivot from a slot-elicit prompt straight into a
@@ -496,7 +646,88 @@ class DialogsWebhookHandler:
         # without the prefix-prepend turning it into "включи пауза…".
         # If control matches, drop any pending/awaiting state — the user
         # is no longer in either of those flows.
-        if control := parse_control(command):
+        # `entities` (request.nlu.entities) feeds parse_control's
+        # YANDEX.NUMBER fallback for relative-volume phrasings where
+        # the regex didn't anchor on a digit.
+        nlu = req.get("nlu") or {}
+        if not isinstance(nlu, dict):
+            nlu = {}
+        nlu_entities = nlu.get("entities") if isinstance(nlu.get("entities"), list) else None
+        nlu_intents = nlu.get("intents") if isinstance(nlu.get("intents"), dict) else None
+
+        # Built-in YANDEX.* intents — emitted automatically by Yandex once
+        # any custom grammar is declared. Two we care about today:
+        #
+        # * YANDEX.REJECT ("отмена / нет / неважно / отстань") — back out
+        #   of any in-flight prompt. Clears pending_command / awaiting_query
+        #   and ends the session so the user can speak again from scratch.
+        # * YANDEX.HELP ("помоги / что я могу / помощь") — surface a
+        #   contextual hint depending on the current prompt; keeps state
+        #   so the user can answer the original question afterwards.
+        #
+        # YANDEX.CONFIRM and YANDEX.REPEAT aren't wired today: confirm is
+        # ambiguous in our flows (which player are you confirming?) and
+        # repeat would require caching the last response on session_state
+        # — both deferred to a later session.
+        if isinstance(nlu_intents, dict):
+            if "YANDEX.REJECT" in nlu_intents and (pending_in or awaiting_in):
+                self._logger.debug("YANDEX.REJECT in pending/awaiting state → cancel")
+                text = "Хорошо, отменил."
+                return self._yandex_response(
+                    incoming_session=session,
+                    text=text,
+                    tts=_tts_for(text),
+                    end_session=True,
+                    session_state=_without_pending(session_state_in),
+                    application_state=_without_pending(app_state_in),
+                )
+            if "YANDEX.HELP" in nlu_intents:
+                if pending_in:
+                    text = "Скажи имя колонки или её номер из списка."
+                elif awaiting_in:
+                    text = "Скажи имя артиста, песни, альбома или плейлиста."
+                else:
+                    text = "Скажи, например: включи рок на кухне."
+                self._logger.debug("YANDEX.HELP → contextual hint")
+                return self._yandex_response(
+                    incoming_session=session,
+                    text=text,
+                    tts=_tts_for(text),
+                    end_session=False,
+                    # Preserve pending/awaiting state so the user can answer the
+                    # original prompt right after this hint.
+                    session_state=session_state_in,
+                )
+
+        # Phase 2 — platform-pre-classified intents take precedence over
+        # the regex parsers. When grammar matched the phrase upstream,
+        # the result lands in `request.nlu.intents.<form_name>`; map it
+        # back to our existing ParsedControl / ParsedCommand and skip the
+        # regex pass. Falls through to the regex parsers when the block
+        # is empty (no grammar declared or no match).
+        platform = parse_platform_intent(nlu_intents)
+        if isinstance(platform, ParsedControl):
+            self._logger.debug("Platform intent → control %r (skipping regex parser)", platform)
+            return self._handle_control(
+                session=session,
+                control=platform,
+                default_id=default_id,
+                session_state_in=_without_pending(session_state_in),
+                app_state_in=app_state_in,
+                has_screen=has_screen,
+            )
+        if isinstance(platform, ParsedCommand):
+            self._logger.debug("Platform intent → play %r (skipping regex parser)", platform)
+            return await self._dispatch_play(
+                session=session,
+                parsed=platform,
+                default_id=default_id,
+                session_state_in=session_state_in,
+                app_state_in=app_state_in,
+                has_screen=has_screen,
+            )
+
+        if control := parse_control(command, entities=nlu_entities):
             self._logger.debug("Parsed dialog control %r → %r", command, control)
             return self._handle_control(
                 session=session,
@@ -504,6 +735,7 @@ class DialogsWebhookHandler:
                 default_id=default_id,
                 session_state_in=_without_pending(session_state_in),
                 app_state_in=app_state_in,
+                has_screen=has_screen,
             )
 
         # P0.4 — awaiting-query re-entry. If the previous turn asked "Что
@@ -555,6 +787,7 @@ class DialogsWebhookHandler:
                 pending=pending,
                 session_state_in=session_state_in,
                 app_state_in=app_state_in,
+                has_screen=has_screen,
             )
             if replay_response is not None:
                 return replay_response
@@ -570,6 +803,7 @@ class DialogsWebhookHandler:
             default_id=default_id,
             session_state_in=session_state_in,
             app_state_in=app_state_in,
+            has_screen=has_screen,
         )
 
     # -------------------------------------------------------------------
@@ -584,6 +818,7 @@ class DialogsWebhookHandler:
         default_id: str | None,
         session_state_in: dict[str, Any],
         app_state_in: dict[str, Any],
+        has_screen: bool = True,
     ) -> web.Response:
         """Slot-elicit / resolve player / disambiguate / play (or fail)."""
         # P0.4 — slot elicitation: bare verb with no actionable content.
@@ -650,6 +885,7 @@ class DialogsWebhookHandler:
                         candidates=all_exposed,
                         session_state_in=session_state_in,
                         app_state_in=app_state_in,
+                        has_screen=has_screen,
                     )
             hint = parsed.player_hint or "(не указано)"
             self._logger.info(
@@ -677,6 +913,7 @@ class DialogsWebhookHandler:
                 candidates=candidates,
                 session_state_in=session_state_in,
                 app_state_in=app_state_in,
+                has_screen=has_screen,
             )
 
         self._logger.debug(
@@ -690,6 +927,7 @@ class DialogsWebhookHandler:
             player=candidates[0],
             base_session_state=session_state_in,
             base_app_state=app_state_in,
+            has_screen=has_screen,
         )
 
     # -------------------------------------------------------------------
@@ -704,6 +942,7 @@ class DialogsWebhookHandler:
         default_id: str | None,
         session_state_in: dict[str, Any],
         app_state_in: dict[str, Any],
+        has_screen: bool = True,
     ) -> web.Response:
         """Resolve player + dispatch a control action; build response."""
         # list_players is informational — no player resolution / dispatch.
@@ -927,13 +1166,19 @@ class DialogsWebhookHandler:
         if isinstance(user_obj, dict) and user_obj.get("user_id"):
             user_state_update = {"preferred_player_id": player.player_id}
         text = control_confirmation(control)
+        # Stop is the natural session-end signal — even with voice
+        # continuation enabled, "стоп / выключи" should hand the mic
+        # back to the user instead of staying in the skill listening loop.
+        end_session = True if control.action == "stop" else not self._voice_continuation
         return self._yandex_response(
             incoming_session=session,
             text=text,
             tts=_tts_for(text),
+            end_session=end_session,
             session_state=new_session_state,
             application_state=new_app_state,
             user_state_update=user_state_update,
+            buttons=_PLAYBACK_SUGGESTION_BUTTONS if has_screen else None,
         )
 
     # -------------------------------------------------------------------
@@ -948,6 +1193,7 @@ class DialogsWebhookHandler:
         player: Any,
         base_session_state: dict[str, Any],
         base_app_state: dict[str, Any],
+        has_screen: bool = True,
     ) -> web.Response:
         """Search media, fire-and-forget play, build response with persisted state."""
         try:
@@ -1020,9 +1266,11 @@ class DialogsWebhookHandler:
             incoming_session=session,
             text=text,
             tts=_tts_for(text),
+            end_session=not self._voice_continuation,
             session_state=new_session_state,
             application_state=new_app_state,
             user_state_update=user_state_update,
+            buttons=_PLAYBACK_SUGGESTION_BUTTONS if has_screen else None,
         )
 
     # -------------------------------------------------------------------
@@ -1037,6 +1285,7 @@ class DialogsWebhookHandler:
         candidates: list[Any],
         session_state_in: dict[str, Any],
         app_state_in: dict[str, Any] | None = None,
+        has_screen: bool = True,
     ) -> web.Response:
         """Ask the user which player to use — voice-first, with optional buttons.
 
@@ -1044,8 +1293,8 @@ class DialogsWebhookHandler:
         has to make voice answer obvious. We enumerate candidates with
         Russian ordinals (`первая` / `вторая` / …) so a user can say
         either the player name (free-text fallback) or the position.
-        Buttons are kept on the response for screen surfaces, but voice
-        is the primary channel.
+        Buttons are emitted only on screened surfaces; voice-only devices
+        get the same prompt without the button payload.
         """
         # Yandex caps ItemsList at 5 anyway; cap our buttons to the same.
         capped = candidates[:5]
@@ -1057,14 +1306,18 @@ class DialogsWebhookHandler:
         #    маленькая. Скажи название или номер."
         labelled = [f"{_ORDINAL_LABELS[i]} — {name}" for i, name in enumerate(names)]
         text = "На какой колонке? " + ", ".join(labelled) + ". Скажи название или номер."
-        buttons = [
-            {
-                "title": (p.name or p.player_id)[:64],
-                "payload": {"player_id": p.player_id},
-                "hide": True,
-            }
-            for p in capped
-        ]
+        buttons: list[dict[str, Any]] | None = (
+            [
+                {
+                    "title": (p.name or p.player_id)[:64],
+                    "payload": {"player_id": p.player_id},
+                    "hide": True,
+                }
+                for p in capped
+            ]
+            if has_screen
+            else None
+        )
         # Clear any prior `awaiting_query` / `pending_command` before
         # writing the new one, and include the saved `pending_command`.
         # The same pending entry is mirrored to BOTH `session_state` and
@@ -1119,6 +1372,7 @@ class DialogsWebhookHandler:
         pending: dict[str, Any],
         session_state_in: dict[str, Any],
         app_state_in: dict[str, Any],
+        has_screen: bool = True,
     ) -> web.Response | None:
         """Attempt to resume a saved pending_command using button payload or text.
 
@@ -1199,6 +1453,7 @@ class DialogsWebhookHandler:
                     candidates=candidates,
                     session_state_in=session_state_in,
                     app_state_in=app_state_in,
+                    has_screen=has_screen,
                 )
 
         # Step 3 — voice ordinal ("первая", "выбираю первую", "номер
@@ -1248,6 +1503,7 @@ class DialogsWebhookHandler:
                             candidates=still_available,
                             session_state_in=session_state_in,
                             app_state_in=app_state_in,
+                            has_screen=has_screen,
                         )
                     # else: no candidates remain at all — fall through.
 
@@ -1266,6 +1522,7 @@ class DialogsWebhookHandler:
             player=chosen_player,
             base_session_state=session_state_in,
             base_app_state=app_state_in,
+            has_screen=has_screen,
         )
 
     # -------------------------------------------------------------------
@@ -1283,6 +1540,7 @@ class DialogsWebhookHandler:
         application_state: dict[str, Any] | None = None,
         user_state_update: dict[str, Any] | None = None,
         buttons: list[dict[str, Any]] | None = None,
+        card: dict[str, Any] | None = None,
     ) -> web.Response:
         """Build a Yandex Dialogs response envelope.
 
@@ -1290,6 +1548,14 @@ class DialogsWebhookHandler:
         Yandex spec; ``user_state_update`` is merged into the existing
         user-scoped state (set keys to None to clear). Omit a parameter
         to leave that bucket unchanged on Yandex's side.
+
+        ``card`` accepts one of the three Yandex card shapes:
+        ``BigImage`` (single image + title + description),
+        ``ItemsList`` (1-5 items, each with image + title), or
+        ``ImageGallery`` (1-7 images). Yandex silently drops the field
+        on voice-only surfaces, so callers must still gate emission on
+        ``meta.interfaces.screen`` to avoid wasted bandwidth and to
+        honour the buttons-on-screen-only contract.
 
         Side effect: any time we set ``session_state`` or
         ``application_state``, the merged value is also written to the
@@ -1319,6 +1585,8 @@ class DialogsWebhookHandler:
         }
         if buttons:
             response_body["buttons"] = buttons
+        if card:
+            response_body["card"] = card
         payload: dict[str, Any] = {
             "version": "1.0",
             "session": echoed,

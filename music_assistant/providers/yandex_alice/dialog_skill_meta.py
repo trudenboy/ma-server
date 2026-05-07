@@ -66,9 +66,8 @@ def build_backend_uri(base_url: str, webhook_secret: str) -> str:
     can't reach (e.g. ``https://192.168.1.10`` or ``https://localhost``)
     and the user would only discover the failure once moderation finishes.
 
-    Raises:
-        ValueError: ``base_url`` is empty / not a public HTTPS URL, or
-            ``webhook_secret`` is empty.
+    :raises ValueError: ``base_url`` is empty / not a public HTTPS URL,
+        or ``webhook_secret`` is empty.
     """
     base = (base_url or "").strip().rstrip("/")
     if not base:
