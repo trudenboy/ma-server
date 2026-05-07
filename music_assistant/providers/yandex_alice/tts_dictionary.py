@@ -68,7 +68,7 @@ WORD_REPLACEMENTS: dict[str, str] = {
     "rihanna": "рих+анна",
     "scorpions": "ск+орпионс",
     "skillet": "ск+иллет",
-    "sting": "стинг",
+    "sting": "стинг",  # codespell:ignore sting
 }
 
 
