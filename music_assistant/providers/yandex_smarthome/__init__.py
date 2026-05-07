@@ -158,28 +158,6 @@ def _resolve_direct_client_secret(
     return str(values.get(CONF_DIRECT_CLIENT_SECRET) or "")
 
 
-def _resolve_external_base_url(
-    mass: MusicAssistant,
-    values: dict[str, ConfigValueType] | None = None,
-) -> str:
-    """Return the public-facing Base URL to use for Yandex callbacks/webhooks.
-
-    Priority:
-      1. ``CONF_EXTERNAL_BASE_URL`` from values (user-set plugin override)
-      2. ``mass.webserver.base_url`` (MA's global setting)
-    Trailing slashes are stripped.
-    """
-    override = ""
-    if values is not None:
-        override = str(values.get(CONF_EXTERNAL_BASE_URL) or "").strip()
-    if override:
-        return override.rstrip("/")
-    fallback = ""
-    with contextlib.suppress(Exception):
-        fallback = str(mass.webserver.base_url)
-    return fallback.strip().rstrip("/")
-
-
 def _resolve_cached_x_token(
     mass: MusicAssistant,
     instance_id: str | None,
