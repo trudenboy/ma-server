@@ -198,11 +198,16 @@ class StateNotifier:
             return
         try:
             await self._send_state_callback(devices)
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            # Re-queue failed player IDs
+            # Re-queue failed player IDs and reschedule. _send_state_callback
+            # already deduplicated the log entry (WARNING for known classes,
+            # ERROR-with-traceback for unexpected) so we swallow the exception
+            # here to keep MA's task scheduler from re-logging it as
+            # "Task exception was never retrieved" on every retry.
             self._dirty_player_ids |= dirty
             self._schedule_flush()
-            raise
 
     # -----------------------------------------------------------------------
     # State reporting

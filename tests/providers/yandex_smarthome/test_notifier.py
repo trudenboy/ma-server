@@ -400,7 +400,7 @@ class TestStateNotifierCloudPlus:
 
     @pytest.mark.asyncio
     async def test_rejects_http_500(self) -> None:
-        """Non-success status codes should re-queue dirty IDs and raise."""
+        """HTTP 500: re-queue dirty IDs, swallow exception (already logged)."""
         mock_resp = AsyncMock()
         mock_resp.status = 500
         mock_resp.text = AsyncMock(return_value="Internal Server Error")
@@ -418,11 +418,12 @@ class TestStateNotifierCloudPlus:
 
         notifier._dirty_player_ids.add("p1")
 
-        with pytest.raises(RuntimeError, match="State callback failed"):
-            await notifier._flush_pending()
+        # No raise — _send_state_callback's _CallbackErrorAlreadyLogged is
+        # deduped + swallowed here so MA's task scheduler does not re-log
+        # it as "Task exception was never retrieved" on every retry.
+        await notifier._flush_pending()
 
         session.post.assert_called_once()
-        # Player IDs should be re-queued after failure
         assert "p1" in notifier._dirty_player_ids
 
     @pytest.mark.asyncio
