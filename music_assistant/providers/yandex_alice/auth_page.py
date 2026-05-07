@@ -49,8 +49,8 @@ DEVICE_CODE_PAGE_BASE_PATH = "/yandex_alice/device_code"
 # the intermediate page has a chance to poll once more and close itself.
 _POST_AUTH_GRACE_SECONDS = 3
 
+# Callable returning the current device-flow state for status polls.
 StateProvider = Callable[[], str]
-"""Callable returning the current device-flow state for status polls."""
 
 __all__ = [
     "DEVICE_CODE_PAGE_BASE_PATH",

@@ -7,8 +7,7 @@ pre-check + the pipeline runner + the Recreate / Adopt resolution
 helpers.
 """
 
-# ruff: noqa: D102, PLW0108  # tests don't need per-method docstrings;
-# the lambda-around-async-context-manager-factory is intentional
+# ruff: noqa: D102  # tests don't need per-method docstrings.
 
 from __future__ import annotations
 
@@ -123,11 +122,9 @@ class TestPreCheckDuplicate:
         @asynccontextmanager
         async def _raising_factory(_x_token: str) -> AsyncIterator[Any]:
             raise RuntimeError("network blip")
-            yield  # pragma: no cover
+            yield  # type: ignore[unreachable]  # pragma: no cover
 
-        monkeypatch.setattr(
-            auto_create, "cached_authenticated_session", lambda x: _raising_factory(x)
-        )
+        monkeypatch.setattr(auto_create, "cached_authenticated_session", _raising_factory)
         result = await auto_create._pre_check_duplicate("tok", "Music Assistant")
         assert result is None
 
