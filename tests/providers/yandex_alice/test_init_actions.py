@@ -32,7 +32,6 @@ from music_assistant.providers.yandex_alice.constants import (
     CONF_ACTION_RENAME_DIALOG_SKILL,
     CONF_AUTH_X_TOKEN,
     CONF_DIALOG_AUTO_CREATE_ARTIFACTS,
-    CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION,
     CONF_DIALOG_SKILL_ID,
     CONF_DIALOG_SKILL_NAME,
     CONF_EXTERNAL_BASE_URL,
@@ -41,16 +40,20 @@ from music_assistant.providers.yandex_alice.constants import (
 
 
 def _make_mass() -> MagicMock:
-    """Build a MagicMock MA with empty player + playlist enumeration."""
+    """Build a MagicMock MA with empty player + playlist enumeration.
+
+    ``webserver`` is explicitly set to ``None`` so the device-code page
+    helper short-circuits — unit tests that exercise form rendering
+    don't need (or want) the dynamic-route side effect.
+    """
     mass = MagicMock()
     mass.players.all_players = MagicMock(return_value=[])
+    mass.webserver = None
     return mass
 
 
-@pytest.fixture(autouse=True)
-def _stub_playlists(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty playlist options for all tests in this module."""
-    monkeypatch.setattr(yandex_alice, "fetch_playlist_options", AsyncMock(return_value=[]))
+# v1.2.0: removed CONF_EXPOSED_PLAYLISTS — fetch_playlist_options no longer
+# imported. The autouse fixture that used to stub it is gone too.
 
 
 def _entries_by_key(entries: tuple[Any, ...]) -> dict[str, Any]:
@@ -67,11 +70,16 @@ class TestDefaultForm:
     """No action: form has both auto-create button and (conditionally) rename."""
 
     @pytest.mark.asyncio
-    async def test_no_action_renders_auto_create_button(self) -> None:
-        """Auto-create ACTION entry is always present."""
+    async def test_no_action_renders_sign_in_button(self) -> None:
+        """When no x_token cached → Authorization block shows Sign in button."""
+        from music_assistant.providers.yandex_alice.constants import CONF_ACTION_SIGN_IN
+
         entries = await get_config_entries(_make_mass(), values={})
         keys = _entries_by_key(entries)
-        assert CONF_ACTION_AUTO_CREATE_DIALOG in keys
+        # Sign in is the primary CTA in the Auth block; Create skill
+        # appears only after auth (or when skill_id is set manually).
+        assert CONF_ACTION_SIGN_IN in keys
+        assert CONF_ACTION_AUTO_CREATE_DIALOG not in keys
 
     @pytest.mark.asyncio
     async def test_rename_hidden_without_skill_id_or_token(self) -> None:
@@ -80,21 +88,8 @@ class TestDefaultForm:
         keys = _entries_by_key(entries)
         assert CONF_ACTION_RENAME_DIALOG_SKILL not in keys
 
-    @pytest.mark.asyncio
-    async def test_rename_visible_when_skill_id_and_token_present(self) -> None:
-        """Both skill_id and cached x_token populate the form → rename shows up."""
-        artifacts = SkillCreationArtifacts(
-            state=SkillCreationState.DONE,
-            skill_id="sk-1",
-            last_known_name="My Skill",
-        )
-        values: dict[str, Any] = {
-            CONF_AUTH_X_TOKEN: "tok",
-            CONF_DIALOG_AUTO_CREATE_ARTIFACTS: dump_artifacts(artifacts),
-        }
-        entries = await get_config_entries(_make_mass(), values=values)
-        keys = _entries_by_key(entries)
-        assert CONF_ACTION_RENAME_DIALOG_SKILL in keys
+    # v1.2.0 Phase F: rename / drift-cluster removed — Edit skill in
+    # Step 3 covers the same use case with a richer set of fields.
 
 
 # ---------------------------------------------------------------------------
@@ -103,27 +98,25 @@ class TestDefaultForm:
 
 
 class TestAutoCreateAction:
-    """auto-create dispatch: invokes run_auto_create_step with derived inputs."""
+    """auto-create dispatch: invokes run_create_skill (Step 2) with derived inputs."""
 
     @pytest.mark.asyncio
-    async def test_invokes_run_auto_create_step(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Click → run_auto_create_step is awaited once with skill_name + backend_uri."""
+    async def test_invokes_run_create_skill(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Click with cached_x_token → run_create_skill is awaited with skill_name + backend_uri."""
         outcome = AutoCreateOutcome(
             artifacts=SkillCreationArtifacts(),
-            device_session_blob='{"user_code": "X"}',
             x_token=None,
-            user_code="X",
-            verification_url="https://ya.ru/device",
             user_message="started",
-            stage=LocalAutoCreateStage.DEVICE_FLOW_STARTED,
+            stage=LocalAutoCreateStage.PIPELINE_RUNNING,
         )
         step_mock = AsyncMock(return_value=outcome)
-        monkeypatch.setattr(yandex_alice, "run_auto_create_step", step_mock)
+        monkeypatch.setattr(yandex_alice, "run_create_skill", step_mock)
 
         values: dict[str, Any] = {
             CONF_INSTANCE_NAME: "Music Assistant",
             CONF_DIALOG_SKILL_NAME: "MA Test",
             CONF_EXTERNAL_BASE_URL: "https://ma.example.com",
+            CONF_AUTH_X_TOKEN: "tok",
         }
         await get_config_entries(
             _make_mass(),
@@ -141,13 +134,14 @@ class TestAutoCreateAction:
 
     @pytest.mark.asyncio
     async def test_https_required_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """http:// base URL → FAILED before run_auto_create_step is called."""
+        """http:// base URL → FAILED before run_create_skill is called."""
         step_mock = AsyncMock()
-        monkeypatch.setattr(yandex_alice, "run_auto_create_step", step_mock)
+        monkeypatch.setattr(yandex_alice, "run_create_skill", step_mock)
 
         values: dict[str, Any] = {
             CONF_INSTANCE_NAME: "MA",
             CONF_EXTERNAL_BASE_URL: "http://insecure.example.com",
+            CONF_AUTH_X_TOKEN: "tok",
         }
         await get_config_entries(
             _make_mass(),
@@ -172,15 +166,12 @@ class TestAutoCreateAction:
             captured_artifacts.append(kwargs["artifacts"])
             return AutoCreateOutcome(
                 artifacts=SkillCreationArtifacts(),
-                device_session_blob=None,
                 x_token=None,
-                user_code=None,
-                verification_url=None,
                 user_message="restart",
                 stage=LocalAutoCreateStage.IDLE,
             )
 
-        monkeypatch.setattr(yandex_alice, "run_auto_create_step", _capture)
+        monkeypatch.setattr(yandex_alice, "run_create_skill", _capture)
 
         done = SkillCreationArtifacts(
             state=SkillCreationState.DONE,
@@ -190,6 +181,7 @@ class TestAutoCreateAction:
         values: dict[str, Any] = {
             CONF_DIALOG_AUTO_CREATE_ARTIFACTS: dump_artifacts(done),
             CONF_EXTERNAL_BASE_URL: "https://ma.example.com",
+            CONF_AUTH_X_TOKEN: "tok",
         }
         await get_config_entries(
             _make_mass(),
@@ -210,23 +202,22 @@ class TestAutoCreateAction:
                 skill_id="sk-new-uuid",
                 last_known_name="MA",
             ),
-            device_session_blob=None,
-            x_token="fresh",
-            user_code=None,
-            verification_url=None,
+            x_token=None,
             user_message="✅",
             stage=LocalAutoCreateStage.DONE,
         )
-        monkeypatch.setattr(yandex_alice, "run_auto_create_step", AsyncMock(return_value=outcome))
+        monkeypatch.setattr(yandex_alice, "run_create_skill", AsyncMock(return_value=outcome))
 
-        values: dict[str, Any] = {CONF_EXTERNAL_BASE_URL: "https://ma.example.com"}
+        values: dict[str, Any] = {
+            CONF_EXTERNAL_BASE_URL: "https://ma.example.com",
+            CONF_AUTH_X_TOKEN: "tok",
+        }
         await get_config_entries(
             _make_mass(),
             action=CONF_ACTION_AUTO_CREATE_DIALOG,
             values=values,
         )
         assert values[CONF_DIALOG_SKILL_ID] == "sk-new-uuid"
-        assert values[CONF_AUTH_X_TOKEN] == "fresh"
 
     @pytest.mark.asyncio
     async def test_backup_restore_pre_sets_app_created(
@@ -239,15 +230,12 @@ class TestAutoCreateAction:
             captured_artifacts.append(kwargs["artifacts"])
             return AutoCreateOutcome(
                 artifacts=kwargs["artifacts"],
-                device_session_blob=None,
                 x_token=None,
-                user_code=None,
-                verification_url=None,
                 user_message="stub",
                 stage=LocalAutoCreateStage.PIPELINE_RUNNING,
             )
 
-        monkeypatch.setattr(yandex_alice, "run_auto_create_step", _capture)
+        monkeypatch.setattr(yandex_alice, "run_create_skill", _capture)
 
         # Empty artifacts but skill_id present (config restored from backup)
         values: dict[str, Any] = {
@@ -347,13 +335,12 @@ class TestRenameAction:
 
 
 class TestCancelAction:
-    """Cancel: drop pending session + reset artifacts; keep cached x_token."""
+    """Cancel: reset artifacts; keep cached x_token (sign-in stays valid)."""
 
     @pytest.mark.asyncio
-    async def test_resets_artifacts_and_session(self) -> None:
-        """Cancel clears CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION + resets artifacts."""
+    async def test_resets_artifacts(self) -> None:
+        """Cancel resets artifacts to NONE; cached x_token preserved."""
         values: dict[str, Any] = {
-            CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION: '{"user_code": "X"}',
             CONF_DIALOG_AUTO_CREATE_ARTIFACTS: dump_artifacts(
                 SkillCreationArtifacts(
                     state=SkillCreationState.APP_CREATED,
@@ -375,8 +362,6 @@ class TestCancelAction:
         rehydrated = load_artifacts(str(values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS]))
         assert rehydrated.state == SkillCreationState.NONE
         assert rehydrated.skill_id is None
-        # Session dropped
-        assert values[CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION] == ""
         # Token preserved
         assert values[CONF_AUTH_X_TOKEN] == "preserve-me"
 
@@ -405,18 +390,18 @@ class TestStableWebhookSecret:
             captured_uris.append(kwargs["backend_uri"])
             return AutoCreateOutcome(
                 artifacts=SkillCreationArtifacts(),
-                device_session_blob=None,
                 x_token=None,
-                user_code=None,
-                verification_url=None,
                 user_message="ok",
                 stage=LocalAutoCreateStage.IDLE,
             )
 
-        monkeypatch.setattr(yandex_alice, "run_auto_create_step", _capture)
+        monkeypatch.setattr(yandex_alice, "run_create_skill", _capture)
 
         # First click: no secret in values → dispatcher generates + writes back.
-        values: dict[str, Any] = {CONF_EXTERNAL_BASE_URL: "https://ma.example.com"}
+        values: dict[str, Any] = {
+            CONF_EXTERNAL_BASE_URL: "https://ma.example.com",
+            CONF_AUTH_X_TOKEN: "tok",
+        }
         await get_config_entries(
             _make_mass(),
             action=CONF_ACTION_AUTO_CREATE_DIALOG,
@@ -448,8 +433,15 @@ class TestDeriveStageRespectsCachedToken:
     """
 
     @pytest.mark.asyncio
-    async def test_intermediate_state_without_token_renders_create_label(self) -> None:
-        """artifacts=APP_CREATED + no x_token → auto-create button says 'Create skill'."""
+    async def test_intermediate_state_without_token_shows_sign_in(self) -> None:
+        """artifacts=APP_CREATED + no x_token → Auth block shows Sign in.
+
+        Skill block ALSO renders because skill_id is known (manual
+        backup-restore path), but the primary CTA stays the Sign in
+        button until auth is resolved.
+        """
+        from music_assistant.providers.yandex_alice.constants import CONF_ACTION_SIGN_IN
+
         artifacts = SkillCreationArtifacts(
             state=SkillCreationState.APP_CREATED,
             skill_id="sk-partial",
@@ -460,8 +452,8 @@ class TestDeriveStageRespectsCachedToken:
         }
         entries = await get_config_entries(_make_mass(), values=values)
         keys = _entries_by_key(entries)
-        action_entry = keys[CONF_ACTION_AUTO_CREATE_DIALOG]
-        assert action_entry.action_label == "Create skill"
+        assert CONF_ACTION_SIGN_IN in keys
+        assert keys[CONF_ACTION_SIGN_IN].action_label == "Sign in to Yandex Passport"
 
     @pytest.mark.asyncio
     async def test_intermediate_state_with_token_renders_resume_label(self) -> None:
@@ -476,33 +468,11 @@ class TestDeriveStageRespectsCachedToken:
         }
         entries = await get_config_entries(_make_mass(), values=values)
         keys = _entries_by_key(entries)
-        assert keys[CONF_ACTION_AUTO_CREATE_DIALOG].action_label == "Resume"
+        # v1.2.0 #19: PIPELINE_RUNNING button = "Continue setup"
+        assert keys[CONF_ACTION_AUTO_CREATE_DIALOG].action_label == "Continue setup"
 
 
-class TestDeviceFlowStartedHintOnReload:
-    """LABEL re-shows user_code + URL after a form reload mid-Device-Flow."""
-
-    @pytest.mark.asyncio
-    async def test_label_renders_user_code_from_persisted_session(self) -> None:
-        """device_session_blob in values → status LABEL shows the code + URL."""
-        import json
-
-        device_session = json.dumps(
-            {
-                "device_code": "secret",
-                "user_code": "WXYZ-1234",
-                "verification_url": "https://ya.ru/device",
-                "expires_in": 600,
-                "interval": 5,
-                "expires_at_epoch": 9999999999.0,
-            }
-        )
-        values: dict[str, Any] = {CONF_DIALOG_AUTO_CREATE_DEVICE_SESSION: device_session}
-        entries = await get_config_entries(_make_mass(), values=values)
-        keys = _entries_by_key(entries)
-
-        # Status LABEL is rendered with the code + URL inline.
-        assert "label_auto_create_status" in keys
-        status_label = keys["label_auto_create_status"].label
-        assert "WXYZ-1234" in status_label
-        assert "ya.ru/device" in status_label
+# v1.2.0 Phase C refactor: the self-resuming Device Flow is gone.
+# Sign-in is a single blocking action that opens an AuthenticationHelper
+# popup; there is no mid-flow form reload to re-render the user_code in.
+# The dedicated test class for that case has been removed.

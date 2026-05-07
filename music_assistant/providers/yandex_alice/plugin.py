@@ -21,7 +21,6 @@ from typing import Any
 from music_assistant.models.plugin import PluginProvider
 
 from .constants import (
-    CONF_DIALOG_SKILL_ENABLED,
     CONF_DIALOG_SKILL_ID,
     CONF_DIALOG_WEBHOOK_SECRET,
     CONF_EXPOSED_PLAYERS,
@@ -38,7 +37,6 @@ class YandexAlicePlugin(PluginProvider):
     async def handle_async_init(self) -> None:
         """Read config values and stash them on the instance."""
         self._instance_name = str(self.config.get_value(CONF_INSTANCE_NAME) or "Music Assistant")
-        self._dialog_skill_enabled = bool(self.config.get_value(CONF_DIALOG_SKILL_ENABLED))
         self._dialog_skill_id = str(self.config.get_value(CONF_DIALOG_SKILL_ID) or "")
         self._dialog_webhook_secret = str(self.config.get_value(CONF_DIALOG_WEBHOOK_SECRET) or "")
         exposed_raw = self.config.get_value(CONF_EXPOSED_PLAYERS)
@@ -48,10 +46,14 @@ class YandexAlicePlugin(PluginProvider):
             self._exposed_player_ids = None
 
     async def loaded_in_mass(self) -> None:
-        """Register the Dialogs webhook route once the webserver is up."""
-        if not (
-            self._dialog_skill_enabled and self._dialog_skill_id and self._dialog_webhook_secret
-        ):
+        """Register the Dialogs webhook route once the webserver is up.
+
+        The provider is implicitly enabled the moment ``skill_id`` and
+        ``webhook_secret`` are populated — voice control is the *whole*
+        point of this provider, so a separate "enable" toggle would be
+        a redundant gate (#removed in v1.2.0).
+        """
+        if not (self._dialog_skill_id and self._dialog_webhook_secret):
             return
         self._dialogs_handler = DialogsWebhookHandler(
             self.mass,
@@ -71,13 +73,19 @@ class YandexAlicePlugin(PluginProvider):
     # MA may call into the provider for diagnostics; keep a noop attribute hook.
     def get_diagnostics(self) -> dict[str, Any]:
         """Expose a tiny status snapshot for MA diagnostics."""
+        handler = self._dialogs_handler
+        webhook_calls_total = handler.webhook_call_count if handler else 0
+        authenticated_calls_total = handler.authenticated_call_count if handler else 0
+        last_webhook_ts = handler.last_webhook_ts if handler else None
         return {
             "instance_name": self._instance_name,
-            "dialog_skill_enabled": self._dialog_skill_enabled,
             "dialog_skill_id_present": bool(self._dialog_skill_id),
             "dialog_webhook_secret_present": bool(self._dialog_webhook_secret),
             "exposed_player_count": (
                 len(self._exposed_player_ids) if self._exposed_player_ids else 0
             ),
-            "handler_active": self._dialogs_handler is not None,
+            "handler_active": handler is not None,
+            "webhook_calls_total": webhook_calls_total,
+            "authenticated_calls_total": authenticated_calls_total,
+            "last_webhook_ts": last_webhook_ts,
         }

@@ -56,6 +56,7 @@ async def run_auto_update(
     structured_examples: list[dict[str, Any]] | None,
     activation_phrases: list[str] | None,
     artifacts: SkillCreationArtifacts,
+    voice: str | None = None,
 ) -> AutoUpdateOutcome:
     """Patch the existing skill draft + re-deploy. No Device Flow fallback.
 
@@ -109,6 +110,7 @@ async def run_auto_update(
             description=description,
             structured_examples=structured_examples,
             activation_phrases=activation_phrases,
+            voice=voice,
         )
     except InvalidCredentialsError as exc:
         _LOGGER.warning("auto-update: cached x_token rejected: %s", exc)
