@@ -241,12 +241,17 @@ class YandexSmartHomePlugin(PluginProvider):
         self._direct_handler.register_routes()
 
         # State notifier needs skill_id + skill_token to push state callbacks
-        # to Yandex — these only exist after a successful auto-create. Skip
-        # silently if missing; this is the normal "first run" state.
-        if self._skill_id and self._skill_token and self._skill_token.get_secret():
+        # to Yandex — these only exist after a successful auto-create AND the
+        # user pasting the OAuth token. Skip silently if either is missing;
+        # this is the normal "first run" / "skill created but token not yet
+        # pasted" state.
+        has_skill_id = bool(self._skill_id)
+        skill_token = self._skill_token
+        has_skill_token = skill_token is not None and bool(skill_token.get_secret())
+        if has_skill_id and has_skill_token and skill_token is not None:
             session = self.mass.http_session
             callback_url = f"{YANDEX_DIALOGS_CALLBACK_BASE}/{self._skill_id}/callback/state"
-            auth_header = {"Authorization": f"OAuth {self._skill_token.get_secret()}"}
+            auth_header = {"Authorization": f"OAuth {skill_token.get_secret()}"}
 
             self._state_notifier = StateNotifier(
                 mass=self.mass,
@@ -260,10 +265,18 @@ class YandexSmartHomePlugin(PluginProvider):
             )
             await self._state_notifier.start()
         else:
+            missing = []
+            if not has_skill_id:
+                missing.append("Skill ID")
+            if not has_skill_token:
+                missing.append("Skill OAuth Token")
             self.logger.info(
                 "Direct mode: HTTP routes registered, but state notifier is "
-                "idle (no skill_id/skill_token yet). Run 'Create Smart Home "
-                "skill' in the plugin settings to complete setup."
+                "idle (missing: %s). Open the plugin settings: 'Auto-create "
+                "Smart Home skill' fills the Skill ID for you, then open the "
+                "OAuth-token URL shown in the form, approve access, and paste "
+                "the resulting access_token into 'Skill OAuth Token'.",
+                " + ".join(missing),
             )
 
         self.logger.info("Direct connection mode started")

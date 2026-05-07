@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +14,10 @@ import pytest
 # Use mock enums from conftest
 from music_assistant_models.enums import EventType, PlaybackState
 
-from music_assistant.providers.yandex_smarthome.notifier import StateNotifier
+from music_assistant.providers.yandex_smarthome.notifier import (
+    StateNotifier,
+    _CallbackErrorAlreadyLogged,
+)
 
 
 @dataclass
@@ -420,6 +424,69 @@ class TestStateNotifierCloudPlus:
         session.post.assert_called_once()
         # Player IDs should be re-queued after failure
         assert "p1" in notifier._dirty_player_ids
+
+    @pytest.mark.asyncio
+    async def test_http_5xx_dedupe_warns_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Repeated HTTP 5xx logs WARNING once, then DEBUG on retries."""
+        mock_resp = AsyncMock()
+        mock_resp.status = 500
+        mock_resp.text = AsyncMock(return_value="Internal Server Error")
+
+        session = MagicMock(spec=aiohttp.ClientSession)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        session.post.return_value = ctx
+
+        player = MockPlayer(player_id="p1")
+        mass = _make_mass([player])
+        mass.players.get_player = MagicMock(return_value=player)
+        notifier = _make_notifier(mass=mass, session=session)
+
+        caplog.set_level(logging.DEBUG, logger=notifier._logger.name)
+
+        # First failure → WARNING
+        with pytest.raises(_CallbackErrorAlreadyLogged):
+            await notifier._send_state_callback(
+                [MagicMock()]  # devices payload — content irrelevant for this test
+            )
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "HTTP 500" in warnings[0].message
+
+        # Second failure with same fingerprint → DEBUG, no new WARNING
+        caplog.clear()
+        with pytest.raises(_CallbackErrorAlreadyLogged):
+            await notifier._send_state_callback([MagicMock()])
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert warnings == []
+        assert any("still failing" in r.message for r in debugs)
+
+    @pytest.mark.asyncio
+    async def test_recovery_logs_info_and_clears_fingerprint(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A successful callback after a failure logs INFO and resets state."""
+        # Pre-set the fingerprint to simulate prior failure
+        mass = _make_mass()
+        session = MagicMock(spec=aiohttp.ClientSession)
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        session.post.return_value = ctx
+
+        notifier = _make_notifier(mass=mass, session=session)
+        notifier._last_error_fingerprint = "http_500"
+
+        caplog.set_level(logging.INFO, logger=notifier._logger.name)
+        await notifier._send_state_callback([MagicMock()])
+
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("recovered" in r.message for r in infos)
+        assert notifier._last_error_fingerprint is None
 
     @pytest.mark.asyncio
     async def test_discovery_url_cloud_plus(self) -> None:

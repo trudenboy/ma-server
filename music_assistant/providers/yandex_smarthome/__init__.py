@@ -64,6 +64,7 @@ from .constants import (
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
     MAX_INPUT_SOURCES,
+    YANDEX_OAUTH_URL,
 )
 from .ma_authenticator import make_authenticator
 from .playlists import fetch_playlist_options
@@ -114,6 +115,27 @@ async def setup(
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
     return YandexSmartHomePlugin(mass, manifest, config, SUPPORTED_FEATURES)
+
+
+def _is_skill_token_set(
+    mass: MusicAssistant,
+    instance_id: str | None,
+    values: dict[str, ConfigValueType],
+) -> bool:
+    """Return True if a non-empty Skill OAuth token is persisted or in-flight.
+
+    The token is a SECURE_STRING — the frontend doesn't echo it back into
+    ``values`` on re-open. Prefer the persisted provider-config value; fall
+    back to ``values`` for the very first save round-trip when nothing is
+    persisted yet.
+    """
+    if instance_id:
+        prov = mass.get_provider(instance_id)
+        if prov and prov.config:
+            saved = prov.config.get_value(CONF_SKILL_TOKEN)
+            if saved:
+                return True
+    return bool(values.get(CONF_SKILL_TOKEN))
 
 
 def _resolve_direct_client_secret(
@@ -426,14 +448,18 @@ async def get_config_entries(
         ),
     ]
 
+    skill_token_set = _is_skill_token_set(mass, instance_id, values)
+
     if is_cloud:
         entries.extend(_cloud_mode_entries(label_text, otp_code, is_registered))
     elif is_cloud_plus:
         entries.extend(
-            _cloud_plus_mode_entries(label_text, otp_code, is_registered, values, artifacts)
+            _cloud_plus_mode_entries(
+                label_text, otp_code, is_registered, values, artifacts, skill_token_set
+            )
         )
     elif is_direct:
-        entries.extend(_direct_mode_entries(mass, instance_id, values, artifacts))
+        entries.extend(_direct_mode_entries(mass, instance_id, values, artifacts, skill_token_set))
 
     entries.extend(_common_tail_entries(player_options, playlist_options, values))
     return tuple(entries)
@@ -442,16 +468,34 @@ async def get_config_entries(
 def _build_auto_create_status(
     artifacts: SkillCreationArtifacts,
     skill_id_already_set: bool,
+    *,
+    skill_token_set: bool = True,
 ) -> tuple[str, str]:
     """Return (status_label, action_button_label) based on artifacts state.
 
     The action button label flips based on what makes sense to do next:
     fresh attempt → 'Create…', resumable failure → 'Retry…',
     in-progress → 'Continue…', success → 'Re-create…'.
+
+    ``skill_token_set`` lets the success-state label nudge the user to paste
+    the OAuth token next — the auto-create pipeline only fills Skill ID; the
+    token comes from a separate OAuth flow (oauth.yandex.ru/authorize) that
+    the user does themselves via the help-link icon on the Skill OAuth Token
+    field.
     """
     state = artifacts.state
     if state == SkillCreationState.DONE and (artifacts.skill_id or skill_id_already_set):
         skill_id = artifacts.skill_id or "<saved>"
+        if not skill_token_set:
+            return (
+                f"✅ Smart Home skill registered (skill_id={skill_id}). "
+                "**Next step:** click the link icon next to *Skill OAuth "
+                "Token* below to open the Yandex OAuth page, approve access, "
+                "and paste the access_token value from the resulting URL "
+                "fragment into the field. State callbacks won't work until "
+                "this is done.",
+                "Re-create skill",
+            )
         return (
             f"✅ Smart Home skill registered (skill_id={skill_id}). "
             "Click 'Re-create' below to provision a fresh skill in your "
@@ -497,10 +541,13 @@ def _auto_create_entries(
     artifacts: SkillCreationArtifacts,
     *,
     skill_id_already_set: bool,
+    skill_token_set: bool,
     depends_on_value: str,
 ) -> list[ConfigEntry]:
     """Auto-create button + state-aware status label, gated by connection_type."""
-    status_text, button_label = _build_auto_create_status(artifacts, skill_id_already_set)
+    status_text, button_label = _build_auto_create_status(
+        artifacts, skill_id_already_set, skill_token_set=skill_token_set
+    )
     return [
         ConfigEntry(
             key=f"label_auto_create_status_{depends_on_value}",
@@ -588,6 +635,7 @@ def _cloud_plus_mode_entries(
     is_registered: bool,
     values: dict[str, ConfigValueType],
     artifacts: SkillCreationArtifacts,
+    skill_token_set: bool,
 ) -> list[ConfigEntry]:
     """Cloud Plus: register + auto-create or manual skill_id/skill_token."""
     skill_id_set = bool(values.get(CONF_SKILL_ID))
@@ -638,6 +686,7 @@ def _cloud_plus_mode_entries(
         *_auto_create_entries(
             artifacts,
             skill_id_already_set=skill_id_set,
+            skill_token_set=skill_token_set,
             depends_on_value=CONNECTION_TYPE_CLOUD_PLUS,
         ),
         ConfigEntry(
@@ -660,11 +709,14 @@ def _cloud_plus_mode_entries(
             type=ConfigEntryType.SECURE_STRING,
             label="Skill OAuth token",
             description=(
-                "OAuth token from "
-                "https://oauth.yandex.ru/authorize?response_type=token"
-                "&client_id=c473ca268cd749d3a8371351a8f2bcbd. "
-                "Used to push state callbacks to Yandex."
+                "Click the link icon next to this field to open the Yandex "
+                "OAuth page; approve access for 'Yandex.Dialogs', then copy "
+                "the access_token value from the resulting URL fragment "
+                "(after #access_token=) and paste it here. The token is "
+                "used to push state callbacks back to Yandex when MA "
+                "players change state."
             ),
+            help_link=YANDEX_OAUTH_URL,
             required=False,
             value=cast("str", values.get(CONF_SKILL_TOKEN)) if values else None,
             depends_on=CONF_CONNECTION_TYPE,
@@ -687,6 +739,7 @@ def _direct_mode_entries(
     instance_id: str | None,
     values: dict[str, ConfigValueType],
     artifacts: SkillCreationArtifacts,
+    skill_token_set: bool,
 ) -> list[ConfigEntry]:
     """Direct mode: HTTPS callback URL + auto-create or manual skill_id/skill_token."""
     direct_secret = _resolve_direct_client_secret(mass, instance_id, values)
@@ -737,6 +790,7 @@ def _direct_mode_entries(
         *_auto_create_entries(
             artifacts,
             skill_id_already_set=skill_id_set,
+            skill_token_set=skill_token_set,
             depends_on_value=CONNECTION_TYPE_DIRECT,
         ),
         ConfigEntry(
@@ -758,10 +812,14 @@ def _direct_mode_entries(
             type=ConfigEntryType.SECURE_STRING,
             label="Skill OAuth token",
             description=(
-                "OAuth token from "
-                "https://oauth.yandex.ru/authorize?response_type=token"
-                "&client_id=c473ca268cd749d3a8371351a8f2bcbd."
+                "Click the link icon next to this field to open the Yandex "
+                "OAuth page; approve access for 'Yandex.Dialogs', then copy "
+                "the access_token value from the resulting URL fragment "
+                "(after #access_token=) and paste it here. The token is "
+                "used to push state callbacks back to Yandex when MA "
+                "players change state."
             ),
+            help_link=YANDEX_OAUTH_URL,
             required=False,
             value=cast("str", values.get(CONF_SKILL_TOKEN)) if values else None,
             depends_on=CONF_CONNECTION_TYPE,

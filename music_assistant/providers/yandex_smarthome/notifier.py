@@ -37,6 +37,15 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+class _CallbackErrorAlreadyLogged(RuntimeError):
+    """Sentinel for state-callback errors that have already been logged.
+
+    Raised by ``_send_state_callback`` after dedupe-aware logging so the
+    outer exception handler can re-queue (via ``_flush_pending``) without
+    emitting a second log line.
+    """
+
+
 class StateNotifier:
     """Watches MA player events and reports state changes to Yandex."""
 
@@ -67,12 +76,20 @@ class StateNotifier:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._unsub: Callable[[], None] | None = None
 
-        # Track UNKNOWN_USER state — Yandex returns this until the user
-        # has linked the skill in the Yandex Smart Home / Alice mobile
-        # app via OAuth. We surface the first occurrence as a clear
-        # WARNING with instructions and then silence further errors at
-        # debug level so logs don't flood while linking is in progress.
-        self._unknown_user_warned: bool = False
+        # Dedupe state-callback errors by fingerprint. Yandex's backend
+        # returns transient HTTP 5xx for ~1-2 minutes after a freshly
+        # created skill (CDN warmup), then 400 + UNKNOWN_USER until the
+        # user links the skill in the mobile app. Without dedupe each
+        # 1 s flush logs a full traceback — flooding the log. First
+        # occurrence per fingerprint logs as follows:
+        #   - UNKNOWN_USER, HTTP 5xx → WARNING (expected first-run state,
+        #     no traceback — see _emit_callback_error)
+        #   - transport / unexpected errors → ERROR + traceback (real
+        #     bugs worth diagnostic detail — see outer except)
+        # Repeats with the same fingerprint drop to DEBUG until a
+        # different error class arrives or a successful callback resets
+        # the fingerprint (which then logs an INFO recovery line).
+        self._last_error_fingerprint: str | None = None
 
     async def start(self) -> None:
         """Subscribe to player events and start background tasks."""
@@ -191,14 +208,32 @@ class StateNotifier:
     # State reporting
     # -----------------------------------------------------------------------
 
+    def _emit_callback_error(self, fingerprint: str, warn_message: str) -> None:
+        """Log a state-callback error once per fingerprint, then DEBUG.
+
+        Different fingerprint classes (UNKNOWN_USER, HTTP 5xx, transport
+        failures) each emit a single WARNING the first time they occur,
+        then drop to DEBUG until a different error class arrives or a
+        successful callback resets the fingerprint.
+        """
+        if self._last_error_fingerprint == fingerprint:
+            self._logger.debug("State callback still failing (%s)", fingerprint)
+            return
+        self._last_error_fingerprint = fingerprint
+        self._logger.warning("%s", warn_message)
+
     async def _send_state_callback(self, devices: list[DeviceState]) -> None:
         """POST state callback to Yandex.
 
-        Yandex returns ``UNKNOWN_USER`` (HTTP 400) until the user has
-        linked the skill in the Yandex Alice / Smart Home app. That is a
-        normal first-run state, not a code bug — we emit one WARNING with
-        linking instructions, then quiet down to debug level so logs
-        don't flood while linking is in progress.
+        Yandex's callback endpoint can fail three ways: HTTP 5xx while
+        the skill propagates through their CDN, HTTP 400 + UNKNOWN_USER
+        until the user links the skill in the mobile app, and
+        transport-level errors during network issues. All three are
+        deduped via ``_last_error_fingerprint`` so each class only logs
+        once per "episode" — UNKNOWN_USER and 5xx at WARNING (expected
+        first-run states), transport / unexpected errors at ERROR with
+        traceback (real bugs worth diagnostic detail). Repeats drop to
+        DEBUG until something changes.
         """
         payload = CallbackRequest(
             ts=time.time(),
@@ -211,41 +246,63 @@ class StateNotifier:
                 headers=self._auth_header,
             ) as resp:
                 if resp.status in (200, 202):
-                    if self._unknown_user_warned:
+                    if self._last_error_fingerprint is not None:
                         self._logger.info(
-                            "State callback succeeded — Yandex now recognizes the user "
-                            "(account linking complete)"
+                            "State callback recovered (was failing with %s)",
+                            self._last_error_fingerprint,
                         )
-                        self._unknown_user_warned = False
+                        self._last_error_fingerprint = None
                     self._logger.debug("State callback sent: %d device(s)", len(devices))
                     return
 
                 body = await resp.text()
                 if resp.status == 400 and "UNKNOWN_USER" in body:
-                    if not self._unknown_user_warned:
-                        self._logger.warning(
-                            "Yandex returned UNKNOWN_USER for state callback — this means "
-                            "the skill has not been linked to a Yandex account yet. "
-                            "Open https://yandex.ru/quasar/iot or the «Дом с Алисой» app, "  # noqa: RUF001
-                            "find the skill in Devices → +, and tap «Связать аккаунт». "
-                            "State callback errors will be suppressed at debug level "
-                            "until linking succeeds."
-                        )
-                        self._unknown_user_warned = True
-                    else:
-                        self._logger.debug("State callback still UNKNOWN_USER (account not linked)")
+                    self._emit_callback_error(
+                        "unknown_user",
+                        "Yandex returned UNKNOWN_USER for state callback — the skill is "
+                        "not yet linked to a Yandex account. Open "
+                        "https://yandex.ru/quasar/iot or the «Дом с Алисой» app, find "  # noqa: RUF001
+                        "the skill in Devices → +, and tap «Связать аккаунт». Further "
+                        "callback errors will be suppressed at debug level until linking "
+                        "succeeds.",
+                    )
                     return  # silent — not a real error, don't raise
+
+                if 500 <= resp.status < 600:
+                    # Transient Yandex backend issue — common for ~1-2 min
+                    # after a freshly created skill while CDN propagates.
+                    # Dedupe the WARNING but still raise so _flush_pending
+                    # re-queues the dirty players for the next attempt.
+                    self._emit_callback_error(
+                        f"http_{resp.status}",
+                        f"State callback failed with HTTP {resp.status} — Yandex backend "
+                        "may be propagating a freshly created skill. Further callback "
+                        "errors will be suppressed at debug level until the next "
+                        f"successful callback. Body: {body[:200]}",
+                    )
+                    raise _CallbackErrorAlreadyLogged(
+                        f"State callback failed with HTTP {resp.status}"
+                    )
 
                 raise RuntimeError(f"State callback failed with HTTP {resp.status}: {body[:200]}")
         except asyncio.CancelledError:
             # Cooperative cancellation must propagate untouched.
             raise
-        except Exception:
-            # Includes RuntimeError above + transport-level errors
-            # (aiohttp.ClientError, DNS resolution failures, connection
-            # resets, etc.). Caller (_flush_pending) re-queues the dirty
-            # players for the next flush.
-            self._logger.exception("State callback error")
+        except _CallbackErrorAlreadyLogged:
+            # Already deduped via _emit_callback_error above — just propagate
+            # so _flush_pending re-queues without a second log entry.
+            raise
+        except Exception as exc:
+            # Transport-level errors (aiohttp.ClientError, DNS resolution
+            # failures, connection resets, etc.) plus the catch-all RuntimeError
+            # for non-5xx HTTP failures. Dedupe by exception class name so a
+            # repeat of the same transport failure doesn't flood the log.
+            fingerprint = type(exc).__name__
+            if self._last_error_fingerprint == fingerprint:
+                self._logger.debug("State callback still failing (%s)", fingerprint)
+            else:
+                self._last_error_fingerprint = fingerprint
+                self._logger.exception("State callback error")
             raise
 
     async def _report_all_states(self) -> None:
