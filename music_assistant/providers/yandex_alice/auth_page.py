@@ -302,12 +302,34 @@ def register_device_code_route(
     except Exception as exc:
         _LOGGER.warning("auth_page: failed to register device-code route: %r", exc)
         return ""
+    _LOGGER.debug(
+        "auth_page: registered device-code routes session_id=%r page=%s status=%s",
+        session_id,
+        page_path,
+        status_path,
+    )
 
     return page_url
 
 
+# Delay before tearing down `/device_code/{id}` + `/device_code/{id}/status`
+# routes after the auth flow completes. The popup HTML polls the status
+# endpoint every 2.5 s and closes itself ~800 ms after seeing
+# ``state=done``; a 30 s window covers tab-throttling, a sleeping laptop
+# rejoining the network, and the popup waking from a backgrounded tab.
+# Until the delay elapses the routes keep returning the terminal state
+# so a late poll still gets a clean answer instead of a 404.
+_UNREGISTER_DELAY_SECONDS = 30
+
+
 def unregister_device_code_route(mass: MusicAssistant, *, session_id: str) -> None:
-    """Tear down the device-code page + status routes for a session."""
+    """Tear down the device-code page + status routes for a session.
+
+    Synchronous removal — used at module unload / hard cleanup. The
+    auth-flow happy path uses :func:`schedule_unregister_device_code_route`
+    instead so the popup has a window to poll the terminal state and
+    close itself.
+    """
     if not session_id:
         return
     webserver = getattr(mass, "webserver", None)
@@ -316,6 +338,44 @@ def unregister_device_code_route(mass: MusicAssistant, *, session_id: str) -> No
     for path in (_device_code_page_path(session_id), _device_code_status_path(session_id)):
         with contextlib.suppress(Exception):
             webserver.unregister_dynamic_route(path, "GET")
+    _LOGGER.debug(
+        "auth_page: unregistered device-code routes session_id=%r",
+        session_id,
+    )
+
+
+def schedule_unregister_device_code_route(
+    mass: MusicAssistant,
+    *,
+    session_id: str,
+    delay: float = _UNREGISTER_DELAY_SECONDS,
+) -> None:
+    """Schedule a delayed unregister so the popup sees the terminal state.
+
+    The auth-flow ``finally`` block calls this instead of removing the
+    routes synchronously. While the delay elapses the ``state_provider``
+    closure keeps returning ``"done"`` / ``"failed"`` so the popup
+    polling the status endpoint still gets a clean reply and closes
+    itself naturally; only after the delay is the route torn down to
+    free memory.
+    """
+    if not session_id:
+        return
+
+    async def _delayed() -> None:
+        await asyncio.sleep(delay)
+        unregister_device_code_route(mass, session_id=session_id)
+
+    create_task = getattr(mass, "create_task", None)
+    if callable(create_task):
+        # MA's task tracker — preferred so the task is cancelled cleanly
+        # on shutdown and unhandled exceptions are logged.
+        create_task(_delayed())
+        return
+    # Fallback: detached asyncio task. Same effect, slightly noisier on
+    # event-loop shutdown but acceptable for unit-test scenarios where
+    # ``mass`` is a MagicMock.
+    asyncio.create_task(_delayed())
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +459,17 @@ async def perform_device_auth(
                     # Let the page pick up "done" and close itself.
                     await asyncio.sleep(_POST_AUTH_GRACE_SECONDS)
             finally:
-                unregister_device_code_route(mass, session_id=session_id)
+                # Don't unregister synchronously — the popup polls every
+                # 2.5 s and may need a few seconds more to land its next
+                # request after we've returned (slow client, throttled
+                # background tab, network hiccup). Schedule a delayed
+                # unregister so the terminal state stays reachable for
+                # 30 s; the popup sees `done` / `failed` and closes
+                # itself before the route disappears. The captured
+                # ``state["value"]`` is the same closure the routes
+                # already serve, so the answer is correct even after
+                # this function returns.
+                schedule_unregister_device_code_route(mass, session_id=session_id)
 
             x_token = creds.x_token.get_secret()
             display_login = (creds.display_login or "").strip()
