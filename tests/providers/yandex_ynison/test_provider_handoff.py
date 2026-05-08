@@ -356,7 +356,7 @@ class TestClearActivePlayerHandoffBookkeeping:
         provider._clear_active_player()
 
         assert provider._active_player_id is None
-        assert provider._handoff_current_track_id is None
+        assert provider._handoff_current_track_id is None  # type: ignore[unreachable]
         assert provider._handoff_completion_signaled_for is None
         assert provider._handoff_grace_until == 0.0
         assert provider._handoff_last_seen_state is None
@@ -680,12 +680,15 @@ class TestOnMaPlayerEvent:
         assert provider.mass.create_task.call_count == first_call_count
 
     def test_idle_queue_signals_completion_once(self) -> None:
-        """Queue going IDLE signals track completion once per track id."""
+        """Queue going IDLE near track end signals completion once per track id."""
         provider = self._setup()
         provider._handoff_current_track_id = "track-1"
-        # Queue has gone IDLE → completion signal expected
+        # Queue went IDLE near the end of the track (elapsed >= duration - 5s)
         queue = provider.mass.player_queues.get.return_value
         queue.state = PlaybackState.IDLE
+        queue.current_item = MagicMock()
+        queue.current_item.duration = 200  # seconds
+        queue.corrected_elapsed_time = 199.0  # 1s before end
 
         event = MagicMock()
         event.object_id = "player-A"
@@ -701,3 +704,72 @@ class TestOnMaPlayerEvent:
         # At least one new task may fire for the throttle-bypassed progress
         # update, but completion should not double-fire.
         assert provider.mass.create_task.call_count >= before
+
+    def test_idle_queue_at_pause_does_not_signal_completion(self) -> None:
+        """IDLE mid-track (e.g. pause on single-track queue) must NOT advance.
+
+        Reproduces the bug where pausing a single-track queue makes MA's
+        queue runner report IDLE — without the near-end guard we'd misread
+        that as natural end-of-track and cascade through the RADIO tail.
+        """
+        provider = self._setup()
+        provider._handoff_current_track_id = "track-1"
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.IDLE
+        queue.current_item = MagicMock()
+        queue.current_item.duration = 200
+        queue.corrected_elapsed_time = 30.0  # nowhere near the end
+
+        event = MagicMock()
+        event.object_id = "player-A"
+        provider._on_ma_player_event(event)
+
+        assert provider._handoff_completion_signaled_for is None
+
+    def test_idle_queue_with_unknown_duration_does_not_signal(self) -> None:
+        """Without a duration we can't tell pause from end — be conservative."""
+        provider = self._setup()
+        provider._handoff_current_track_id = "track-1"
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.IDLE
+        queue.current_item = MagicMock()
+        queue.current_item.duration = 0  # unknown
+        queue.corrected_elapsed_time = 50.0
+
+        event = MagicMock()
+        event.object_id = "player-A"
+        provider._on_ma_player_event(event)
+
+        assert provider._handoff_completion_signaled_for is None
+
+    def test_idle_queue_without_current_item_does_not_signal(self) -> None:
+        """current_item=None (cleared queue) is not a completion signal."""
+        provider = self._setup()
+        provider._handoff_current_track_id = "track-1"
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.IDLE
+        queue.current_item = None
+        queue.corrected_elapsed_time = 50.0
+
+        event = MagicMock()
+        event.object_id = "player-A"
+        provider._on_ma_player_event(event)
+
+        assert provider._handoff_completion_signaled_for is None
+
+    def test_idle_short_track_is_treated_as_near_end(self) -> None:
+        """Tracks shorter than the 5s margin always treat IDLE as end-of-track."""
+        provider = self._setup()
+        provider._handoff_current_track_id = "track-1"
+        queue = provider.mass.player_queues.get.return_value
+        queue.state = PlaybackState.IDLE
+        queue.current_item = MagicMock()
+        queue.current_item.duration = 3  # 3-second track
+        queue.corrected_elapsed_time = 0.0  # margin makes threshold 0
+
+        event = MagicMock()
+        event.object_id = "player-A"
+        provider._on_ma_player_event(event)
+
+        # 3s track: threshold = max(0, 3-5) = 0 → any elapsed counts as end.
+        assert provider._handoff_completion_signaled_for == "track-1"

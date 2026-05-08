@@ -252,8 +252,8 @@ class TestYnisonClientParseState:
         client._parse_state({"player_state": {"status": {"paused": True}}})
         assert client.state.active_device_id == "old-device"
 
-    def test_echo_flag_true_on_own_authored_queue(self, client: YnisonClient) -> None:
-        """player_queue.version.device_id == own → last_update_is_echo True."""
+    def test_echo_flag_true_only_when_both_authors_ours(self, client: YnisonClient) -> None:
+        """AND-logic (1.9.1): both queue.version AND status.version must be ours."""
         client._parse_state(
             {
                 "player_state": {
@@ -266,13 +266,91 @@ class TestYnisonClientParseState:
                             "timestamp_ms": "0",
                         },
                     },
+                    "status": {
+                        "paused": False,
+                        "progress_ms": "1000",
+                        "duration_ms": "5000",
+                        "version": {
+                            "device_id": "test-device-id",
+                            "version": "43",
+                            "timestamp_ms": "0",
+                        },
+                    },
                 },
             }
         )
         assert client.state.last_update_is_echo is True
 
+    def test_echo_flag_false_when_only_queue_is_ours(self, client: YnisonClient) -> None:
+        """Status authored by peer → NOT echo, even if queue.version is ours.
+
+        Regression for the OR-logic bug: a peer toggling pause produced
+        status.version=peer + our stale queue.version=ours, which the old
+        OR-rule wrongly classified as echo and silenced the user action.
+        """
+        client._parse_state(
+            {
+                "player_state": {
+                    "player_queue": {
+                        "playable_list": [{"playable_id": "t1"}],
+                        "current_playable_index": 0,
+                        "version": {
+                            "device_id": "test-device-id",
+                            "version": "42",
+                            "timestamp_ms": "0",
+                        },
+                    },
+                    "status": {
+                        "paused": True,
+                        "progress_ms": "1000",
+                        "duration_ms": "5000",
+                        "version": {
+                            "device_id": "peer-device",
+                            "version": "44",
+                            "timestamp_ms": "0",
+                        },
+                    },
+                },
+            }
+        )
+        assert client.state.last_update_is_echo is False
+
+    def test_echo_flag_false_when_only_status_is_ours(self, client: YnisonClient) -> None:
+        """Queue authored by peer → NOT echo, even if status.version is ours.
+
+        The mirror case: our heartbeat just stamped status.version=ours, but
+        the peer changed the queue. Under AND-logic the peer change is not
+        silenced.
+        """
+        client._parse_state(
+            {
+                "player_state": {
+                    "player_queue": {
+                        "playable_list": [{"playable_id": "new-track"}],
+                        "current_playable_index": 0,
+                        "version": {
+                            "device_id": "peer-device",
+                            "version": "100",
+                            "timestamp_ms": "0",
+                        },
+                    },
+                    "status": {
+                        "paused": False,
+                        "progress_ms": "0",
+                        "duration_ms": "5000",
+                        "version": {
+                            "device_id": "test-device-id",
+                            "version": "99",
+                            "timestamp_ms": "0",
+                        },
+                    },
+                },
+            }
+        )
+        assert client.state.last_update_is_echo is False
+
     def test_echo_flag_false_on_foreign_author(self, client: YnisonClient) -> None:
-        """player_queue.version.device_id != own → not an echo."""
+        """Both authors are peer → not an echo."""
         client._parse_state(
             {
                 "player_state": {
@@ -291,7 +369,12 @@ class TestYnisonClientParseState:
         assert client.state.last_update_is_echo is False
 
     def test_echo_flag_false_when_version_missing(self, client: YnisonClient) -> None:
-        """No version block in player_queue → not an echo (safe default)."""
+        """No version block at all → not an echo (safe default).
+
+        AND-logic treats missing version-block as "not ours" — matches the
+        previous safe default. Without a version-block we can't claim
+        ownership, so we let the update reach handlers.
+        """
         client._parse_state(
             {
                 "player_state": {
@@ -306,26 +389,6 @@ class TestYnisonClientParseState:
         client.state.last_update_is_echo = True  # sticky from a prior update
         client._parse_state({"active_device_id_optional": "some-device"})
         assert client.state.last_update_is_echo is False
-
-    def test_echo_flag_true_on_own_authored_status(self, client: YnisonClient) -> None:
-        """status.version.device_id == own → echo True even without player_queue version."""
-        client._parse_state(
-            {
-                "player_state": {
-                    "status": {
-                        "paused": False,
-                        "progress_ms": "1000",
-                        "duration_ms": "5000",
-                        "version": {
-                            "device_id": "test-device-id",
-                            "version": "42",
-                            "timestamp_ms": "0",
-                        },
-                    },
-                },
-            }
-        )
-        assert client.state.last_update_is_echo is True
 
     def test_parse_state_coerces_int_timestamps_to_strings(self, client: YnisonClient) -> None:
         """Inbound int timestamps are stringified so outbound echoes stay safe.

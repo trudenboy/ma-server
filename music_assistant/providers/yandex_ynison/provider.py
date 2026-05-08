@@ -229,6 +229,10 @@ class YandexYnisonProvider(PluginProvider):
         # (P10: bypass throttle on play/pause/idle changes for low-latency
         # forwarding from MA UI to the Yandex Music app).
         self._handoff_last_seen_state: PlaybackState | None = None
+        # Last position MA queue reported while PLAYING. Used to recover the
+        # correct seek offset on IDLE-resume when Ynison's `progress_ms` echo
+        # has not caught up yet (e.g. user mashed pause/play in the app).
+        self._handoff_last_playing_elapsed_ms: int = 0
         # Independent heartbeat task — guards against Ynison re-balancing the
         # active device when MA queue events are sparse (DLNA/UPnP).
         self._handoff_heartbeat_task: asyncio.Task[None] | None = None
@@ -768,8 +772,12 @@ class YandexYnisonProvider(PluginProvider):
             else:
                 # Our device but paused — stop player, keep association
                 await self._pause_playback()
-        elif self._source_details.in_use_by:
-            # Active device switched away — fully release player
+        elif self._source_details.in_use_by or (self._is_handoff and self._active_player_id):
+            # Active device switched away — fully release player.
+            # In handoff mode `_source_details.in_use_by` is always None
+            # (no AUDIO_SOURCE), so we also check `_active_player_id` —
+            # otherwise the heartbeat keeps pushing stale progress to
+            # Ynison long after another device took over.
             self._clear_active_player()
 
     async def _activate_playback(self, state: YnisonState) -> None:  # noqa: PLR0915
@@ -1113,6 +1121,7 @@ class YandexYnisonProvider(PluginProvider):
         self._handoff_grace_until = 0.0
         self._handoff_last_seen_state = None
         self._handoff_last_progress_sync_mono = 0.0
+        self._handoff_last_playing_elapsed_ms = 0
 
         if prev_player_id:
             self.logger.debug(
@@ -1398,6 +1407,8 @@ class YandexYnisonProvider(PluginProvider):
             # mutated below, and a few branches need to know the from-id.
             prev_track_id = self._handoff_current_track_id
             self._active_player_id = target_player_id
+            # Discard the elapsed snapshot — it belongs to the previous track.
+            self._handoff_last_playing_elapsed_ms = 0
 
             # Track whether we successfully owned the new track in MA, so the
             # heartbeat (P1) only kicks in when we have something coherent to
@@ -1474,10 +1485,64 @@ class YandexYnisonProvider(PluginProvider):
             return
 
         # Same-track path: drift, pause/resume sync.
-        if state.last_update_is_echo:
-            return  # ignore our own rebroadcasts
+        # NOTE: we do NOT short-circuit on `state.last_update_is_echo` here.
+        # Echo detection compares `version.device_id` only, so a peer
+        # pause→play that lands while our heartbeat still owns the latest
+        # version block is treated as an echo — and that mistakenly muted
+        # the resume path. Echo skip is applied only inside the drift-seek
+        # block below, where it actually matters.
 
         queue = self.mass.player_queues.get(target_player_id)
+
+        # IDLE-resume: pausing a single-track queue lands MA's queue runner in
+        # IDLE rather than PAUSED. When Ynison says "playing the same track",
+        # neither the drift-seek nor the resume-from-PAUSED branch revives the
+        # queue — `play()` does nothing on an IDLE queue. Re-issue play_media
+        # with the expected URI so MA spins the stream back up; then let the
+        # drift detector below re-align the position to whatever Ynison
+        # reported.
+        if (
+            queue is not None
+            and queue.state == PlaybackState.IDLE
+            and queue.current_item is not None
+            and getattr(queue.current_item, "uri", None) == expected_uri
+        ):
+            # Debounce: if we issued play_media very recently (grace window
+            # still open), don't fire another REPLACE — MA is still spinning
+            # up the stream and queue.state == IDLE just means it hasn't
+            # transitioned to PLAYING yet. Without this guard a stream of
+            # paused=False echoes (after our heartbeat) would re-issue every
+            # WS round-trip and the player would never settle.
+            if time.monotonic() < self._handoff_grace_until:
+                return
+
+            # Prefer the elapsed snapshot we recorded while the queue was
+            # genuinely PLAYING — Ynison's `progress_ms` echo lags behind a
+            # fast pause/play toggle in the app and would otherwise restart
+            # the track at 0. Fall back to Ynison's reported position only
+            # if we never saw a PLAYING tick.
+            resume_ms = self._handoff_last_playing_elapsed_ms or state.progress_ms
+            self.logger.info(
+                "Handoff: queue IDLE on same URI — re-issuing play_media to resume "
+                "(seek=%dms, source=%s)",
+                resume_ms,
+                "ma_snapshot" if self._handoff_last_playing_elapsed_ms else "ynison",
+            )
+            try:
+                await self.mass.player_queues.play_media(
+                    target_player_id, expected_uri, option=QueueOption.REPLACE
+                )
+                if resume_ms >= 1000:
+                    # Hand the requested position right after REPLACE so MA
+                    # doesn't waste audio decoding from 0.
+                    await self.mass.player_queues.seek(target_player_id, resume_ms // 1000)
+            except Exception:
+                self.logger.exception(
+                    "Handoff IDLE-resume play_media failed on %s", target_player_id
+                )
+            self._handoff_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
+            return  # let the next state-update drive normal flow
+
         try:
             our_pos_ms = int(queue.corrected_elapsed_time * 1000) if queue is not None else 0
         except Exception:
@@ -1495,18 +1560,24 @@ class YandexYnisonProvider(PluginProvider):
         if in_grace and not queue_progressed:
             return
 
-        drift_ms = abs(state.progress_ms - our_pos_ms)
-        if drift_ms > 3000:
-            self.logger.info(
-                "Handoff: seek detected on %s (Ynison=%dms, MA=%dms)",
-                new_track,
-                state.progress_ms,
-                our_pos_ms,
-            )
-            try:
-                await self.mass.player_queues.seek(target_player_id, state.progress_ms // 1000)
-            except Exception:
-                self.logger.exception("Handoff seek failed on %s", target_player_id)
+        # Drift detection: do NOT trust echoes here — `version.device_id`-based
+        # echo means our own heartbeat just bounced, but that doesn't reflect
+        # a real seek. The IDLE-resume / PAUSED-resume branches above must
+        # still run regardless of echo, which is why echo skip is local to
+        # this drift block only.
+        if not state.last_update_is_echo:
+            drift_ms = abs(state.progress_ms - our_pos_ms)
+            if drift_ms > 3000:
+                self.logger.info(
+                    "Handoff: seek detected on %s (Ynison=%dms, MA=%dms)",
+                    new_track,
+                    state.progress_ms,
+                    our_pos_ms,
+                )
+                try:
+                    await self.mass.player_queues.seek(target_player_id, state.progress_ms // 1000)
+                except Exception:
+                    self.logger.exception("Handoff seek failed on %s", target_player_id)
 
         # If MA's queue paused while Ynison says playing — resume.
         try:
@@ -1582,7 +1653,11 @@ class YandexYnisonProvider(PluginProvider):
                 duration_ms = self._best_duration_ms()
                 if duration_ms <= 0 and queue.current_item is not None:
                     duration_ms = (queue.current_item.duration or 0) * 1000
-                is_paused = queue.state == PlaybackState.PAUSED
+                # Treat anything other than PLAYING as paused — single-track
+                # MA queues land in IDLE on pause, not PAUSED, and reporting
+                # paused=False in that case made the Yandex Music app think
+                # we kept playing while the player was actually silent.
+                is_paused = queue.state != PlaybackState.PLAYING
                 self.logger.debug(
                     "Handoff heartbeat: tick player=%s elapsed=%dms paused=%s",
                     target_player_id,
@@ -1632,7 +1707,15 @@ class YandexYnisonProvider(PluginProvider):
         if duration_ms <= 0 and queue.current_item is not None:
             duration_ms = (queue.current_item.duration or 0) * 1000
 
-        is_paused = queue.state == PlaybackState.PAUSED
+        # Snapshot the elapsed position whenever the queue is genuinely PLAYING.
+        # On IDLE-resume we'd rather seek back to this remembered offset than
+        # trust Ynison's `progress_ms` echo, which lags behind a fast pause/play
+        # toggle and would otherwise restart the track at 0.
+        if queue.state == PlaybackState.PLAYING and elapsed_ms > 0:
+            self._handoff_last_playing_elapsed_ms = elapsed_ms
+
+        # See heartbeat: anything other than PLAYING is reported as paused.
+        is_paused = queue.state != PlaybackState.PLAYING
         self.mass.create_task(
             self._send_progress_to_ynison(
                 progress_ms=elapsed_ms,
@@ -1644,10 +1727,21 @@ class YandexYnisonProvider(PluginProvider):
         # Detect end-of-track: queue went IDLE while we still expected a track
         # to be playing. Tell Ynison so it can advance current_playable_index
         # via _signal_track_completion (which already handles RADIO refill).
+        #
+        # Important: a single-track queue (which our REPLACE always creates)
+        # can transition to IDLE for reasons OTHER than natural end-of-track —
+        # most notably when MA pauses the track. Because the queue has no
+        # upcoming items, the queue runner reports IDLE shortly after pause.
+        # Without an end-of-track guard, we'd misread that as completion and
+        # trigger Ynison to advance, which then cascades through the RADIO
+        # tail. Gate the signal on `corrected_elapsed_time >= duration - X`
+        # so only a genuine end-of-track triggers it; manual pauses and stops
+        # leave the marker untouched until the next play_media or restart.
         if (
             queue.state == PlaybackState.IDLE
             and self._handoff_current_track_id
             and self._handoff_completion_signaled_for != self._handoff_current_track_id
+            and self._is_at_natural_end_of_track(queue)
         ):
             self._handoff_completion_signaled_for = self._handoff_current_track_id
             self.logger.info(
@@ -1655,6 +1749,29 @@ class YandexYnisonProvider(PluginProvider):
                 self._handoff_current_track_id,
             )
             self.mass.create_task(self._signal_track_completion())
+
+    @staticmethod
+    def _is_at_natural_end_of_track(queue: Any) -> bool:
+        """Return True iff the queue's elapsed time is close to track duration.
+
+        Used to distinguish a queue that went IDLE because the track played
+        out (advance needed) from one that went IDLE due to pause/stop on a
+        single-track queue (no advance needed). Conservative: when duration
+        is unknown we return False — better to leave the user paused than to
+        cascade through the RADIO tail.
+        """
+        current_item = getattr(queue, "current_item", None)
+        if current_item is None:
+            return False
+        duration = getattr(current_item, "duration", None) or 0
+        if duration <= 0:
+            return False
+        elapsed = getattr(queue, "corrected_elapsed_time", 0.0) or 0.0
+        # 5s margin covers fade-out / silence at end-of-track plus reporting
+        # jitter from the player. Track shorter than 5s is treated as "always
+        # near end" — that's fine since pause-then-cascade on sub-5s tracks
+        # is essentially indistinguishable from end-of-track anyway.
+        return elapsed >= max(0.0, duration - 5.0)
 
     # ------------------------------------------------------------------
     # Playback control callbacks

@@ -617,14 +617,26 @@ class YnisonClient:
             # Echo detection via version.device_id: Ynison preserves the
             # `version` block we authored, so a broadcast whose version
             # author matches us is our own update round-tripping back.
-            # Check both player_queue and status so status-only echoes
-            # (e.g. of update_playing_status) are caught too.
+            #
+            # AND-logic (v1.9.1): we mark a state as echo only when BOTH
+            # player_queue.version and status.version were last authored by
+            # us. With OR-logic a peer queue change combined with our recent
+            # heartbeat (status.version=ours, queue.version=peer) was wrongly
+            # silenced as echo, eating legitimate user actions from the app.
+            # Trade-off: echoes where one block carries a peer's version (e.g.
+            # server-side stamps) now reach handlers — which is fine because
+            # downstream code (drift seek, _apply_*) already debounces and
+            # idempotency-checks those paths.
             own_id = self._device_info.device_id
             queue_author = (
                 (incoming_ps.get("player_queue") or {}).get("version", {}).get("device_id")
             )
             status_author = (incoming_ps.get("status") or {}).get("version", {}).get("device_id")
-            self.state.last_update_is_echo = own_id in (queue_author, status_author)
+            # Only mark as echo when BOTH blocks were last authored by us.
+            # Treat a missing version-block as "not ours" (None != own_id).
+            queue_is_ours = queue_author is not None and queue_author == own_id
+            status_is_ours = status_author is not None and status_author == own_id
+            self.state.last_update_is_echo = queue_is_ours and status_is_ours
         else:
             self.state.last_update_is_echo = False
         self.state.active_device_id = data.get(
