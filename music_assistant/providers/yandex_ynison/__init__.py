@@ -352,7 +352,6 @@ async def get_config_entries(  # noqa: PLR0915 — flow naturally returns ~12 Co
                 ConfigValueOption("Stream (recommended)", PLAYBACK_MODE_STREAM),
                 ConfigValueOption("Handoff (experimental)", PLAYBACK_MODE_HANDOFF),
             ],
-            advanced=True,
         ),
         ConfigEntry(
             key=CONF_HANDOFF_HEARTBEAT_INTERVAL,

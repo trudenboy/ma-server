@@ -943,17 +943,22 @@ class TestConnectState:
         with suppress(asyncio.CancelledError):
             await client._message_task
 
-    async def test_reconnect_sends_last_known_state(self, client: YnisonClient) -> None:
-        """On reconnect, send_full_state is called with the preserved player state."""
+    async def test_reconnect_sends_fresh_state_no_stale_replay(self, client: YnisonClient) -> None:
+        """v2.0: reconnect sends a fresh initial state — no stale replay.
+
+        Replaying the last known state (which after a heartbeat could carry
+        `paused=True`) caused the server to broadcast it back and trigger
+        an unintended pause on the still-running player.
+        """
         mock_ws = AsyncMock()
         mock_session = AsyncMock()
         mock_session.ws_connect = AsyncMock(return_value=mock_ws)
         client._session = mock_session
 
-        # Simulate prior connection: set flag and populate state
+        # Simulate prior connection with stale paused state cached.
         client._has_connected_once = True
         client.state.player_state = {
-            "status": {"paused": False, "progress_ms": 120000, "duration_ms": 300000},
+            "status": {"paused": True, "progress_ms": 120000, "duration_ms": 300000},
             "player_queue": {
                 "current_playable_index": 3,
                 "playable_list": [{"playable_id": "t1"}],
@@ -963,29 +968,28 @@ class TestConnectState:
         with patch.object(client, "send_full_state", new_callable=AsyncMock) as mock_sfs:
             await client._connect_state("host.yandex.net", "ticket", 42)
 
-        mock_sfs.assert_awaited_once_with(player_state=client.state.player_state)
+        # send_full_state must be called WITHOUT player_state — it falls
+        # back to a fresh _build_initial_state() internally.
+        mock_sfs.assert_awaited_once_with()
+        # Settle window armed for ~2 s.
+        assert client.in_post_reconnect_settle is True
         # Clean up
         assert client._message_task is not None
         client._message_task.cancel()
         with suppress(asyncio.CancelledError):
             await client._message_task
 
-    async def test_reconnect_empty_state_falls_back(self, client: YnisonClient) -> None:
-        """On reconnect with empty player_state, falls back to blank initial state."""
+    async def test_cold_start_does_not_arm_settle_window(self, client: YnisonClient) -> None:
+        """First-ever connect skips the settle window — nothing stale to swallow."""
         mock_ws = AsyncMock()
         mock_session = AsyncMock()
         mock_session.ws_connect = AsyncMock(return_value=mock_ws)
         client._session = mock_session
 
-        client._has_connected_once = True
-        client.state.player_state = {}  # empty — no prior state received
-
-        with patch.object(client, "send_full_state", new_callable=AsyncMock) as mock_sfs:
+        with patch.object(client, "send_full_state", new_callable=AsyncMock):
             await client._connect_state("host.yandex.net", "ticket", 42)
 
-        # Falls back to no-arg call (blank initial state)
-        mock_sfs.assert_awaited_once_with()
-        # Clean up
+        assert client.in_post_reconnect_settle is False
         assert client._message_task is not None
         client._message_task.cancel()
         with suppress(asyncio.CancelledError):
