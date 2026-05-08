@@ -1,4 +1,12 @@
-"""Tests for handoff playback mode."""
+# mypy: disable-error-code="attr-defined,method-assign"
+"""Tests for handoff playback mode.
+
+`mass` and `player_queues` are heavily mocked here via MagicMock —
+runtime attributes (`assert_awaited_once_with`, `return_value`,
+`call_args`, etc.) don't exist on the typed protocol. Disable the
+two relevant mypy error codes for the whole file rather than
+sprinkling per-line `type: ignore` annotations.
+"""
 
 from __future__ import annotations
 
