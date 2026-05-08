@@ -373,6 +373,8 @@ class AirPlayProvider(PlayerProvider):
                 # use a debounced reset to avoid race conditions where a quick
                 # prevent-playback=0 between duplicate prevent-playback=1 messages
                 # would reset the flag and allow the second message to act
+                # Cancel any pending prevent-playback action (transient =1/=0 pair).
+                self.mass.cancel_timer(f"prevent_playback_{player_id}")
                 if (stream := player.stream) and stream.prevent_playback:
                     self.mass.call_later(
                         5,
