@@ -44,6 +44,7 @@ applicable tiers via ``_yandex_response``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 import secrets
@@ -65,7 +66,7 @@ from .dialogs_control import (
     format_list_players,
     parse_control,
 )
-from .dialogs_grammar import parse_platform_intent
+from .dialogs_grammar import extract_trailing_player_hint, parse_platform_intent
 from .dialogs_nlu import (
     _VERB_RE,
     ParsedCommand,
@@ -707,6 +708,14 @@ class DialogsWebhookHandler:
         # is empty (no grammar declared or no match).
         platform = parse_platform_intent(nlu_intents)
         if isinstance(platform, ParsedControl):
+            # Yandex's static intent grammar can't enumerate the user's
+            # per-skill list of player names, so the "на <player>" suffix
+            # ("пауза на кухне") doesn't make it into the slots. Recover
+            # the hint from the raw command text and attach it here.
+            if platform.player_hint is None:
+                hint = extract_trailing_player_hint(command)
+                if hint:
+                    platform = dataclasses.replace(platform, player_hint=hint)
             self._logger.debug("Platform intent → control %r (skipping regex parser)", platform)
             return self._handle_control(
                 session=session,

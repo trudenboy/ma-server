@@ -346,7 +346,10 @@ class TestSuggestionButtons:
         body = {
             "meta": {"interfaces": {"screen": {}}},
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "пауза на кухне"},
+            "request": {
+                "command": "пауза на кухне",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -403,26 +406,44 @@ class TestPlatformIntentDispatch:
         # "не нашёл такую музыку" rather than "не понял команду".
         assert "не понял" not in body_out["response"]["text"].lower()
 
-    async def test_unrecognised_intent_falls_back_to_regex(self) -> None:
-        """Unknown form_name in intents → falls through to parse_control / parse_command."""
-        mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
-        mass.player_queues.pause = AsyncMock()
+    async def test_unrecognised_intent_falls_back_to_regex_for_transfer(self) -> None:
+        """Unknown form_name + a transfer phrase → regex parse_control catches it.
+
+        After v1.4.0 ``parse_control`` only handles ``transfer`` (the
+        per-user dynamic enum that can't fit a static intent grammar).
+        This is the documented fallback path — the platform-side
+        intent is unrecognised, so we drop into regex, and only the
+        transfer family is recognised there.
+        """
+        mass = _make_mass(
+            [
+                MockPlayer(player_id="p1", name="Кухня"),
+                MockPlayer(player_id="p2", name="Спальня"),
+            ]
+        )
+        mass.player_queues.transfer_queue = AsyncMock()
         handler = self._handler(mass)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
             "request": {
-                "command": "пауза",
-                # Unknown intent form_name — regex should pick it up instead.
+                "command": "переведи на спальню",
                 "nlu": {"intents": {"unknown.intent": {}}},
             },
+            "state": {"session": {"last_player_id": "p1"}},
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
-        # Regex parse_control caught "пауза" and dispatched.
-        mass.player_queues.pause.assert_awaited_once_with("p1")
+        mass.player_queues.transfer_queue.assert_awaited_once()
 
-    async def test_empty_intents_block_falls_back_to_regex(self) -> None:
-        """Empty `intents={}` (no grammar match) → regex parser still runs."""
+    async def test_empty_intents_block_falls_through_to_play_parser(self) -> None:
+        """Empty ``intents={}`` + non-transfer phrase → play parser runs.
+
+        After v1.4.0 the regex control parser only recognises
+        ``transfer``; a phrase like "следующая" with no platform-side
+        match no longer dispatches as control. The handler is expected
+        to treat it as a graceful fallback (the play search path
+        produces "не нашёл такую музыку: ...") rather than crashing.
+        """
         mass = _make_mass([MockPlayer(player_id="p1", name="Кухня")])
         mass.player_queues.next = AsyncMock()
         handler = self._handler(mass)
@@ -433,9 +454,12 @@ class TestPlatformIntentDispatch:
                 "nlu": {"intents": {}},
             },
         }
-        await handler._handle_webhook(_build_request(body))
+        resp = await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
-        mass.player_queues.next.assert_awaited_once_with("p1")
+        # Control wasn't dispatched (no platform intent + regex doesn't cover it).
+        mass.player_queues.next.assert_not_awaited()
+        # Handler responded gracefully (HTTP 200).
+        assert resp.status == 200
 
 
 @pytest.mark.asyncio
@@ -620,7 +644,10 @@ class TestVoiceContinuation:
         )
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "пауза на кухне"},
+            "request": {
+                "command": "пауза на кухне",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -639,7 +666,10 @@ class TestVoiceContinuation:
         )
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "стоп на кухне"},
+            "request": {
+                "command": "стоп на кухне",
+                "nlu": {"intents": {"control.stop": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -885,7 +915,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "пауза на кухне"},
+            "request": {
+                "command": "пауза на кухне",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -905,7 +938,16 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "громкость 50 на кухне"},
+            "request": {
+                "command": "громкость 50 на кухне",
+                "nlu": {
+                    "intents": {
+                        "control.volume_set": {
+                            "slots": {"level": {"type": "YANDEX.NUMBER", "value": 50}}
+                        }
+                    }
+                },
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -920,7 +962,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "пауза"},
+            "request": {
+                "command": "пауза",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
             "state": {"session": {"last_player_id": "p2"}},
         }
         resp = await handler._handle_webhook(_build_request(body))
@@ -934,7 +979,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "пауза на гостиной"},
+            "request": {
+                "command": "пауза на гостиной",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         assert resp.status == 200
@@ -969,7 +1017,10 @@ class TestControlCommandsIntegration:
                 "new": False,
                 "user": {"user_id": "u1"},
             },
-            "request": {"command": "забудь колонку"},
+            "request": {
+                "command": "забудь колонку",
+                "nlu": {"intents": {"control.forget_player": {}}},
+            },
             "state": {
                 "session": {"last_player_id": "p1"},
                 "application": {"last_player_id": "p1"},
@@ -1000,7 +1051,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "сколько колонок видишь"},
+            "request": {
+                "command": "сколько колонок видишь",
+                "nlu": {"intents": {"control.list_players": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         assert resp.status == 200
@@ -1029,7 +1083,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "какие колонки"},
+            "request": {
+                "command": "какие колонки",
+                "nlu": {"intents": {"control.list_players": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         body_out = _response_body(resp)
@@ -1054,7 +1111,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "пауза"},
+            "request": {
+                "command": "пауза",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         assert resp.status == 200
@@ -1069,7 +1129,12 @@ class TestControlCommandsIntegration:
     # -------------------------------------------------------------------
 
     async def test_now_playing_returns_track(self) -> None:
-        """'что играет на кухне' → reads queue.current_item.name."""
+        """'что играет на кухне' → reads queue.current_item.name.
+
+        Yandex pre-classifies "что играет" via control.now_playing intent;
+        the player_hint "кухне" is recovered from the trailing "на" suffix
+        of the raw command text.
+        """
         mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
         # Mock a queue with a current item.
         queue = MagicMock()
@@ -1079,7 +1144,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "что играет на кухне"},
+            "request": {
+                "command": "что играет на кухне",
+                "nlu": {"intents": {"control.now_playing": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         body_out = _response_body(resp)
@@ -1097,7 +1165,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "что играет на кухне"},
+            "request": {
+                "command": "что играет на кухне",
+                "nlu": {"intents": {"control.now_playing": {}}},
+            },
         }
         resp = await handler._handle_webhook(_build_request(body))
         body_out = _response_body(resp)
@@ -1109,7 +1180,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "перемешай на кухне"},
+            "request": {
+                "command": "перемешай на кухне",
+                "nlu": {"intents": {"control.shuffle_on": {}}},
+            },
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -1121,31 +1195,53 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "выключи перемешивание на кухне"},
+            "request": {
+                "command": "выключи перемешивание на кухне",
+                "nlu": {"intents": {"control.shuffle_off": {}}},
+            },
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
         mass.player_queues.set_shuffle.assert_awaited_once_with("p1", shuffle_enabled=False)
 
     async def test_repeat_one(self) -> None:
-        """'повтор песни на кухне' → set_repeat(p1, RepeatMode.ONE) — sync, not awaited."""
+        """'повтори песню на кухне' → set_repeat(p1, RepeatMode.ONE) — sync, not awaited."""
         mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "повтор песни на кухне"},
+            "request": {
+                "command": "повтори песню на кухне",
+                "nlu": {"intents": {"control.repeat_one": {}}},
+            },
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
         mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ONE)
 
     async def test_seek_forward_minute(self) -> None:
-        """'перемотай вперёд на 1 минуту на кухне' → skip(p1, 60)."""
+        """'перемотай вперёд на 1 минуту на кухне' → skip(p1, 60).
+
+        Yandex extracts amount=1 (YANDEX.NUMBER) and unit="minutes"
+        (custom time_unit entity); the runtime mapper multiplies by 60.
+        """
         mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "перемотай вперёд на 1 минуту на кухне"},
+            "request": {
+                "command": "перемотай вперёд на 1 минуту на кухне",
+                "nlu": {
+                    "intents": {
+                        "control.seek_forward": {
+                            "slots": {
+                                "amount": {"type": "YANDEX.NUMBER", "value": 1},
+                                "unit": {"type": "time_unit", "value": "minutes"},
+                            }
+                        }
+                    }
+                },
+            },
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -1157,7 +1253,19 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "перемотай назад на 30 секунд на кухне"},
+            "request": {
+                "command": "перемотай назад на 30 секунд на кухне",
+                "nlu": {
+                    "intents": {
+                        "control.seek_back": {
+                            "slots": {
+                                "amount": {"type": "YANDEX.NUMBER", "value": 30},
+                                "unit": {"type": "time_unit", "value": "seconds"},
+                            }
+                        }
+                    }
+                },
+            },
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -1169,7 +1277,10 @@ class TestControlCommandsIntegration:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "к началу на кухне"},
+            "request": {
+                "command": "к началу на кухне",
+                "nlu": {"intents": {"control.seek_start": {}}},
+            },
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
@@ -1486,7 +1597,10 @@ class TestDisambiguation:
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
             "session": {"skill_id": "skill-uuid-1", "session_id": "s1", "new": False},
-            "request": {"command": "пауза на кухне"},
+            "request": {
+                "command": "пауза на кухне",
+                "nlu": {"intents": {"control.pause": {}}},
+            },
             "state": {"session": {"awaiting_query": True}},
         }
         resp = await handler._handle_webhook(_build_request(body))

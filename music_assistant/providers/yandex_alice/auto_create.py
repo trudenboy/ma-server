@@ -50,7 +50,7 @@ from ya_passport_auth.exceptions import InvalidCredentialsError
 
 from .auth_session import cached_authenticated_session, make_cached_authenticator
 from .constants import DIALOG_CHANNEL
-from .dialogs_grammar import build_grammar
+from .dialogs_grammar import build_entities, build_grammar
 from .skill_logo import load_skill_logo_bytes
 
 if TYPE_CHECKING:
@@ -260,6 +260,7 @@ async def _run_pipeline(
             structured_examples=structured_examples,
             activation_phrases=activation_phrases,
             intents=build_grammar(),
+            entities=build_entities(),
             logo_bytes=load_skill_logo_bytes(),
             creator_factory=_make_logging_creator_factory(),
         )
