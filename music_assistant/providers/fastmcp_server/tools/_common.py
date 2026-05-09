@@ -50,8 +50,10 @@ async def confirm_or_raise(ctx: Context | None, prompt: str, *, enabled: bool) -
         return
     try:
         # ctx.elicit's overloads in older mypy stubs don't recognize ``bool``
-        # as a valid scalar response_type — runtime behaviour is fine.
-        result = await ctx.elicit(prompt, response_type=bool)  # type: ignore[arg-type]
+        # as a valid scalar response_type — runtime behaviour is fine. Newer
+        # upstream mypy resolves the overload correctly, so the unused-ignore
+        # is also suppressed.
+        result = await ctx.elicit(prompt, response_type=bool)  # type: ignore[arg-type, unused-ignore]
     except NotImplementedError:
         return
     action = getattr(result, "action", None)

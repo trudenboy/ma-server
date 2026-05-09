@@ -31,7 +31,7 @@ def build_playlists_server(mass: MusicAssistant, *, require_confirmation: bool =
             openWorldHint=False,
         ),
         timeout=TIMEOUT_MUTATION,
-    )
+    )  # type: ignore[untyped-decorator, unused-ignore]
     async def create_playlist(name: str, provider_instance_id: str | None = None) -> PlaylistBrief:
         """Create a new playlist on a music provider."""
         playlist = await mass.music.playlists.create_playlist(
@@ -49,7 +49,7 @@ def build_playlists_server(mass: MusicAssistant, *, require_confirmation: bool =
             openWorldHint=False,
         ),
         timeout=TIMEOUT_MUTATION,
-    )
+    )  # type: ignore[untyped-decorator, unused-ignore]
     async def add_track(playlist_id: str | int, track_uri: str) -> None:
         """Append one track to a playlist."""
         await mass.music.playlists.add_playlist_track(playlist_id, track_uri)
@@ -64,7 +64,7 @@ def build_playlists_server(mass: MusicAssistant, *, require_confirmation: bool =
             openWorldHint=False,
         ),
         timeout=TIMEOUT_BULK,
-    )
+    )  # type: ignore[untyped-decorator, unused-ignore]
     async def add_tracks(
         playlist_id: str | int,
         track_uris: list[str],
@@ -116,7 +116,7 @@ def build_playlists_server(mass: MusicAssistant, *, require_confirmation: bool =
             openWorldHint=False,
         ),
         timeout=TIMEOUT_MUTATION,
-    )
+    )  # type: ignore[untyped-decorator, unused-ignore]
     async def remove_tracks(
         playlist_id: str | int,
         positions: list[int],

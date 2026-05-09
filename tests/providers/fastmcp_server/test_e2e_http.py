@@ -15,7 +15,8 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from music_assistant.providers.fastmcp_server.http_bridge import mount_into_mass, mount_well_known
-from tests.conftest import FakeWebserver, build_aiohttp_app
+
+from .conftest import FakeWebserver, build_aiohttp_app
 
 
 async def _streaming_asgi(scope: dict, receive: Any, send: Any) -> None:  # noqa: ARG001

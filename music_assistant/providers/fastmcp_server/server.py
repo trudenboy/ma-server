@@ -181,7 +181,7 @@ class MCPServerRuntime:
             self._unmount = None
         if getattr(self, "_unmount_well_known", None) is not None:
             try:
-                self._unmount_well_known()  # type: ignore[misc]
+                self._unmount_well_known()  # type: ignore[misc, unused-ignore]
             except Exception:
                 self._logger.exception("Failed to unregister well-known route")
             self._unmount_well_known = None
