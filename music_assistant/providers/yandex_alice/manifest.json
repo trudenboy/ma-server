@@ -5,7 +5,7 @@
     "description": "Voice control of Music Assistant via a Yandex Dialogs custom skill (Russian NLU, full command surface).",
     "codeowners": ["@trudenboy"],
     "credits": [
-        "[ya-dialogs-api](https://github.com/trudenboy/ya-dialogs-api)"
+        "[YandexDialogs](https://github.com/AlexxIT/YandexDialogs)"
     ],
     "requirements": [
         "ya-passport-auth==1.3.0",
