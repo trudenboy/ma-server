@@ -175,17 +175,19 @@ root:
     выключи повтор | не повторяй | отмени повтор
 """
 
+# NB: Granet rejects multi-line alternations where ``|`` opens a
+# continuation line (it sees an empty operand on the prior line). Keep
+# all `|`-separated alternatives on a single root line — long lines are
+# preferred to that error.
 _LIST_PLAYERS_GRAMMAR = """\
 root:
-    сколько колонок | какие колонки | какие у тебя колонки
-    | перечисли колонки | список колонок | покажи колонки | назови колонки
+    сколько колонок | какие колонки | какие у тебя колонки | перечисли колонки | список колонок | покажи колонки | назови колонки
 """
 
 _FORGET_PLAYER_GRAMMAR = """\
 root:
     %lemma
-    забудь колонку | сбрось колонку | забудь плеер | забудь выбор | сбрось выбор
-    | поменяй колонку | сменить колонку | выбери колонку заново
+    забудь колонку | сбрось колонку | забудь плеер | забудь выбор | сбрось выбор | поменяй колонку | сменить колонку | выбери колонку заново
 """
 
 
@@ -202,20 +204,17 @@ $Level: $YANDEX.NUMBER
 
 # Two separate intents for increase / decrease — Yandex doesn't expose a
 # signed-number slot type, so we encode direction in the form_name and
-# pick up the magnitude via YANDEX.NUMBER.
+# pick up the magnitude via YANDEX.NUMBER. Alternations stay on one root
+# line (Granet rejects ``|`` at the start of a continuation line).
 _VOLUME_INCREASE_GRAMMAR = """\
 root:
-    %lemma прибавить [на] $Delta [процент | процентов | процента]
-    | %lemma сделать громче на $Delta [процент | процентов | процента]
-    | на $Delta [процент | процентов | процента] громче
+    %lemma прибавить [на] $Delta [процент | процентов | процента] | %lemma сделать громче на $Delta [процент | процентов | процента] | на $Delta [процент | процентов | процента] громче
 $Delta: $YANDEX.NUMBER
 """
 
 _VOLUME_DECREASE_GRAMMAR = """\
 root:
-    %lemma убавить [на] $Delta [процент | процентов | процента]
-    | %lemma сделать тише на $Delta [процент | процентов | процента]
-    | на $Delta [процент | процентов | процента] тише
+    %lemma убавить [на] $Delta [процент | процентов | процента] | %lemma сделать тише на $Delta [процент | процентов | процента] | на $Delta [процент | процентов | процента] тише
 $Delta: $YANDEX.NUMBER
 """
 
