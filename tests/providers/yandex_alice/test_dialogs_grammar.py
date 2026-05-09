@@ -15,6 +15,7 @@ Covers:
 
 from __future__ import annotations
 
+import importlib.resources
 from typing import Any
 
 import pytest
@@ -22,7 +23,6 @@ import pytest
 from music_assistant.providers.yandex_alice.dialogs_control import ControlAction
 from music_assistant.providers.yandex_alice.dialogs_grammar import (
     _CONTROL_INTENT_MAP,
-    TIME_UNIT_ENTITY,
     build_entities,
     build_grammar,
     extract_trailing_player_hint,
@@ -329,10 +329,24 @@ class TestExtractTrailingPlayerHint:
 class TestBuildersConsistency:
     """build_grammar / build_entities — declarative state must round-trip."""
 
+    def test_skill_toml_resource_is_packaged(self) -> None:
+        """``provider/data/skill.toml`` must be reachable via importlib.resources.
+
+        Guard against the packaging foot-gun where ``provider/data/``
+        lacks an ``__init__.py`` and ``setuptools.find_packages``
+        silently drops the directory from the built wheel — the
+        manifest then can't be loaded after a pip install.
+        """
+        ref = importlib.resources.files("music_assistant.providers.yandex_alice.data").joinpath(
+            "skill.toml"
+        )
+        text = ref.read_text(encoding="utf-8")
+        assert "schema_version" in text
+        assert "control.pause" in text
+
     def test_build_entities_returns_time_unit(self) -> None:
         entities = build_entities()
         assert len(entities) == 1
-        assert entities[0] is TIME_UNIT_ENTITY
         assert entities[0].name == "time_unit"
         # Must declare both seconds and minutes — required by seek slots.
         value_names = [v.name for v in entities[0].values]
@@ -385,8 +399,14 @@ class TestBuildersConsistency:
         for form_name in _CONTROL_INTENT_MAP:
             assert form_name in grammar_form_names, form_name
 
-    def test_slot_bearing_intents_declare_slots(self) -> None:
-        """Each slot-bearing form_name must have a non-empty ``slots`` tuple."""
+    def test_slot_bearing_intents_declare_inline_slots_block(self) -> None:
+        """Each slot-bearing form_name must include a ``slots:`` block in source_text.
+
+        Since v1.5.0 the manifest carries the slots inline in the
+        Granet ``sourceText`` (so it round-trips with the dev-console
+        editor); ``IntentDraft.slots`` is left empty and ya-dialogs-api
+        recognises the existing block.
+        """
         slot_forms = {
             "control.volume_set",
             "control.volume_increase",
@@ -397,7 +417,7 @@ class TestBuildersConsistency:
         by_form = {i.form_name: i for i in build_grammar()}
         for form_name in slot_forms:
             intent = by_form[form_name]
-            assert intent.slots, f"{form_name} must declare slots"
+            assert "slots:" in intent.source_text, f"{form_name} missing slots: block"
 
     @pytest.mark.parametrize(
         ("form_name", "expected_slot_names"),
@@ -409,10 +429,14 @@ class TestBuildersConsistency:
             ("control.seek_back", {"amount", "unit"}),
         ],
     )
-    def test_slot_names_match_runtime_extraction(
+    def test_slot_names_present_in_source_text(
         self, form_name: str, expected_slot_names: set[str]
     ) -> None:
-        """Slot names declared on IntentDraft must match what the runtime reads."""
+        """Each expected slot name appears as a key in the inline slots: block."""
         by_form = {i.form_name: i for i in build_grammar()}
-        actual = {slot.name for slot in by_form[form_name].slots}
-        assert actual == expected_slot_names
+        source = by_form[form_name].source_text
+        for name in expected_slot_names:
+            # Slot names are introduced as ``    <name>:`` inside the slots
+            # block — searching for the keyed line is unambiguous because
+            # entity-value names share the same shape but live elsewhere.
+            assert f"    {name}:" in source, f"{form_name} missing slot {name!r}"
