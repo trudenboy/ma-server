@@ -146,23 +146,26 @@ _KIND_MARKER_WORDS: frozenset[str] = frozenset(
 
 
 def parse_command(text: str, *, _split_player_hint: bool = True) -> ParsedCommand:
-    """Parse a raw voice command into a structured ParsedCommand.
+    """
+    Parse a raw voice command into a structured ParsedCommand.
 
-    Examples:
-      "включи Metallica на кухне"            → kind=search, query=metallica, hint=кухне
-      "включи песню Yesterday"                → kind=track, query=yesterday
-      "включи альбом Black Album на спальне"  → kind=album, query=black album, hint=спальне
-      "включи исполнителя Metallica"           → kind=artist, query=metallica, radio_mode=True
-      "включи мою волну"                      → kind=my_wave, query=, radio_mode=True
-      "включи джаз"                           → kind=search, query=джаз
-      "включи жанр джаз"                      → kind=genre, query=джаз, radio_mode=True
-      "включи песню На заре"                  → kind=track, query=на заре  (no false split)
+    Recognised patterns (a few representative cases)::
 
-    The ``_split_player_hint`` parameter is internal: when the first
-    pass produces a suspicious split (the whole content was eaten as
-    "на <player_hint>", leaving only a marker word in the query), the
-    function recurses with the flag off to keep the suffix in the
-    query. Don't pass it from outside.
+        "включи Metallica на кухне"            → kind=search, query=metallica, hint=кухне
+        "включи песню Yesterday"               → kind=track, query=yesterday
+        "включи альбом Black Album на спальне" → kind=album, query=black album, hint=спальне
+        "включи исполнителя Metallica"         → kind=artist, query=metallica, radio_mode=True
+        "включи мою волну"                     → kind=my_wave, query="", radio_mode=True
+        "включи джаз"                          → kind=search, query=джаз
+        "включи жанр джаз"                     → kind=genre, query=джаз, radio_mode=True
+        "включи песню На заре"                 → kind=track, query=на заре  (no false split)
+
+    :param text: Raw voice command string from the Dialogs request.
+    :param _split_player_hint: Internal recursion guard. When the first
+        pass produces a suspicious split (the whole content was eaten as
+        "на <player_hint>", leaving only a marker word in the query),
+        the function recurses with the flag off to keep the suffix in
+        the query. Do not pass it from outside.
     """
     if not text:
         return ParsedCommand(kind="search", query="")
