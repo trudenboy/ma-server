@@ -196,9 +196,13 @@ root:
 # ---------------------------------------------------------------------------
 
 # YANDEX.NUMBER slot — volume level 0..100 (clamped post-extract).
+# NB: Granet rejects ``%lemma`` directives placed inside ``[...]``
+# optional blocks ("Некорректный символ"). Express the optional verb
+# via top-level alternation instead (with-verb branch / without-verb
+# branch).
 _VOLUME_SET_GRAMMAR = """\
 root:
-    [%lemma сделать] громкость [на] $Level [процент | процентов | процента]
+    громкость [на] $Level [процент | процентов | процента] | %lemma сделать громкость [на] $Level [процент | процентов | процента]
 $Level: $YANDEX.NUMBER
 """
 
@@ -224,16 +228,20 @@ $Delta: $YANDEX.NUMBER
 # "перемотай вперёд на 30" (no unit-word) still match. Yandex stores
 # entity-typed slot values as the entity-value name, not the surface
 # phrase.
+#
+# ``%lemma`` directives can't sit inside ``[...]`` optional blocks
+# ("Некорректный символ" from Granet). Express the optional verb via
+# top-level alternation: bare-direction branch / verb-led branch.
 _SEEK_FORWARD_GRAMMAR = """\
 root:
-    [%lemma перемотать] вперёд [на] $Amount [$Unit]
+    вперёд [на] $Amount [$Unit] | %lemma перемотать вперёд [на] $Amount [$Unit]
 $Amount: $YANDEX.NUMBER
 $Unit: $time_unit
 """
 
 _SEEK_BACK_GRAMMAR = """\
 root:
-    [%lemma перемотать] назад [на] $Amount [$Unit]
+    назад [на] $Amount [$Unit] | %lemma перемотать назад [на] $Amount [$Unit]
 $Amount: $YANDEX.NUMBER
 $Unit: $time_unit
 """
