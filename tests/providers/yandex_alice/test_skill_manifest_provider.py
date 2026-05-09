@@ -504,6 +504,31 @@ class TestResolvedCache:
         assert m.intents[0].form_name == "control.test"
 
 
+class TestBundledResourceLookup:
+    """Bundled manifest resolution must work after the upstream package rename.
+
+    Locally this provider is ``provider``; upstream-synced into
+    ``music-assistant/server`` it lives under
+    ``music_assistant.providers.yandex_alice``. The bundled-resource
+    lookup must not hardcode a package name — regressing this breaks
+    MA startup as soon as the wheel ships, which is much harder to
+    catch than a unit-test failure.
+    """
+
+    def test_bundled_lookup_uses_dunder_package(self, provider: SkillManifestProvider) -> None:
+        # Smoke: the lookup resolves at all.
+        text = provider._bundled_manifest_text()
+        assert "schema_version" in text
+
+    def test_no_hardcoded_package_string_literal(self) -> None:
+        # Static guard: source must not contain the legacy literal.
+        from music_assistant.providers.yandex_alice import skill_manifest_provider as smp  # noqa: PLC0415
+
+        source = Path(smp.__file__).read_text(encoding="utf-8")
+        assert '"music_assistant.providers.yandex_alice.data"' not in source
+        assert "'provider.data'" not in source
+
+
 class TestAtomicWrite:
     """Export / Import use tmp+rename so readers never see a half-written file."""
 

@@ -381,7 +381,10 @@ class SkillManifestProvider:
 
     @staticmethod
     def _bundled_manifest_text() -> str:
-        ref = importlib.resources.files("provider.data").joinpath("skill.toml")
+        # Resolve via this module's own package so the lookup keeps
+        # working after the upstream sync renames the package from
+        # ``provider`` to ``music_assistant.providers.yandex_alice``.
+        ref = importlib.resources.files(__package__).joinpath("data/skill.toml")
         return ref.read_text(encoding="utf-8")
 
     @staticmethod
