@@ -95,6 +95,16 @@ CONF_ACTION_EDIT_SKILL = "edit_skill"
 CONF_ACTION_UPDATE_SKILL = "update_skill"
 CONF_ACTION_CANCEL_EDIT = "cancel_edit"
 
+# v1.6.0 — file-based skill manifest override + UI actions.
+# Override lives at ``<storage>/yandex_alice/skill.toml``. UI exposes
+# four actions (export / import / reset / validate) plus a paste
+# field for browser-based import; banner reflects bundled vs override.
+CONF_ACTION_EXPORT_MANIFEST = "export_manifest"
+CONF_ACTION_IMPORT_MANIFEST = "import_manifest"
+CONF_ACTION_RESET_MANIFEST = "reset_manifest"
+CONF_ACTION_VALIDATE_MANIFEST = "validate_manifest"
+CONF_DIALOG_SKILL_OVERRIDE_PASTE = "dialog_skill_override_paste"
+
 # Voice + activation phrases editable in edit mode (otherwise auto-derived).
 # Yandex Dialogs allows up to **three** alternative activation phrases
 # in addition to the skill name itself (which is the first phrase).

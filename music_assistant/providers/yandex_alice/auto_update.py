@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ya_dialogs_api import (
+    EntityDraft,
+    IntentDraft,
     SkillCreationArtifacts,
     SkillCreationState,
     auto_update_skill,
@@ -27,7 +29,6 @@ from ya_passport_auth.exceptions import InvalidCredentialsError
 
 from .auth_session import make_cached_authenticator
 from .constants import DIALOG_CHANNEL
-from .dialogs_grammar import build_entities, build_grammar
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ async def run_auto_update(
     description: str,
     structured_examples: list[dict[str, Any]] | None,
     activation_phrases: list[str] | None,
+    intents: list[IntentDraft],
+    entities: list[EntityDraft],
     artifacts: SkillCreationArtifacts,
     voice: str | None = None,
 ) -> AutoUpdateOutcome:
@@ -111,8 +114,8 @@ async def run_auto_update(
             description=description,
             structured_examples=structured_examples,
             activation_phrases=activation_phrases,
-            intents=build_grammar(),
-            entities=build_entities(),
+            intents=intents,
+            entities=entities,
             voice=voice,
         )
     except InvalidCredentialsError as exc:

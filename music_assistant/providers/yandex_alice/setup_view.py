@@ -53,17 +53,22 @@ from .constants import (
     CONF_ACTION_CLEAR_AUTH,
     CONF_ACTION_DELETE_SKILL,
     CONF_ACTION_EDIT_SKILL,
+    CONF_ACTION_EXPORT_MANIFEST,
+    CONF_ACTION_IMPORT_MANIFEST,
     CONF_ACTION_RECREATE_DUPLICATE,
     CONF_ACTION_REFRESH_STATUS,
     CONF_ACTION_REGENERATE_WEBHOOK_SECRET,
+    CONF_ACTION_RESET_MANIFEST,
     CONF_ACTION_SIGN_IN,
     CONF_ACTION_TEST_WEBHOOK,
     CONF_ACTION_UPDATE_SKILL,
+    CONF_ACTION_VALIDATE_MANIFEST,
     CONF_DIALOG_ACTIVATION_PHRASE_2,
     CONF_DIALOG_ACTIVATION_PHRASE_3,
     CONF_DIALOG_ACTIVATION_PHRASE_4,
     CONF_DIALOG_SKILL_ID,
     CONF_DIALOG_SKILL_NAME,
+    CONF_DIALOG_SKILL_OVERRIDE_PASTE,
     CONF_DIALOG_SKILL_TOKEN,
     CONF_DIALOG_SKILL_VOICE,
     CONF_DIALOG_WEBHOOK_SECRET,
@@ -83,6 +88,7 @@ from .publication_status import (
     STATUS_ON_AIR,
     STATUS_REJECTED,
 )
+from .skill_manifest_provider import ManifestStatus
 from .url_helpers import validate_external_base_url
 
 
@@ -984,6 +990,129 @@ def _skill_block(  # noqa: PLR0913
 # ---------------------------------------------------------------------------
 
 
+def _manifest_block(
+    *,
+    status: ManifestStatus,
+    paste_value: str,
+    update_message: str | None,
+) -> tuple[ConfigEntry, ...]:
+    """Skill manifest banner + Export / Import / Reset / Validate actions.
+
+    The manifest controls intents + entities deployed to Yandex (skill
+    grammar) and the runtime mapping that turns NLU matches into
+    player actions. Bundled by default; users override by writing
+    ``<storage>/yandex_alice/skill.toml`` (manually or via Import).
+    """
+    if status.source == "bundled":
+        banner = (
+            f"Skill manifest: bundled default "
+            f"({status.intent_count} intents, {status.entity_count} entities). "
+            f"Use Export to copy it to {status.override_path} for editing."
+        )
+    elif status.source == "override_valid":
+        banner = (
+            f"Skill manifest: override active at {status.override_path} "
+            f"({status.intent_count} intents, {status.entity_count} entities)."
+        )
+    else:  # override_invalid
+        banner = (
+            f"⚠ Skill manifest: override at {status.override_path} is invalid — "
+            f"falling back to bundled default ({status.intent_count} intents, "
+            f"{status.entity_count} entities). "
+            f"Error: {status.error or 'unknown parse error'}"
+        )
+
+    entries: list[ConfigEntry] = [
+        ConfigEntry(
+            key="label_manifest_banner",
+            type=ConfigEntryType.LABEL,
+            label=banner,
+        ),
+    ]
+    if update_message:
+        entries.append(
+            ConfigEntry(
+                key="label_manifest_message",
+                type=ConfigEntryType.LABEL,
+                label=update_message,
+            )
+        )
+    entries.extend(
+        (
+            ConfigEntry(
+                key=CONF_ACTION_EXPORT_MANIFEST,
+                type=ConfigEntryType.ACTION,
+                label="Export manifest",
+                description=(
+                    "Write the current bundled manifest to "
+                    f"{status.override_path}. Will not overwrite an existing "
+                    "override; use Reset first if you want to start over."
+                ),
+                action=CONF_ACTION_EXPORT_MANIFEST,
+                action_label="Export to file",
+                required=False,
+                default_value="",
+            ),
+            ConfigEntry(
+                key=CONF_DIALOG_SKILL_OVERRIDE_PASTE,
+                type=ConfigEntryType.STRING,
+                label="Manifest TOML to import",
+                description=(
+                    "Paste the full TOML contents and click Import. If your "
+                    "browser strips line breaks, paste base64 with prefix "
+                    "data:base64,<base64-encoded-TOML> — base64 -i skill.toml "
+                    "will produce one. Cleared on a successful import."
+                ),
+                required=False,
+                value=paste_value,
+                default_value="",
+            ),
+            ConfigEntry(
+                key=CONF_ACTION_IMPORT_MANIFEST,
+                type=ConfigEntryType.ACTION,
+                label="Import manifest",
+                description=(
+                    "Validate the pasted TOML and write it to "
+                    f"{status.override_path}. Existing override is replaced "
+                    "atomically. The paste field is cleared on success."
+                ),
+                action=CONF_ACTION_IMPORT_MANIFEST,
+                action_label="Import from paste",
+                required=False,
+                default_value="",
+            ),
+            ConfigEntry(
+                key=CONF_ACTION_VALIDATE_MANIFEST,
+                type=ConfigEntryType.ACTION,
+                label="Validate manifest",
+                description=(
+                    "Re-parse the override file and report parse / schema "
+                    "errors without re-deploying to Yandex."
+                ),
+                action=CONF_ACTION_VALIDATE_MANIFEST,
+                action_label="Validate override",
+                required=False,
+                default_value="",
+            ),
+            ConfigEntry(
+                key=CONF_ACTION_RESET_MANIFEST,
+                type=ConfigEntryType.ACTION,
+                label="Reset manifest",
+                description=(
+                    "Delete the override file and revert to the bundled "
+                    "default. Idempotent — safe to click when no override "
+                    "exists."
+                ),
+                action=CONF_ACTION_RESET_MANIFEST,
+                action_label="Reset to bundled default",
+                required=False,
+                default_value="",
+            ),
+        )
+    )
+    return tuple(entries)
+
+
 def _settings_block(
     *,
     player_options: list[ConfigValueOption],
@@ -1086,6 +1215,9 @@ def build_form_entries(  # noqa: PLR0913
     use_different_instance_name: bool,
     publication_status: str | None,
     diagnostics: tuple[ConfigEntry, ...],
+    manifest_status: ManifestStatus,
+    manifest_paste: str,
+    manifest_message: str | None,
     hidden_state: tuple[ConfigEntry, ...],
 ) -> tuple[ConfigEntry, ...]:
     """Compose Authorization + Skill + Settings + hidden state."""
@@ -1123,11 +1255,18 @@ def build_form_entries(  # noqa: PLR0913
         CATEGORY_SKILL,
     )
     settings = _stamp(
-        _settings_block(
-            player_options=player_options,
-            instance_name=instance_name,
-            skill_name=skill_name,
-            use_different_instance_name=use_different_instance_name,
+        (
+            *_settings_block(
+                player_options=player_options,
+                instance_name=instance_name,
+                skill_name=skill_name,
+                use_different_instance_name=use_different_instance_name,
+            ),
+            *_manifest_block(
+                status=manifest_status,
+                paste_value=manifest_paste,
+                update_message=manifest_message,
+            ),
         ),
         CATEGORY_SETTINGS,
     )

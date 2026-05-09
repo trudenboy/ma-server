@@ -66,7 +66,7 @@ from .dialogs_control import (
     format_list_players,
     parse_control,
 )
-from .dialogs_grammar import extract_trailing_player_hint, parse_platform_intent
+from .dialogs_grammar import extract_trailing_player_hint
 from .dialogs_nlu import (
     _VERB_RE,
     ParsedCommand,
@@ -76,6 +76,7 @@ from .dialogs_nlu import (
     resolve_player_candidates,
 )
 from .dialogs_player import play_for_alice, resolve_query
+from .skill_manifest_provider import SkillManifestProvider
 from .tts_dictionary import PHRASE_REPLACEMENTS, WORD_REPLACEMENTS
 
 if TYPE_CHECKING:
@@ -294,6 +295,7 @@ class DialogsWebhookHandler:
         self._voice_continuation = voice_continuation
         self._logger = logger or _LOGGER
         self._unregister_callbacks: list[Callable[[], None]] = []
+        self._manifest_provider = SkillManifestProvider(mass)
         # In-process state cache; see _STATE_CACHE_TTL_SEC / _MAX.
         self._state_cache: OrderedDict[str, tuple[dict[str, Any], float]] = OrderedDict()
         # Diagnostics counters surfaced via ``get_diagnostics()`` on the
@@ -706,7 +708,7 @@ class DialogsWebhookHandler:
         # back to our existing ParsedControl / ParsedCommand and skip the
         # regex pass. Falls through to the regex parsers when the block
         # is empty (no grammar declared or no match).
-        platform = parse_platform_intent(nlu_intents)
+        platform = self._manifest_provider.parse_intent(nlu_intents)
         if isinstance(platform, ParsedControl):
             # Yandex's static intent grammar can't enumerate the user's
             # per-skill list of player names, so the "на <player>" suffix

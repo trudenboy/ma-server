@@ -42,6 +42,8 @@ class TestRunAutoUpdatePreconditions:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(skill_id="sk-1"),
         )
         assert result.artifacts.state == SkillCreationState.FAILED
@@ -58,6 +60,8 @@ class TestRunAutoUpdatePreconditions:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(skill_id="sk-1"),
         )
         assert result.artifacts.state == SkillCreationState.FAILED
@@ -73,6 +77,8 @@ class TestRunAutoUpdatePreconditions:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(),  # no skill_id
         )
         assert result.artifacts.state == SkillCreationState.FAILED
@@ -100,6 +106,8 @@ class TestRunAutoUpdateHappyPath:
             description="Description",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(state=SkillCreationState.DONE, skill_id="sk-1"),
         )
 
@@ -124,6 +132,8 @@ class TestRunAutoUpdateHappyPath:
             description="Hello world",
             structured_examples=[{"marker": "попроси"}],
             activation_phrases=["My Skill"],
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(state=SkillCreationState.DONE, skill_id="sk-1"),
         )
 
@@ -156,6 +166,8 @@ class TestRunAutoUpdateFailures:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(state=SkillCreationState.DONE, skill_id="sk-1"),
         )
 
@@ -181,6 +193,8 @@ class TestRunAutoUpdateFailures:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(state=SkillCreationState.DONE, skill_id="sk-1"),
         )
 

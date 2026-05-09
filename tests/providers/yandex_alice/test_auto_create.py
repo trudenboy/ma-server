@@ -158,6 +158,8 @@ class TestRunCreateSkill:
             description="Voice control for Music Assistant",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(),
         )
         assert outcome.stage == LocalAutoCreateStage.DONE
@@ -183,6 +185,8 @@ class TestRunCreateSkill:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(),
         )
         assert outcome.stage == LocalAutoCreateStage.DUPLICATE_DETECTED
@@ -208,6 +212,8 @@ class TestRunCreateSkill:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(),
         )
         assert outcome.stage == LocalAutoCreateStage.FAILED
@@ -235,6 +241,8 @@ class TestRunCreateSkill:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             artifacts=SkillCreationArtifacts(),
         )
         assert outcome.stage == LocalAutoCreateStage.FAILED
@@ -271,6 +279,8 @@ class TestAdoptExisting:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             existing_skill_id="sk-existing",
         )
         assert outcome.stage == LocalAutoCreateStage.DONE
@@ -303,6 +313,8 @@ class TestDeleteThenRecreate:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             existing_skill_id="sk-old",
         )
         assert outcome.stage == LocalAutoCreateStage.DONE
@@ -327,6 +339,8 @@ class TestDeleteThenRecreate:
             description="d",
             structured_examples=None,
             activation_phrases=None,
+            intents=[],
+            entities=[],
             existing_skill_id="sk-old",
         )
         assert outcome.stage == LocalAutoCreateStage.FAILED

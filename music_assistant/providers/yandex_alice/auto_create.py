@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any
 
 from ya_dialogs_api import (
     DialogsSkillCreator,
+    EntityDraft,
+    IntentDraft,
     SkillCreationArtifacts,
     SkillCreationState,
     auto_create_skill,
@@ -50,7 +52,6 @@ from ya_passport_auth.exceptions import InvalidCredentialsError
 
 from .auth_session import cached_authenticated_session, make_cached_authenticator
 from .constants import DIALOG_CHANNEL
-from .dialogs_grammar import build_entities, build_grammar
 from .skill_logo import load_skill_logo_bytes
 
 if TYPE_CHECKING:
@@ -209,6 +210,8 @@ async def _run_pipeline(
     description: str,
     structured_examples: list[dict[str, Any]] | None,
     activation_phrases: list[str] | None,
+    intents: list[IntentDraft],
+    entities: list[EntityDraft],
     artifacts: SkillCreationArtifacts,
     skip_duplicate_check: bool = False,
 ) -> AutoCreateOutcome:
@@ -259,8 +262,8 @@ async def _run_pipeline(
             description=description,
             structured_examples=structured_examples,
             activation_phrases=activation_phrases,
-            intents=build_grammar(),
-            entities=build_entities(),
+            intents=intents,
+            entities=entities,
             logo_bytes=load_skill_logo_bytes(),
             creator_factory=_make_logging_creator_factory(),
         )
@@ -323,6 +326,8 @@ async def run_create_skill(
     description: str,
     structured_examples: list[dict[str, Any]] | None,
     activation_phrases: list[str] | None,
+    intents: list[IntentDraft],
+    entities: list[EntityDraft],
     artifacts: SkillCreationArtifacts,
 ) -> AutoCreateOutcome:
     """Drive the create_skill click — duplicate pre-check + full pipeline.
@@ -333,6 +338,8 @@ async def run_create_skill(
       :func:`provider.auth_page.perform_device_auth` first).
     - ``backend_uri`` is fully assembled (HTTPS public URL +
       webhook secret).
+    - ``intents`` / ``entities`` come from
+      :class:`SkillManifestProvider` (effective manifest).
 
     Backup-restore safety: if ``artifacts.state == NONE`` but the
     caller has a saved ``skill_id`` in form values, the dispatcher
@@ -347,6 +354,8 @@ async def run_create_skill(
         description=description,
         structured_examples=structured_examples,
         activation_phrases=activation_phrases,
+        intents=intents,
+        entities=entities,
         artifacts=artifacts,
     )
 
@@ -359,6 +368,8 @@ async def adopt_existing_skill(
     description: str,
     structured_examples: list[dict[str, Any]] | None,
     activation_phrases: list[str] | None,
+    intents: list[IntentDraft],
+    entities: list[EntityDraft],
     existing_skill_id: str,
 ) -> AutoCreateOutcome:
     """Re-deploy an existing skill against this MA's webhook URL.
@@ -381,6 +392,8 @@ async def adopt_existing_skill(
         description=description,
         structured_examples=structured_examples,
         activation_phrases=activation_phrases,
+        intents=intents,
+        entities=entities,
         artifacts=artifacts,
         skip_duplicate_check=True,
     )
@@ -394,6 +407,8 @@ async def delete_existing_skill_then_recreate(
     description: str,
     structured_examples: list[dict[str, Any]] | None,
     activation_phrases: list[str] | None,
+    intents: list[IntentDraft],
+    entities: list[EntityDraft],
     existing_skill_id: str,
 ) -> AutoCreateOutcome:
     """Delete the duplicate skill in Yandex, then run a fresh pipeline."""
@@ -422,6 +437,8 @@ async def delete_existing_skill_then_recreate(
         description=description,
         structured_examples=structured_examples,
         activation_phrases=activation_phrases,
+        intents=intents,
+        entities=entities,
         artifacts=SkillCreationArtifacts(),
         skip_duplicate_check=True,
     )

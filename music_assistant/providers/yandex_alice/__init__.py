@@ -50,14 +50,18 @@ from .constants import (
     CONF_ACTION_CLEAR_AUTH,
     CONF_ACTION_DELETE_SKILL,
     CONF_ACTION_EDIT_SKILL,
+    CONF_ACTION_EXPORT_MANIFEST,
+    CONF_ACTION_IMPORT_MANIFEST,
     CONF_ACTION_RECREATE_DUPLICATE,
     CONF_ACTION_REFRESH_STATUS,
     CONF_ACTION_REGENERATE_WEBHOOK_SECRET,
     CONF_ACTION_RENAME_DIALOG_SKILL,
+    CONF_ACTION_RESET_MANIFEST,
     CONF_ACTION_REVERT_SKILL_NAME,
     CONF_ACTION_SIGN_IN,
     CONF_ACTION_TEST_WEBHOOK,
     CONF_ACTION_UPDATE_SKILL,
+    CONF_ACTION_VALIDATE_MANIFEST,
     CONF_AUTH_USER_NAME,
     CONF_AUTH_X_TOKEN,
     CONF_DIALOG_ACTIVATION_PHRASE_2,
@@ -67,6 +71,7 @@ from .constants import (
     CONF_DIALOG_PUBLICATION_STATUS,
     CONF_DIALOG_SKILL_ID,
     CONF_DIALOG_SKILL_NAME,
+    CONF_DIALOG_SKILL_OVERRIDE_PASTE,
     CONF_DIALOG_SKILL_TOKEN,
     CONF_DIALOG_SKILL_VOICE,
     CONF_DIALOG_WEBHOOK_SECRET,
@@ -88,6 +93,7 @@ from .dialog_skill_meta import (
 from .plugin import YandexAlicePlugin
 from .publication_status import fetch_skill_publication_status
 from .setup_view import build_form_entries
+from .skill_manifest_provider import SkillManifestProvider
 from .url_helpers import (
     is_public_https_url,
     try_detect_any_base_url,
@@ -355,6 +361,14 @@ async def get_config_entries(  # noqa: PLR0915
 
     action_outcome: AutoCreateOutcome | None = None
     update_message: str | None = None
+    # Surfaced in the manifest banner block, separate from update_message
+    # so manifest actions don't bleed into the skill-block status line.
+    manifest_message: str | None = None
+
+    # Effective skill manifest — bundled default unless user wrote an
+    # override file. Cheap to construct (no I/O until .grammar() / .entities()
+    # are called). Reused across action branches that ship intents to Yandex.
+    manifest_provider = SkillManifestProvider(mass)
 
     # ---- Action dispatcher ----
     if action == CONF_ACTION_SIGN_IN:
@@ -426,6 +440,8 @@ async def get_config_entries(  # noqa: PLR0915
                 description=build_skill_description(skill_name),
                 structured_examples=build_structured_examples(skill_name),
                 activation_phrases=build_activation_phrases(skill_name),
+                intents=manifest_provider.grammar(),
+                entities=manifest_provider.entities(),
                 artifacts=artifacts,
             )
 
@@ -467,6 +483,8 @@ async def get_config_entries(  # noqa: PLR0915
                     description=build_skill_description(skill_name),
                     structured_examples=build_structured_examples(skill_name),
                     activation_phrases=build_activation_phrases(skill_name),
+                    intents=manifest_provider.grammar(),
+                    entities=manifest_provider.entities(),
                     existing_skill_id=existing_id,
                 )
                 values[CONF_PENDING_DUPLICATE_SKILL_ID] = ""
@@ -492,6 +510,8 @@ async def get_config_entries(  # noqa: PLR0915
                     description=build_skill_description(skill_name),
                     structured_examples=build_structured_examples(skill_name),
                     activation_phrases=build_activation_phrases(skill_name),
+                    intents=manifest_provider.grammar(),
+                    entities=manifest_provider.entities(),
                     existing_skill_id=existing_id,
                 )
                 values[CONF_PENDING_DUPLICATE_SKILL_ID] = ""
@@ -539,6 +559,8 @@ async def get_config_entries(  # noqa: PLR0915
                 structured_examples=build_structured_examples(skill_name),
                 activation_phrases=edited_phrases,
                 voice=edited_voice,
+                intents=manifest_provider.grammar(),
+                entities=manifest_provider.entities(),
                 artifacts=artifacts,
             )
             update_message = update_outcome.user_message
@@ -571,6 +593,8 @@ async def get_config_entries(  # noqa: PLR0915
                 description=build_skill_description(skill_name),
                 structured_examples=build_structured_examples(skill_name),
                 activation_phrases=build_activation_phrases(skill_name),
+                intents=manifest_provider.grammar(),
+                entities=manifest_provider.entities(),
                 artifacts=artifacts,
             )
             artifacts = update_outcome.artifacts
@@ -642,6 +666,23 @@ async def get_config_entries(  # noqa: PLR0915
             else:
                 publication_status = fetched
                 update_message = "Publication status refreshed."
+
+    elif action == CONF_ACTION_EXPORT_MANIFEST:
+        manifest_message = manifest_provider.export_to_override()
+
+    elif action == CONF_ACTION_IMPORT_MANIFEST:
+        paste = str(values.get(CONF_DIALOG_SKILL_OVERRIDE_PASTE) or "")
+        manifest_message = manifest_provider.import_from_paste(paste)
+        if manifest_provider.last_import_success:
+            # Successful import — clear the paste field so the form
+            # doesn't redisplay the (now stale) raw TOML.
+            values[CONF_DIALOG_SKILL_OVERRIDE_PASTE] = ""
+
+    elif action == CONF_ACTION_RESET_MANIFEST:
+        manifest_message = manifest_provider.reset_override()
+
+    elif action == CONF_ACTION_VALIDATE_MANIFEST:
+        manifest_message = manifest_provider.validate_override_message()
 
     # ---- Reflect outcome into values so the next form save persists state ----
     if action_outcome is not None:
@@ -835,6 +876,9 @@ async def get_config_entries(  # noqa: PLR0915
     diagnostics_entries = _build_diagnostics_entries(mass, instance_id)
     use_different_instance_name = bool(values.get(CONF_USE_DIFFERENT_INSTANCE_NAME, False))
 
+    manifest_status = manifest_provider.status()
+    manifest_paste = str(values.get(CONF_DIALOG_SKILL_OVERRIDE_PASTE) or "")
+
     return build_form_entries(
         artifacts=artifacts,
         cached_x_token_present=bool(cached_x_token),
@@ -861,5 +905,8 @@ async def get_config_entries(  # noqa: PLR0915
         use_different_instance_name=use_different_instance_name,
         publication_status=publication_status or None,
         diagnostics=diagnostics_entries,
+        manifest_status=manifest_status,
+        manifest_paste=manifest_paste,
+        manifest_message=manifest_message,
         hidden_state=hidden_state_entries,
     )
