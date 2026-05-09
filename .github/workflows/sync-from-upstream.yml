@@ -83,7 +83,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
         run: |
-          DOMAINS="yandex_music kion_music zvuk_music msx_bridge yandex_station yandex_smarthome yandex_alice yandex_ynison dlna_receiver"
+          DOMAINS="yandex_music kion_music zvuk_music msx_bridge yandex_station yandex_smarthome yandex_alice yandex_ynison dlna_receiver mcp_server"
           SUMMARY="## Upstream PR status\n"
 
           for domain in $DOMAINS; do
@@ -121,7 +121,7 @@ jobs:
         env:
           FORK_SYNC_PAT: ${{ secrets.FORK_SYNC_PAT }}
         run: |
-          DOMAINS="yandex_music kion_music zvuk_music msx_bridge yandex_station yandex_smarthome yandex_alice yandex_ynison dlna_receiver"
+          DOMAINS="yandex_music kion_music zvuk_music msx_bridge yandex_station yandex_smarthome yandex_alice yandex_ynison dlna_receiver mcp_server"
 
           git fetch origin
           git remote add upstream https://github.com/music-assistant/server.git 2>/dev/null || true

@@ -17,6 +17,7 @@ on:
           - yandex_alice
           - yandex_ynison
           - dlna_receiver
+          - mcp_server
       version:
         description: "Provider release version (e.g. 1.2.0)"
         required: true
@@ -59,6 +60,7 @@ jobs:
             yandex_alice) PROVIDER_REPO="trudenboy/ma-provider-yandex-alice"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Alice" ;;
             yandex_ynison) PROVIDER_REPO="trudenboy/ma-provider-yandex-ynison"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music Connect (Ynison)" ;;
             dlna_receiver) PROVIDER_REPO="trudenboy/ma-provider-dlna-receiver"; PROVIDER_PATH="provider/"; DISPLAY_NAME="DLNA Receiver" ;;
+            mcp_server) PROVIDER_REPO="trudenboy/ma-provider-mcp"; PROVIDER_PATH="provider/"; DISPLAY_NAME="MCP Server" ;;
             *) echo "Unknown domain: ${{ inputs.domain }}"; exit 1 ;;
           esac
           echo "PROVIDER_REPO=$PROVIDER_REPO" >> $GITHUB_ENV
