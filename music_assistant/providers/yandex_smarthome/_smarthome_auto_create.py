@@ -91,10 +91,9 @@ def derive_smart_home_urls(
         value); ``client_secret`` is the per-install random UUID minted on
         first save.
 
-    Raises:
-        ValueError: ``cloud_plus`` without a registered cloud instance
-            id; ``direct`` without a client secret or with a non-HTTPS
-            base URL; any other ``connection_type``.
+    :raises ValueError: ``cloud_plus`` without a registered cloud
+        instance id; ``direct`` without a client secret or with a
+        non-HTTPS base URL; any other ``connection_type``.
     """
     if connection_type == CONNECTION_TYPE_CLOUD_PLUS:
         if not cloud_instance_id:

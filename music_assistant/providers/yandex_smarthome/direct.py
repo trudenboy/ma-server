@@ -101,17 +101,20 @@ class DirectConnectionHandler:
         on_token_created: Callable[[str], None] | None = None,
         playlist_uris: tuple[str, ...] | list[str] = (),
     ) -> None:
-        """Initialize the handler.
+        """
+        Initialize the handler.
 
-        Args:
-            mass: MusicAssistant instance.
-            user_id: User identifier for Yandex API responses.
-            access_token: Current Bearer access token (may be empty on first run).
-            client_secret: OAuth client secret for account linking validation.
-            exposed_ids: Set of player IDs to expose, or None for all.
-            logger: Optional logger instance.
-            on_token_created: Callback invoked with new access token when generated
-                via OAuth flow (to persist in config).
+        :param mass: MusicAssistant instance.
+        :param user_id: User identifier for Yandex API responses.
+        :param access_token: Current Bearer access token (may be empty
+            on first run).
+        :param client_secret: OAuth client secret for account linking
+            validation.
+        :param exposed_ids: Set of player IDs to expose, or ``None`` for
+            all.
+        :param logger: Optional logger instance.
+        :param on_token_created: Callback invoked with new access token
+            when generated via OAuth flow (to persist in config).
         """
         self._mass = mass
         self._user_id = user_id

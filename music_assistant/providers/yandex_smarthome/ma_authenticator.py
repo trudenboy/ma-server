@@ -86,21 +86,22 @@ def make_authenticator(  # noqa: PLR0915
     called so the caller can persist the new token for the next run.
     Callback failures are logged but never break authentication.
 
-    Args:
-        mass: MusicAssistant runtime — used for ``mass.webserver`` route
-            registration and ``AuthenticationHelper`` popup management.
-        session_id: Frontend-supplied session id (matches what ``AuthenticationHelper``
-            listens on for popup open/close). Must be safe for URL paths.
-        timeout: Hard cap on Device Flow polling (seconds). Default 5 min.
-        cached_x_token: Optional Yandex Passport ``x_token`` from a prior
-            Device Flow. If still valid, skips Device Flow entirely.
-        on_token_obtained: Optional callback invoked with the fresh
-            ``x_token`` (plain ``str``, unwrapped from ``SecretStr``) after
-            a successful Device Flow. Use to persist into MA config so the
-            next run can use the cache.
-
-    Raises:
-        ValueError: ``session_id`` doesn't match the safe character set.
+    :param mass: MusicAssistant runtime — used for ``mass.webserver``
+        route registration and ``AuthenticationHelper`` popup
+        management.
+    :param session_id: Frontend-supplied session id (matches what
+        ``AuthenticationHelper`` listens on for popup open/close).
+        Must be safe for URL paths.
+    :param timeout: Hard cap on Device Flow polling (seconds). Default
+        5 min.
+    :param cached_x_token: Optional Yandex Passport ``x_token`` from a
+        prior Device Flow. If still valid, skips Device Flow entirely.
+    :param on_token_obtained: Optional callback invoked with the fresh
+        ``x_token`` (plain ``str``, unwrapped from ``SecretStr``)
+        after a successful Device Flow. Use to persist into MA config
+        so the next run can use the cache.
+    :raises ValueError: ``session_id`` doesn't match the safe
+        character set.
     """
     if not _SAFE_SESSION_ID_RE.match(session_id):
         msg = "invalid session_id for device authentication"
