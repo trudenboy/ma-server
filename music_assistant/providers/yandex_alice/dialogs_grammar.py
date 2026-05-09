@@ -197,28 +197,32 @@ root:
 
 # YANDEX.NUMBER slot — volume level 0..100 (clamped post-extract).
 # NB: Granet rejects ``%lemma`` directives placed inside ``[...]``
-# optional blocks ("Некорректный символ"). Express the optional verb
-# via top-level alternation instead (with-verb branch / without-verb
-# branch).
+# optional blocks ("Некорректный символ") AND ``%lemma`` placed after
+# ``|`` in alternation ("Некорректный аргумент"). The accepted shape
+# (verified live 2026-05-09) is a standalone ``%lemma`` line at the top
+# of root: — it then applies to every verb / noun in the alternation
+# below. The same pattern works in the existing _PAUSE_GRAMMAR.
 _VOLUME_SET_GRAMMAR = """\
 root:
-    громкость [на] $Level [процент | процентов | процента] | %lemma сделать громкость [на] $Level [процент | процентов | процента]
+    %lemma
+    громкость [на] $Level [процент | процентов | процента] | сделать громкость [на] $Level [процент | процентов | процента]
 $Level: $YANDEX.NUMBER
 """
 
 # Two separate intents for increase / decrease — Yandex doesn't expose a
 # signed-number slot type, so we encode direction in the form_name and
-# pick up the magnitude via YANDEX.NUMBER. Alternations stay on one root
-# line (Granet rejects ``|`` at the start of a continuation line).
+# pick up the magnitude via YANDEX.NUMBER.
 _VOLUME_INCREASE_GRAMMAR = """\
 root:
-    %lemma прибавить [на] $Delta [процент | процентов | процента] | %lemma сделать громче на $Delta [процент | процентов | процента] | на $Delta [процент | процентов | процента] громче
+    %lemma
+    прибавить [на] $Delta [процент | процентов | процента] | сделать громче на $Delta [процент | процентов | процента] | на $Delta [процент | процентов | процента] громче
 $Delta: $YANDEX.NUMBER
 """
 
 _VOLUME_DECREASE_GRAMMAR = """\
 root:
-    %lemma убавить [на] $Delta [процент | процентов | процента] | %lemma сделать тише на $Delta [процент | процентов | процента] | на $Delta [процент | процентов | процента] тише
+    %lemma
+    убавить [на] $Delta [процент | процентов | процента] | сделать тише на $Delta [процент | процентов | процента] | на $Delta [процент | процентов | процента] тише
 $Delta: $YANDEX.NUMBER
 """
 
@@ -229,19 +233,20 @@ $Delta: $YANDEX.NUMBER
 # entity-typed slot values as the entity-value name, not the surface
 # phrase.
 #
-# ``%lemma`` directives can't sit inside ``[...]`` optional blocks
-# ("Некорректный символ" from Granet). Express the optional verb via
-# top-level alternation: bare-direction branch / verb-led branch.
+# ``%lemma`` standalone at the top of root: (Granet rejects it both
+# inside ``[...]`` and after ``|`` in alternation).
 _SEEK_FORWARD_GRAMMAR = """\
 root:
-    вперёд [на] $Amount [$Unit] | %lemma перемотать вперёд [на] $Amount [$Unit]
+    %lemma
+    вперёд [на] $Amount [$Unit] | перемотать вперёд [на] $Amount [$Unit]
 $Amount: $YANDEX.NUMBER
 $Unit: $time_unit
 """
 
 _SEEK_BACK_GRAMMAR = """\
 root:
-    назад [на] $Amount [$Unit] | %lemma перемотать назад [на] $Amount [$Unit]
+    %lemma
+    назад [на] $Amount [$Unit] | перемотать назад [на] $Amount [$Unit]
 $Amount: $YANDEX.NUMBER
 $Unit: $time_unit
 """
