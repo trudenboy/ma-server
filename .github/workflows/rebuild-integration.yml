@@ -24,7 +24,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          DOMAINS="yandex_music kion_music zvuk_music msx_bridge yandex_station yandex_smarthome yandex_alice yandex_ynison dlna_receiver mcp_server"
+          DOMAINS="yandex_music kion_music zvuk_music msx_bridge yandex_station yandex_smarthome yandex_alice yandex_ynison dlna_receiver fastmcp_server"
 
           git remote add upstream https://github.com/music-assistant/server.git
           git fetch upstream dev
