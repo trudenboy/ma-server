@@ -77,8 +77,8 @@ async def run_auto_update(
             artifacts,
             state=SkillCreationState.FAILED,
             last_error=(
-                "No cached authentication — run 'Create skill' first "
-                "to sign in via Yandex Passport."
+                "No cached authentication — click 'Sign in to Yandex Passport' "
+                "first to authenticate."
             ),
         )
         return AutoUpdateOutcome(
@@ -119,7 +119,9 @@ async def run_auto_update(
         failed = dataclasses.replace(
             artifacts,
             state=SkillCreationState.FAILED,
-            last_error=("Cached auth has expired. Run 'Create skill' to re-authenticate."),
+            last_error=(
+                "Cached auth has expired. Click 'Sign in to Yandex Passport' to re-authenticate."
+            ),
         )
         return AutoUpdateOutcome(
             artifacts=failed,
