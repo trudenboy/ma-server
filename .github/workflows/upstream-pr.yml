@@ -171,9 +171,27 @@ jobs:
           PR_BODY+="### Changed files (${COMPARE_LABEL})"
           PR_BODY+=$'\n\n'"${FILES_SECTION}"
           PR_BODY+=$'\n\n---\n\n'
-          PR_BODY+="> Draft PR — please review before requesting merge into upstream."
+          PR_BODY+="### Human review attestation"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="Per the upstream [AI policy](https://github.com/music-assistant/.github/blob/main/AI_POLICY.md), the named contributor confirms — by lifting this PR out of \`draft\` — that:"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="- [ ] I have personally reviewed every change in this PR."$'\n'
+          PR_BODY+="- [ ] I can explain each change in my own words."$'\n'
+          PR_BODY+="- [ ] Replies to maintainer questions on this PR will be written by me, not by an AI assistant. (AI-drafted replies to other AI review comments — e.g. Copilot — are permitted.)"$'\n'
+          PR_BODY+="- [ ] No \`Co-Authored-By: Claude\` / \`Co-Authored-By: ... @anthropic.com\` trailers leak into the commit(s) that land upstream."
+          PR_BODY+=$'\n\n'
+          PR_BODY+="> This PR is opened as a draft by the [\`upstream-pr.yml\`](https://github.com/trudenboy/ma-provider-tools/blob/main/wrappers/upstream-pr.yml.j2) workflow in \`trudenboy/ma-provider-tools\`. The workflow is human-triggered (\`workflow_dispatch\`), but the boxes above are the human-in-the-loop checkpoint required by upstream policy."
 
-          git commit -m "$PR_TITLE"
+          # Defense-in-depth: strip AI co-author trailers from PR_BODY in case
+          # they ever leak in via WHAT_NEW expansion. Single-line filter; safe
+          # no-op when no such lines exist.
+          PR_BODY="$(printf '%s\n' "$PR_BODY" | sed -E '/^[Cc]o-[Aa]uthored-[Bb]y: .*(Claude|claude|@anthropic\.com).*$/d')"
+
+          # Strip the same trailers from the commit message before we commit.
+          # The current PR_TITLE is single-line so this is also a no-op today;
+          # kept as a guardrail against future multi-line PR_TITLE changes.
+          COMMIT_MSG="$(printf '%s\n' "$PR_TITLE" | sed -E '/^[Cc]o-[Aa]uthored-[Bb]y: .*(Claude|claude|@anthropic\.com).*$/d')"
+          git commit -m "$COMMIT_MSG"
           git push origin "$BRANCH" $FORCE_PUSH
 
           EXISTING_PR=$(gh api "repos/music-assistant/server/pulls" \
