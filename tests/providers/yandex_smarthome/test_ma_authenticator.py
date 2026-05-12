@@ -27,13 +27,13 @@ class TestSessionIdValidation:
         """Letters, digits, dashes, underscores, len <= 64 are allowed."""
         # Should not raise; we discard the returned factory.
         make_authenticator(
-            mass=None,  # type: ignore[arg-type]
+            mass=None,
             session_id="abc-123_DEF",
         )
 
     def test_max_length_accepted(self) -> None:
         """64-character ids are at the inclusive upper bound."""
-        make_authenticator(mass=None, session_id="a" * 64)  # type: ignore[arg-type]
+        make_authenticator(mass=None, session_id="a" * 64)
 
     @pytest.mark.parametrize(
         "bad",
@@ -53,7 +53,7 @@ class TestSessionIdValidation:
     def test_unsafe_ids_rejected(self, bad: str) -> None:
         """Anything with metacharacters or out-of-bounds length is rejected."""
         with pytest.raises(ValueError, match="invalid session_id"):
-            make_authenticator(mass=None, session_id=bad)  # type: ignore[arg-type]
+            make_authenticator(mass=None, session_id=bad)
 
 
 class TestBuildDeviceCodePage:
