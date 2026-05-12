@@ -116,6 +116,14 @@ jobs:
               sed -i "s/\"provider\./\"music_assistant.providers.${DOMAIN}./g" {} +
           fi
 
+          # Copy VERSION file alongside manifest so the badge cron can read it
+          # from this branch / from the upstream tree after the PR merges.
+          # Built-in MA providers don't ship one; if an upstream reviewer
+          # objects, add --exclude=VERSION to the rsync above (escape hatch).
+          if [ -f provider-repo/VERSION ]; then
+            cp provider-repo/VERSION "music_assistant/providers/${DOMAIN}/VERSION"
+          fi
+
           # Remove the cloned provider-repo dir before staging to avoid adding it as a submodule
           rm -rf provider-repo
 
