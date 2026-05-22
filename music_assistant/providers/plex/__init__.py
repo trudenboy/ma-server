@@ -451,7 +451,7 @@ class PlexProvider(MusicProvider):
             try:
                 session = requests.Session()
                 session.verify = (
-                    self.config.get_value(CONF_LOCAL_SERVER_VERIFY_CERT)
+                    bool(self.config.get_value(CONF_LOCAL_SERVER_VERIFY_CERT))
                     if self.config.get_value(CONF_LOCAL_SERVER_SSL)
                     else False
                 )
