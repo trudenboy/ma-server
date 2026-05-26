@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,11 +16,13 @@ from music_assistant_models.enums import (
     ProviderType,
 )
 from music_assistant_models.errors import LoginFailed, UnsupportedFeaturedException
-from music_assistant_models.media_items import AudioSource
+from music_assistant_models.media_items import AudioFormat, AudioSource
 from ya_passport_auth import SecretStr
 
+from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
 from music_assistant.providers.yandex_ynison.config_helpers import list_yandex_music_instances
 from music_assistant.providers.yandex_ynison.constants import (
+    CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
     CONF_MASS_PLAYER_ID,
     CONF_PUBLISH_NAME,
@@ -45,12 +48,27 @@ from music_assistant.providers.yandex_ynison.streaming import (
 from music_assistant.providers.yandex_ynison.ynison_client import YnisonState
 
 
-def _stub_attr(obj: object, name: str, value: Any) -> None:
-    """Assign ``value`` to ``obj.name`` bypassing mypy method-assign and ruff B010.
+def _arm_play_media_recorder(provider: YandexYnisonProvider) -> list[tuple[str, str]]:
+    """Replace `play_media` with a recorder and run `create_task` coros inline.
 
-    Used in tests to replace a real instance method on a strictly typed object
-    (e.g. ``provider.mass.get_provider``) with a MagicMock.
+    Returns the list of (target_id, uri) tuples captured during the test.
+    The inline create_task lets the scheduled `play_media` coroutine
+    actually execute against the recorder.
     """
+    calls: list[tuple[str, str]] = []
+
+    async def _record(target_id: str, uri: str) -> None:
+        calls.append((target_id, uri))
+
+    provider.mass.player_queues.play_media = _record
+    provider.mass.create_task = MagicMock(
+        side_effect=lambda coro, *_a, **_kw: asyncio.get_event_loop().create_task(coro)
+    )
+    return calls
+
+
+def _stub_attr(obj: object, name: str, value: Any) -> None:
+    """Setattr that bypasses mypy method-assign and ruff B010."""
     setattr(obj, name, value)
 
 
@@ -60,6 +78,7 @@ def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
         CONF_TOKEN: "test-music-token",
         CONF_YM_INSTANCE: YM_INSTANCE_OWN,
         CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+        CONF_ALLOW_PLAYER_SWITCH: True,
         CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
         CONF_DEVICE_ID: "test-device-uuid",
         "log_level": "GLOBAL",
@@ -99,11 +118,15 @@ def _make_mock_mass() -> MagicMock:
     mass.players.all_players = MagicMock(return_value=[])
     mass.players.get_player = MagicMock(return_value=None)
     mass.players.cmd_stop = AsyncMock()
+    mass.players.cmd_pause = AsyncMock()
+    mass.players.cmd_play = AsyncMock()
     mass.players.cmd_volume_set = AsyncMock()
     mass.players.trigger_player_update = MagicMock()
 
-    # Player queues — external triggers route through player_queues.play_media now
+    # Player queues
     mass.player_queues.play_media = AsyncMock()
+    mass.player_queues.pause = AsyncMock()
+    mass.player_queues.play = AsyncMock()
 
     # Streams — live metadata updates flow through update_stream_metadata
     mass.streams.update_stream_metadata = MagicMock()
@@ -243,6 +266,24 @@ class TestSourceSelection:
         await provider.on_source_selected("main", "new-player", "new-player", "session_1")
         assert provider._active_player_id == "new-player"
         assert provider._active_session_id == "session_1"
+
+    async def test_on_source_selected_switching_disabled(self) -> None:
+        """Rejects source selection when player switching is disabled."""
+        mass = _make_mock_mass()
+        config = _make_mock_config({CONF_ALLOW_PLAYER_SWITCH: False})
+        manifest = _make_mock_manifest()
+        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+
+        # Set default player
+        provider._default_player_id = "default-player"
+        mass.players.get_player.return_value = MagicMock()
+
+        with pytest.raises(RuntimeError, match="Player switching is disabled"):
+            await provider.on_source_selected("main", "other-player", "other-player", "session_1")
+
+        # Should have redirected to the configured default via play_media
+        mass.player_queues.play_media.assert_awaited()
+        assert provider._active_player_id is None
 
 
 # ------------------------------------------------------------------
@@ -495,6 +536,10 @@ class TestYnisonStateHandling:
     async def test_duration_updated_from_stream_details(self) -> None:
         """Duration is updated from stream_details and pushed to Ynison."""
         provider = _make_provider()
+        # trigger_player_update needs the actual player id (bridge), not the
+        # queue id — bridge players (`spb_*`) wrap the bare ALSA UUID and the
+        # MA UI's state machine lives on the bridge.
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
         mock_ynison = MagicMock()
         mock_ynison.update_playing_status = AsyncMock()
@@ -513,7 +558,7 @@ class TestYnisonStateHandling:
         assert meta.elapsed_time == 30  # 30000ms → 30s
         assert provider._actual_duration_ms == 185000
         provider.mass.players.trigger_player_update.assert_called_once_with(  # type: ignore[attr-defined]
-            "player1", force_update=True
+            "spb_bridge1", force_update=True
         )
         # Real duration pushed to Ynison
         mock_ynison.update_playing_status.assert_awaited_once_with(
@@ -1760,35 +1805,85 @@ class TestSendProgressToYnison:
 
 
 class TestPausePlayback:
-    """Tests for _pause_playback."""
+    """Tests for `_pause_playback` — external pause releases the player."""
 
-    async def test_stops_stream_and_player(self) -> None:
-        """Pause stops stream, calls cmd_stop, preserves progress."""
+    async def test_sets_stop_event_and_cmd_stops_queue(self) -> None:
+        """External pause sets the stop event and calls cmd_stop on the queue id."""
         provider = _make_provider()
-        provider._streaming_progress_ms = 50000
+        provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
 
         await provider._pause_playback()
 
         assert provider._stream_stop_event.is_set()
-        provider.mass.players.cmd_stop.assert_awaited_once_with("player1")  # type: ignore[attr-defined]
-        # _pause_playback no longer pre-clears _in_use_by_queue — the lock
-        # release is owned by serve_queue_item_stream's finally calling
-        # on_source_unselected after cmd_stop's stream drain completes.
-        # Clearing here would double-write against the session-id guard.
-        assert provider._in_use_by_queue == "player1"
-        # Progress is preserved for resume
-        assert provider._streaming_progress_ms == 50000
+        provider.mass.players.cmd_stop.assert_awaited_once_with("player1")
 
-    async def test_no_active_player(self) -> None:
-        """Pause with no active player just sets stop event."""
+    async def test_rewrites_active_player_id_after_successful_cmd_stop(self) -> None:
+        """On a successful cmd_stop, `_active_player_id` demotes to the queue id.
+
+        Queues live on the bare ALSA UUID; bridge wrappers (`spb_*`) do
+        not own one. Resume's `play_media(_active_player_id, ...)`
+        must target the queue id — otherwise MA raises
+        `PlayerUnavailableError`. The demotion happens AFTER cmd_stop
+        so a failure path leaves the bridge id intact for next attempt.
+        """
         provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
+
+        # capture _active_player_id at the moment cmd_stop is invoked —
+        # must still be the bridge id (rewrite is post-success).
+        captured: dict[str, str | None] = {}
+
+        async def _capture_stop(_player_id: str) -> None:
+            captured["active_player_id_at_call"] = provider._active_player_id
+
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=_capture_stop)
+
+        await provider._pause_playback()
+
+        assert captured["active_player_id_at_call"] == "spb_bridge1"
+        assert provider._active_player_id == "player1"
+        # _paused flag set so the resume edge in _activate_playback can
+        # detect us even if _stream_stop_event has been cleared by some
+        # other code path.
+        assert provider._paused is True
+
+    async def test_cmd_stop_failure_keeps_bridge_id_intact(self) -> None:
+        """A cmd_stop failure must not demote `_active_player_id`.
+
+        If we demoted to the queue id but cmd_stop never reached MA,
+        the next `_activate_playback` would try `play_media(bare_uuid)`
+        without MA ever having released the bridge — wedges the bridge
+        in an inconsistent state. Better to keep the bridge id pinned
+        and let the next pause attempt redo the cycle.
+        """
+        provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await provider._pause_playback()
+
+        assert provider._active_player_id == "spb_bridge1"
+        # Stream stop event still set — generator must exit even if MA
+        # never confirmed; otherwise we'd serve real audio against a
+        # player MA thinks is detached.
+        assert provider._stream_stop_event.is_set()
+        # _paused stays False on the failure path — we're not in a
+        # "successfully paused, expecting resume" state.
+        assert provider._paused is False
+
+    async def test_no_active_player_is_a_noop(self) -> None:
+        """Pause with no active queue does not call cmd_stop or set the stop event."""
+        provider = _make_provider()
+        provider._active_player_id = None
         provider._in_use_by_queue = None
 
         await provider._pause_playback()
 
-        assert provider._stream_stop_event.is_set()
-        provider.mass.players.cmd_stop.assert_not_called()  # type: ignore[attr-defined]
+        assert not provider._stream_stop_event.is_set()
+        provider.mass.players.cmd_stop.assert_not_called()
 
 
 # ------------------------------------------------------------------
@@ -2161,6 +2256,64 @@ class TestActivatePlayback:
         assert provider._active_player_id == "player1"
         provider.mass.create_task.assert_called()  # type: ignore[unreachable]
 
+    async def test_unpause_after_external_pause_fires_play_media(self) -> None:
+        """Resume after pause schedules play_media for the (queue-id) player.
+
+        Simulates the post-`_pause_playback` state: `_stream_stop_event`
+        set, `_active_player_id` already demoted to the queue id (the
+        pause path's post-cmd_stop rewrite), `_in_use_by_queue` cleared
+        by `on_source_unselected`. `_activate_playback` should fire
+        `play_media(queue_id, audio_source.uri)` and clear the stop
+        event so the next session is free to run.
+        """
+        provider = _make_provider()
+        # Post-pause state: AriaCast path demoted _active_player_id to
+        # the queue id (bare UUID) after cmd_stop succeeded.
+        provider._stream_stop_event.set()
+        provider._active_player_id = "player1"
+        provider._in_use_by_queue = None
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+
+        play_media_calls = _arm_play_media_recorder(provider)
+
+        state = _make_ynison_state(progress_ms=10_000, paused=False)
+
+        await provider._activate_playback(state)
+        await asyncio.sleep(0)  # let the scheduled play_media coro run
+
+        assert len(play_media_calls) == 1
+        target_id, uri = play_media_calls[0]
+        # Target must be the (queue id) bare player, NOT the bridge.
+        # Bridge id has no queue → PlayerUnavailableError.
+        assert target_id == "player1"
+        assert uri == str(provider._audio_source.uri)
+        assert not provider._stream_stop_event.is_set()
+
+    async def test_resume_via_paused_flag_alone(self) -> None:
+        """Resume fires play_media even if `_stream_stop_event` was cleared."""
+        provider = _make_provider()
+        provider._stream_stop_event.clear()
+        provider._paused = True
+        provider._active_player_id = "player1"
+        provider._in_use_by_queue = None
+
+        player = MagicMock()
+        player.player_id = "player1"
+        provider.mass.players.all_players.return_value = [player]
+        provider.mass.players.get_player.return_value = player
+
+        play_media_calls = _arm_play_media_recorder(provider)
+
+        await provider._activate_playback(_make_ynison_state(progress_ms=10_000, paused=False))
+        await asyncio.sleep(0)
+
+        assert play_media_calls, "play_media must fire even without stop event"
+        assert provider._paused is False  # cleared by _activate_playback
+
     async def test_detects_track_change(self) -> None:
         """Detects track change and updates streaming track id."""
         provider = _make_provider()
@@ -2526,3 +2679,360 @@ class TestPrefetchOrdering:
         assert order, "expected at least a prefetch call"
         assert order[0].startswith("prefetch:track42")
         assert any(c.startswith("play_media:player1") for c in order[1:])
+
+
+class TestPrefetchFlowsThroughToStreamDetails:
+    """`get_stream_details` returns the *prefetched* AudioFormat.
+
+    Pins the contract that MA's upstream passthrough path (#3969,
+    `_select_audio_source_pcm_format`) honors: MA reads
+    ``streamdetails.audio_format`` and only invokes ffmpeg when it
+    cannot match the player's supported rates. A regression that
+    decouples ``_prefetch_format_for_track`` from
+    ``self._normalized_params`` (or that returns a stale snapshot in
+    ``get_stream_details``) would silently downgrade hi-res passthrough
+    to a forced ffmpeg resample with no functional indicator beyond
+    log entropy.
+    """
+
+    async def test_prefetch_updates_streamdetails_audio_format(self) -> None:
+        """Prefetched source rate/bit-depth must reach `get_stream_details`."""
+        from music_assistant_models.enums import MediaType  # noqa: PLC0415
+
+        provider = _make_provider()
+        # Default before prefetch: lossy PCM (16-bit / 44.1 kHz auto base).
+        default_rate = provider._normalized_params["sample_rate"]
+        assert default_rate != 96_000  # sanity: ensure we'll see a change
+
+        mock_yandex = MagicMock()
+
+        async def _fake_get_stream_details(_track_id: str, _media_type: MediaType) -> Any:
+            sd = MagicMock()
+            sd.expiration = 60
+            sd.duration = 200
+            sd.data = None
+            sd.audio_format = AudioFormat(
+                content_type=ContentType.FLAC,
+                sample_rate=96_000,
+                bit_depth=24,
+                channels=2,
+            )
+            sd.to_dict = MagicMock(return_value={})
+            return sd
+
+        mock_yandex.get_stream_details = AsyncMock(side_effect=_fake_get_stream_details)
+        provider._yandex_provider = mock_yandex
+        # Set explicit AUTO so prefetch hint is allowed to promote both axes.
+        provider._cfg_sample_rate = OUTPUT_AUTO
+        provider._cfg_bit_depth = OUTPUT_AUTO
+
+        await provider._prefetch_format_for_track("track42")
+
+        # `_normalized_params` lifted to source rate/bit-depth.
+        assert provider._normalized_params["sample_rate"] == 96_000
+        assert provider._normalized_params["bit_depth"] == 24
+        # And get_stream_details now reflects that — MA's
+        # `_select_audio_source_pcm_format` consumes this.
+        sd = await provider.get_stream_details("main", "queue1")
+        assert sd.media_type == MediaType.AUDIO_SOURCE
+        assert sd.audio_format.sample_rate == 96_000
+        assert sd.audio_format.bit_depth == 24
+        assert sd.audio_format.channels == 2
+
+    async def test_streamdetails_audio_format_is_fresh_copy_per_call(self) -> None:
+        """Each `get_stream_details` returns a fresh AudioFormat instance.
+
+        `AudioFormat` is mutable (MA's outer ffmpeg sets `codec_type` in
+        place). A shared instance across `get_stream_details` calls
+        would let one consumer's mutation poison the next one's
+        snapshot — which #3969's passthrough specifically depends on
+        for the format-match comparison.
+        """
+        from music_assistant_models.enums import MediaType  # noqa: PLC0415
+
+        provider = _make_provider()
+        sd1 = await provider.get_stream_details("main", "queue1")
+        sd2 = await provider.get_stream_details("main", "queue1")
+
+        assert sd1.media_type == MediaType.AUDIO_SOURCE
+        assert sd1.audio_format == sd2.audio_format  # value-equal
+        assert sd1.audio_format is not sd2.audio_format  # not the same instance
+
+
+class TestAudioStreamPausedReturn:
+    """`get_audio_stream` exits immediately when Ynison reports paused."""
+
+    async def test_paused_state_exits_generator_without_yielding(self) -> None:
+        """A paused-at-entry session yields zero chunks and the generator ends."""
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "player1"
+        provider._active_session_id = "session-1"
+
+        ynison = MagicMock()
+        ynison.state.is_paused = True
+        ynison.state.current_track_id = "track42"
+        provider._ynison = ynison
+
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+
+        chunks: list[bytes] = []
+        with suppress(StopAsyncIteration):
+            async for chunk in gen:
+                chunks.append(chunk)
+
+        assert chunks == []
+
+
+class TestNaturalEndDifferentiation:
+    """`_signal_track_completion` fires only on clean iterator exhaustion.
+
+    These tests exercise the post-inner-loop branch via
+    ``_wait_for_track_change`` as the outer-loop gate. The previous
+    iteration set ``_stream_stop_event`` between yields, which made the
+    stop-event guard above ``natural_end`` short-circuit the very logic
+    we wanted to verify — the tests passed for the wrong reason. The
+    rewritten infra lets ``natural_end`` actually evaluate and uses the
+    ``_wait_for_track_change`` stub to terminate the outer loop.
+    """
+
+    def _build(self) -> YandexYnisonProvider:
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._in_use_by_queue = "player1"
+        provider._active_session_id = "session-1"
+        ynison = MagicMock()
+        ynison.connected = True
+        ynison.state.is_paused = False
+        ynison.state.current_track_id = "track42"
+        ynison.state.player_state = {"status": {"paused": False}}
+        ynison.update_playing_status = AsyncMock()
+        provider._ynison = ynison
+        return provider
+
+    @staticmethod
+    def _spy_signal(provider: YandexYnisonProvider) -> list[int]:
+        calls: list[int] = []
+
+        async def _spy() -> None:
+            calls.append(1)
+
+        _stub_attr(provider, "_signal_track_completion", _spy)
+        return calls
+
+    @staticmethod
+    def _gate_outer_loop_after_signal(provider: YandexYnisonProvider) -> None:
+        """`_wait_for_track_change` returns False → outer loop exits.
+
+        ``natural_end`` calls `_wait_for_track_change`; we use its
+        return as the gate so the test terminates AFTER natural_end
+        has had a chance to evaluate. For non-natural-end paths
+        (track-change / session-change), `_wait_for_track_change` is
+        never called — we gate those via `_stream_stop_event.set()`
+        inside the chunk-yield stub, AFTER one full outer iteration.
+        """
+
+        async def _wait_false(_old: str, timeout: float = 30.0) -> bool:  # noqa: ARG001
+            provider._stream_stop_event.set()
+            return False
+
+        _stub_attr(provider, "_wait_for_track_change", _wait_false)
+
+    @staticmethod
+    async def _drive_to_exhaustion(provider: YandexYnisonProvider) -> None:
+        streamdetails = MagicMock()
+        gen = provider.get_audio_stream(streamdetails, seek_position=0)
+        try:
+            with suppress(StopAsyncIteration):
+                async for _ in gen:
+                    pass
+        finally:
+            with suppress(StopAsyncIteration, asyncio.CancelledError):
+                await gen.aclose()
+
+    async def test_clean_exhaustion_signals_completion(self) -> None:
+        """Inner loop exhausts naturally → `_signal_track_completion` fires once."""
+        provider = self._build()
+        calls = self._spy_signal(provider)
+        self._gate_outer_loop_after_signal(provider)
+
+        async def _natural_end(
+            _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
+        ) -> Any:
+            del seek_ms, session_params  # signature-compat with _stream_track
+            yield b"\x00\x00\x00\x00"
+            # generator exhausts cleanly — no break flag set
+
+        _stub_attr(provider, "_stream_track", _natural_end)
+
+        await self._drive_to_exhaustion(provider)
+
+        assert calls == [1]
+
+    async def test_track_change_during_chunk_loop_suppresses_signal(self) -> None:
+        """`_track_changed_event` set mid-stream → natural_end False → no signal.
+
+        Uses a two-invocation stub: first call arms `_track_changed_event`
+        (the natural_end check we want to verify), second call sets
+        `_stream_stop_event` to terminate the test. If we set the stop
+        event in the first call, the stop-event guard above natural_end
+        would short-circuit before the differentiation logic runs.
+        """
+        provider = self._build()
+        calls = self._spy_signal(provider)
+
+        invocation_count = 0
+
+        async def _two_pass_stream(
+            _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
+        ) -> Any:
+            del seek_ms, session_params  # signature-compat with _stream_track
+            nonlocal invocation_count
+            invocation_count += 1
+            yield b"\x00\x00\x00\x00"
+            if invocation_count == 1:
+                # First pass: arm the break flag. natural_end will see it
+                # and (correctly) suppress the signal. Outer loop re-iterates.
+                provider._track_changed_event.set()
+            else:
+                # Second pass: stop the test.
+                provider._stream_stop_event.set()
+
+        _stub_attr(provider, "_stream_track", _two_pass_stream)
+
+        await self._drive_to_exhaustion(provider)
+
+        assert calls == []
+        assert invocation_count == 2  # natural_end must have evaluated on pass 1
+
+    async def test_session_change_during_chunk_loop_suppresses_signal(self) -> None:
+        """Session-id rotation mid-stream → `broke_for_session_change` → no signal.
+
+        The session-mismatch breaks both the inner chunk loop's break
+        guard AND the outer-loop's session check, so the generator
+        exits after one iteration without further help — `natural_end`
+        runs once with `broke_for_session_change=True` and must not
+        signal.
+        """
+        provider = self._build()
+        calls = self._spy_signal(provider)
+
+        async def _yield_then_rotate_session(
+            _track_id: str, *, seek_ms: int = 0, session_params: dict[str, Any] | None = None
+        ) -> Any:
+            del seek_ms, session_params  # signature-compat with _stream_track
+            yield b"\x00\x00\x00\x00"
+            provider._active_session_id = "different-session"
+
+        _stub_attr(provider, "_stream_track", _yield_then_rotate_session)
+
+        await self._drive_to_exhaustion(provider)
+
+        assert calls == []
+
+    # NOTE: `broke_for_pause` inside natural_end is defensive: in
+    # practice every external pause routes through `_pause_playback`,
+    # which sets `_stream_stop_event` BEFORE the chunk loop can reach
+    # the natural_end check (the stop-event guard at the top of
+    # `get_audio_stream`'s outer loop short-circuits first). There is
+    # no production code path that lands at natural_end with
+    # `is_paused=True` and `_stream_stop_event=False`, so the clause
+    # cannot be exercised by a black-box test. It survives as
+    # belt-and-braces; intentionally untested.
+
+
+class TestBypassThrottlerScope:
+    """`BYPASS_THROTTLER` is set inside `_stream_track`, NOT inside prefetch."""
+
+    async def test_bypass_active_during_in_flight_stream_fetch(self) -> None:
+        """The in-flight stream-details fetch runs with BYPASS_THROTTLER=True."""
+        provider = _make_provider()
+        observed: list[bool] = []
+        mock_yandex = MagicMock()
+
+        async def _fake_get_stream_details(_track_id: str, _media_type: Any) -> Any:
+            observed.append(BYPASS_THROTTLER.get())
+            sd = MagicMock()
+            sd.expiration = 0
+            sd.duration = 1
+            sd.audio_format = MagicMock()
+            return sd
+
+        mock_yandex.get_stream_details = AsyncMock(side_effect=_fake_get_stream_details)
+
+        async def _fake_audio(_details: object) -> Any:
+            yield b"x"
+
+        mock_yandex.get_audio_stream = _fake_audio
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"pcm"
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+            side_effect=_fake_ffmpeg,
+        ):
+            gen = provider._stream_track("track1")
+            try:
+                async for _ in gen:
+                    break
+            finally:
+                await gen.aclose()
+
+        assert observed == [True], (
+            f"BYPASS_THROTTLER should be True inside _stream_track, got {observed}"
+        )
+        assert BYPASS_THROTTLER.get() is False
+
+    async def test_bypass_not_active_during_prefetch(self) -> None:
+        """The prefetch path is intentionally NOT bypassed — opportunistic only."""
+        provider = _make_provider()
+        observed: list[bool] = []
+        mock_yandex = MagicMock()
+
+        async def _fake_get_stream_details(_track_id: str, _media_type: Any) -> Any:
+            observed.append(BYPASS_THROTTLER.get())
+            sd = MagicMock()
+            sd.expiration = 0
+            sd.audio_format = MagicMock()
+            sd.audio_format.sample_rate = 44100
+            sd.audio_format.bit_depth = 16
+            return sd
+
+        mock_yandex.get_stream_details = AsyncMock(side_effect=_fake_get_stream_details)
+        provider._yandex_provider = mock_yandex
+
+        await provider._prefetch_format_for_track("track1")
+
+        assert observed == [False], (
+            f"BYPASS_THROTTLER must NOT be set during prefetch, got {observed}"
+        )
+
+    async def test_bypass_resets_on_exception(self) -> None:
+        """A raise inside the bypassed call must still reset the context-var."""
+        provider = _make_provider()
+        mock_yandex = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(side_effect=RuntimeError("boom"))
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        # _stream_track swallows the exception, sets the stop event, returns.
+        # Patch asyncio.sleep so the inner retry-with-backoff (2s + 4s) does
+        # not block the test in real time.
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.asyncio.sleep", new=AsyncMock()
+        ):
+            async for _ in provider._stream_track("track1"):
+                pass
+
+        assert BYPASS_THROTTLER.get() is False
