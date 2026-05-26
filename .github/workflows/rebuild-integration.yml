@@ -16,6 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Rebuild integration/pending-upstream
         env:
