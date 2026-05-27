@@ -78,7 +78,24 @@ def make_serve_page(_ctx: WizardContext) -> Callable[[web.Request], Any]:
                 # to be framed so a hostile page cannot UI-redress the user
                 # into pressing "Generate config" inside an invisible iframe.
                 "X-Frame-Options": "DENY",
-                "Content-Security-Policy": "frame-ancestors 'none'",
+                # Belt-and-braces with X-Frame-Options for frame-ancestors,
+                # plus a tight script/style/connect/img policy so a future
+                # edit that interpolates server-side data into the inline
+                # HTML can't turn into stored XSS that reads the per-client
+                # tokens cached in sessionStorage.
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    "script-src 'unsafe-inline'; "
+                    "style-src 'unsafe-inline'; "
+                    "connect-src 'self'; "
+                    "img-src 'self' data:; "
+                    "frame-ancestors 'none'"
+                ),
+                # The bootstrap now rides in the URL fragment (so it doesn't
+                # appear in access logs), but we still suppress Referer so
+                # the GitHub footer link (or any future outbound link) can't
+                # leak the path + state of the wizard either.
+                "Referrer-Policy": "no-referrer",
             },
         )
 

@@ -94,6 +94,37 @@ async def test_connect_html_served(wizard_client: TestClient) -> None:
     assert "connect" in body.lower()
 
 
+async def test_connect_page_sets_security_headers(wizard_client: TestClient) -> None:
+    """The wizard response carries Referrer-Policy, CSP, and X-Frame-Options.
+
+    Two leak vectors motivate these:
+
+    * The bootstrap token in the URL would be leaked via ``Referer`` on
+      the GitHub footer link (or any future outbound link) without
+      ``Referrer-Policy: no-referrer``.
+    * Per-client long-lived MA tokens are cached in ``sessionStorage``; a
+      future inline-data XSS in this page would steal them all without a
+      tight Content-Security-Policy.
+    """
+    resp = await wizard_client.get("/mcp/v1/connect", headers={"Origin": "http://localhost:8095"})
+    assert resp.headers.get("Referrer-Policy") == "no-referrer"
+
+    csp = resp.headers.get("Content-Security-Policy") or ""
+    # Each directive is necessary — script-src controls inline JS scope,
+    # connect-src 'self' bars exfiltration to attacker origins, etc.
+    for directive in (
+        "default-src 'none'",
+        "script-src 'unsafe-inline'",
+        "style-src 'unsafe-inline'",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+    ):
+        assert directive in csp, f"missing CSP directive: {directive!r}; got {csp!r}"
+
+    assert resp.headers.get("X-Frame-Options") == "DENY"
+    assert resp.headers.get("Cache-Control") == "no-store"
+
+
 async def test_info_endpoint_shape(wizard_client: TestClient) -> None:
     """``GET /mcp/v1/connect/info`` returns the meta JSON the UI needs."""
     resp = await wizard_client.get(
@@ -479,6 +510,32 @@ async def test_action_handler_signals_url_with_bootstrap(
     # advertised base_url points at an internal IP the browser cannot reach.
     assert url.startswith("/mcp/v1/connect")
     assert "bootstrap=jwt-xyz" in url
+
+
+async def test_action_handler_uses_url_fragment_for_bootstrap(
+    wizard_mass: MagicMock, mock_user: MagicMock
+) -> None:
+    """The bootstrap rides in the URL ``#fragment``, not the query string.
+
+    Query-string form would leak the bootstrap into aiohttp access logs and
+    every reverse-proxy log on the path; the GET request line is logged.
+    Fragments are never sent to the server, so this is the only form that
+    keeps short-lived bootstraps out of log files.
+    """
+    await handle_open_connect_action(
+        wizard_mass,
+        current_user=mock_user,
+        mount_path="/mcp/v1",
+        base_url="http://localhost:8095",
+    )
+
+    _, kwargs = wizard_mass.signal_event.call_args
+    url = kwargs.get("data") if "data" in kwargs else wizard_mass.signal_event.call_args[0][-1]
+    assert isinstance(url, str)
+    assert "#bootstrap=" in url, f"bootstrap should ride in #fragment, got {url!r}"
+    assert "?bootstrap=" not in url, (
+        f"bootstrap must not appear in query string (would leak to logs); got {url!r}"
+    )
 
 
 async def test_action_handler_no_user_signals_plain_url(wizard_mass: MagicMock) -> None:
