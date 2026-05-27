@@ -130,3 +130,23 @@ async def test_jwt_with_aud_list_accepted(mock_mass: MagicMock, mock_user: Magic
     verifier = MASTokenVerifier(mock_mass, public_resource_uri=_RESOURCE, enforce_audience=True)
     token = _make_jwt({"sub": "u1", "aud": ["http://other.example", _RESOURCE]})
     assert await verifier.verify_token(token) is not None
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_audience_mismatch_skips_authenticate(
+    mock_mass: MagicMock, mock_user: MagicMock
+) -> None:
+    """A token rejected on audience must not reach ``authenticate_with_token``.
+
+    Calling MA's auth refreshes the sliding-window expiry for the token. If
+    audience was checked second (after authenticate), an attacker holding a
+    valid MA token issued for a different endpoint could keep it alive
+    indefinitely by repeatedly hitting the MCP endpoint — even though MCP
+    rejects the request. The check now runs first; MA is never consulted.
+    """
+    mock_mass.webserver.auth.authenticate_with_token = AsyncMock(return_value=mock_user)
+    verifier = MASTokenVerifier(mock_mass, public_resource_uri=_RESOURCE, enforce_audience=True)
+    token = _make_jwt({"sub": "u1", "aud": "http://other.example/api"})
+
+    assert await verifier.verify_token(token) is None
+    mock_mass.webserver.auth.authenticate_with_token.assert_not_awaited()

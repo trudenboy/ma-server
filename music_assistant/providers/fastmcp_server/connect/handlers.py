@@ -52,6 +52,55 @@ def _origin_guard(ctx: WizardContext, request: web.Request) -> web.Response | No
     return None
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """Return True if ``host`` (``Host`` header, may include ``:port``) is loopback."""
+    if not host:
+        return False
+    # Strip optional port; IPv6 literals are bracketed (``[::1]:8095``), so
+    # rsplit-on-colon-after-bracket-close is the simplest correct approach.
+    if host.startswith("["):
+        # ``[::1]`` or ``[::1]:8095``
+        end = host.find("]")
+        bare = host[: end + 1] if end != -1 else host
+    else:
+        bare = host.rsplit(":", 1)[0]
+    return bare.lower() in _LOOPBACK_HOSTS
+
+
+def _scheme_guard(request: web.Request) -> web.Response | None:
+    """Reject plaintext-http credential traffic from non-loopback hosts.
+
+    ``/connect/login`` carries the MA admin password; ``/connect/exchange`` and
+    ``/connect/token`` carry bootstrap / session tokens. Over plain HTTP from
+    a LAN host any of these is sniffable. The guard waves through HTTPS
+    (encrypted) and loopback (the bytes never leave the box), and rejects
+    everything else with a JSON 400 that the wizard UI can surface.
+    """
+    if request.scheme == "https":
+        return None
+    if _is_loopback_host(request.host):
+        return None
+    LOGGER.warning(
+        "Connect Wizard: refused plaintext credential request to %r from %s "
+        "(use HTTPS, or open the wizard via http://localhost)",
+        request.path,
+        request.remote,
+    )
+    return web.json_response(
+        {
+            "success": False,
+            "error": (
+                "Plaintext credential traffic from non-loopback hosts is not "
+                "allowed. Use HTTPS, or open the wizard via http://localhost."
+            ),
+        },
+        status=400,
+    )
+
+
 async def _read_json(request: web.Request) -> dict[str, Any]:
     """Best-effort JSON parse; missing/malformed body becomes an empty dict."""
     try:
@@ -141,7 +190,7 @@ def make_exchange(ctx: WizardContext) -> Callable[[web.Request], Any]:
     """Build the ``POST /connect/exchange`` handler — bootstrap → session token."""
 
     async def handler(request: web.Request) -> web.Response:
-        guard = _origin_guard(ctx, request)
+        guard = _origin_guard(ctx, request) or _scheme_guard(request)
         if guard is not None:
             return guard
 
@@ -196,7 +245,7 @@ def make_login(ctx: WizardContext) -> Callable[[web.Request], Any]:
     """Build the ``POST /connect/login`` handler — username/password fallback."""
 
     async def handler(request: web.Request) -> web.Response:
-        guard = _origin_guard(ctx, request)
+        guard = _origin_guard(ctx, request) or _scheme_guard(request)
         if guard is not None:
             return guard
 
@@ -246,7 +295,7 @@ def make_mint_token(ctx: WizardContext) -> Callable[[web.Request], Any]:
     """Build the ``POST /connect/token`` handler — mint per-client long-lived token."""
 
     async def handler(request: web.Request) -> web.Response:
-        guard = _origin_guard(ctx, request)
+        guard = _origin_guard(ctx, request) or _scheme_guard(request)
         if guard is not None:
             return guard
 

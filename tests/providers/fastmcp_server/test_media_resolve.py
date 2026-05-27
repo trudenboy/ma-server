@@ -101,9 +101,9 @@ def _fake_item(media_type: MediaType, **kwargs: Any) -> MagicMock:
     item.uri = kwargs.get("uri", "library://track/1")
     item.name = kwargs.get("name", "Track Name")
     item.artists = kwargs.get("artists", [])
-    item.album = kwargs.get("album", None)
+    item.album = kwargs.get("album")
     item.duration = kwargs.get("duration", 180)
-    item.metadata = kwargs.get("metadata", None)
+    item.metadata = kwargs.get("metadata")
     return item
 
 

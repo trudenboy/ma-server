@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -219,10 +220,17 @@ def build_media_server(mass: MusicAssistant, *, require_confirmation: bool = Tru
 
         :param player_id: Player identifier from ``PlayerBrief.player_id``.
         :param url: HTTP(S) URL of the audio clip — not a Music Assistant
-            URI.
+            URI. Non-http(s) schemes (``file://``, ``data:``, …) are
+            rejected with a ``ToolError`` before reaching MA.
         :param volume_level: Override volume ``0``-``100`` for the
-            announcement only; omit to keep the player's current volume.
+            announcement only; out-of-range values are clamped. Omit to
+            keep the player's current volume.
         """
+        scheme = urlsplit(url).scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise ToolError(f"play_announcement only accepts http(s) URLs, got scheme={scheme!r}")
+        if volume_level is not None:
+            volume_level = max(0, min(100, int(volume_level)))
         await mass.players.play_announcement(player_id, url, volume_level=volume_level)
 
     return sub
