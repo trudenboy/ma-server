@@ -10,7 +10,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from ..tags import Tag
-from ._common import TIMEOUT_MUTATION, confirm_or_raise
+from ._common import TIMEOUT_MUTATION, TIMEOUT_QUERY, confirm_or_raise
 
 if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
@@ -73,7 +73,15 @@ def build_media_server(mass: MusicAssistant, *, require_confirmation: bool = Tru
         timeout=TIMEOUT_MUTATION,
     )  # type: ignore[untyped-decorator, unused-ignore]
     async def add_to_favorites(uri: str) -> None:
-        """Add a media item (by URI) to favorites."""
+        """
+        Mark a media item as a favorite.
+
+        Does not add the item to the library — use ``add_to_library`` for
+        that. Safe to call on an already-favorited item. Returns nothing.
+
+        :param uri: Music Assistant URI of the artist, album, track,
+            playlist or radio station (e.g. as found on ``TrackBrief.uri``).
+        """
         item = await _resolve_uri(mass, uri)
         await mass.music.add_item_to_favorites(item)
 
@@ -89,7 +97,16 @@ def build_media_server(mass: MusicAssistant, *, require_confirmation: bool = Tru
         timeout=TIMEOUT_MUTATION,
     )  # type: ignore[untyped-decorator, unused-ignore]
     async def remove_from_favorites(uri: str, ctx: Context | None = None) -> None:
-        """Remove a media item (by URI) from favorites."""
+        """
+        Remove a media item from favorites.
+
+        The item must already be in the library. Does not remove the item
+        from the library itself — use ``remove_from_library`` for that.
+        When ``Confirm destructive operations`` is enabled the client is
+        asked to confirm first. Returns nothing.
+
+        :param uri: Music Assistant URI of the item to unfavorite.
+        """
         await confirm_or_raise(
             ctx,
             f"Remove {uri!r} from favorites?",
@@ -110,7 +127,16 @@ def build_media_server(mass: MusicAssistant, *, require_confirmation: bool = Tru
         timeout=TIMEOUT_MUTATION,
     )  # type: ignore[untyped-decorator, unused-ignore]
     async def add_to_library(uri: str) -> None:
-        """Add a media item (by URI) to the library."""
+        """
+        Import a media item into the local library.
+
+        Does not mark the item as a favorite — use ``add_to_favorites`` for
+        that. Safe to call if the item is already in the library. Returns
+        nothing.
+
+        :param uri: Music Assistant URI of the artist, album, track,
+            playlist or radio station to import.
+        """
         item = await _resolve_uri(mass, uri)
         await mass.music.add_item_to_library(item)
 
@@ -126,7 +152,15 @@ def build_media_server(mass: MusicAssistant, *, require_confirmation: bool = Tru
         timeout=TIMEOUT_MUTATION,
     )  # type: ignore[untyped-decorator, unused-ignore]
     async def remove_from_library(uri: str, ctx: Context | None = None) -> None:
-        """Remove a media item (by URI) from the library."""
+        """
+        Permanently remove a media item from the library. Cannot be undone.
+
+        Implicitly removes any favorite status. When ``Confirm destructive
+        operations`` is enabled the client is asked to confirm first.
+        Returns nothing.
+
+        :param uri: Music Assistant URI of the item to remove.
+        """
         await confirm_or_raise(
             ctx,
             f"Remove {uri!r} from the library? This cannot be undone.",
@@ -147,7 +181,14 @@ def build_media_server(mass: MusicAssistant, *, require_confirmation: bool = Tru
         timeout=TIMEOUT_MUTATION,
     )  # type: ignore[untyped-decorator, unused-ignore]
     async def mark_played(uri: str) -> None:
-        """Mark a media item as played (updates play history)."""
+        """
+        Update play history for a media item.
+
+        Increments the item's play count and sets the last-played timestamp.
+        Does not play any audio. Returns nothing.
+
+        :param uri: Music Assistant URI of the item to mark as played.
+        """
         item = await _resolve_uri(mass, uri)
         await mass.music.mark_item_played(item)
 
@@ -160,10 +201,20 @@ def build_media_server(mass: MusicAssistant, *, require_confirmation: bool = Tru
             idempotentHint=False,
             openWorldHint=False,
         ),
-        timeout=TIMEOUT_MUTATION,
+        timeout=TIMEOUT_QUERY,
     )  # type: ignore[untyped-decorator, unused-ignore]
     async def play_announcement(player_id: str, url: str, volume_level: int | None = None) -> None:
-        """Play a one-shot announcement audio URL on a player."""
+        """
+        Interrupt playback to play a one-shot audio clip, then resume.
+
+        Returns nothing.
+
+        :param player_id: Player identifier from ``PlayerBrief.player_id``.
+        :param url: HTTP(S) URL of the audio clip — not a Music Assistant
+            URI.
+        :param volume_level: Override volume ``0``-``100`` for the
+            announcement only; omit to keep the player's current volume.
+        """
         await mass.players.play_announcement(player_id, url, volume_level=volume_level)
 
     return sub

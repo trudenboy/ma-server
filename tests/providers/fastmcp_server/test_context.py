@@ -12,7 +12,6 @@ from fastmcp import Client, FastMCP
 from music_assistant.providers.fastmcp_server.tools import (
     build_library_server,
     build_metadata_server,
-    build_playlists_server,
 )
 
 
@@ -64,39 +63,6 @@ async def test_recommendations_runs_under_context(mock_mass: MagicMock) -> None:
     assert any("item_uris" in t or "Hits" in t for t in text_blocks)
 
 
-async def test_add_tracks_bulk_path_for_small_batch(mock_mass: MagicMock) -> None:
-    """For ≤10 tracks, the bulk add_playlist_tracks call is used (single round-trip)."""
-    mock_mass.music.playlists.add_playlist_tracks = AsyncMock()
-    mock_mass.music.playlists.add_playlist_track = AsyncMock()
-
-    mcp: FastMCP = FastMCP(name="t")
-    mcp.mount(build_playlists_server(mock_mass), namespace="playlists")
-
-    track_uris = [f"lib://t/{i}" for i in range(5)]
-    async with Client(mcp) as client:
-        await client.call_tool(
-            "playlists_add_tracks",
-            {"playlist_id": 1, "track_uris": track_uris},
-        )
-
-    mock_mass.music.playlists.add_playlist_tracks.assert_awaited_once_with(1, track_uris)
-    mock_mass.music.playlists.add_playlist_track.assert_not_awaited()
-
-
-async def test_add_tracks_per_item_path_for_large_batch(mock_mass: MagicMock) -> None:
-    """For >10 tracks, items are dispatched per-item (so we can report progress)."""
-    mock_mass.music.playlists.add_playlist_tracks = AsyncMock()
-    mock_mass.music.playlists.add_playlist_track = AsyncMock()
-
-    mcp: FastMCP = FastMCP(name="t")
-    mcp.mount(build_playlists_server(mock_mass), namespace="playlists")
-
-    track_uris = [f"lib://t/{i}" for i in range(15)]
-    async with Client(mcp) as client:
-        await client.call_tool(
-            "playlists_add_tracks",
-            {"playlist_id": 1, "track_uris": track_uris},
-        )
-
-    assert mock_mass.music.playlists.add_playlist_track.await_count == 15
-    mock_mass.music.playlists.add_playlist_tracks.assert_not_awaited()
+# Playlists routing tests live in tests/test_playlists.py — that suite covers
+# the per-track loop, progress reporting, and the URI/int normalisation
+# contract that supersedes the previous ≤10 fast-path tests.
