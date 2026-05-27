@@ -70,22 +70,60 @@ def _is_loopback_host(host: str | None) -> bool:
     return bare.lower() in _LOOPBACK_HOSTS
 
 
-def _scheme_guard(request: web.Request) -> web.Response | None:
-    """Reject plaintext-http credential traffic from non-loopback hosts.
+def _is_request_via_ha_ingress(request: web.Request) -> bool:
+    """Return True when MA recognises the request as arriving via HA ingress.
 
-    ``/connect/login`` carries the MA admin password; ``/connect/exchange`` and
-    ``/connect/token`` carry bootstrap / session tokens. Over plain HTTP from
-    a LAN host any of these is sniffable. The guard waves through HTTPS
-    (encrypted) and loopback (the bytes never leave the box), and rejects
-    everything else with a JSON 400 that the wizard UI can surface.
+    Home Assistant terminates TLS at its own ``https://ha.example/...``
+    front door and forwards the request to MA over a *local* socket, so the
+    transport on MA's side is plain HTTP — but the bytes never crossed the
+    public network. MA's ``is_request_from_ingress`` helper verifies that
+    by checking the trusted ingress socket; we mirror its
+    ``ImportError → fail closed`` / ``unexpected → log and fail closed``
+    contract here (same pattern as :func:`provider.origins.is_origin_allowed_for_request`).
+    """
+    try:
+        from music_assistant.controllers.webserver.helpers.auth_middleware import (  # noqa: PLC0415
+            is_request_from_ingress,
+        )
+    except (ImportError, ModuleNotFoundError):
+        # Bare provider venv — MA helper unavailable. Fail closed without noise.
+        return False
+    except Exception:
+        LOGGER.exception("Connect Wizard: unexpected error importing ingress helper")
+        return False
+    try:
+        return bool(is_request_from_ingress(request))
+    except Exception:
+        LOGGER.exception("Connect Wizard: is_request_from_ingress raised")
+        return False
+
+
+def _scheme_guard(request: web.Request) -> web.Response | None:
+    """Reject plaintext-http credential traffic from untrusted-transport hosts.
+
+    ``/connect/login`` carries the MA admin password; ``/connect/exchange``
+    and ``/connect/token`` carry bootstrap / session tokens. Over plain HTTP
+    from a LAN host any of these is sniffable. The guard waves through:
+
+    * **HTTPS** — encrypted end-to-end.
+    * **Loopback** — the bytes never leave the box.
+    * **Home-Assistant ingress** — HA terminates TLS at its public front
+      door and forwards the request to MA over a local socket the HA
+      auth-middleware verifies; the public hop *is* HTTPS even though
+      MA's transport sees plain HTTP.
+
+    Everything else gets a JSON 400 the wizard UI can surface to the user.
     """
     if request.scheme == "https":
         return None
     if _is_loopback_host(request.host):
         return None
+    if _is_request_via_ha_ingress(request):
+        return None
     LOGGER.warning(
         "Connect Wizard: refused plaintext credential request to %r from %s "
-        "(use HTTPS, or open the wizard via http://localhost)",
+        "(use HTTPS, or open the wizard via http://localhost, or open the "
+        "Music Assistant UI via Home Assistant ingress)",
         request.path,
         request.remote,
     )

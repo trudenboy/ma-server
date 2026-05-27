@@ -177,6 +177,92 @@ async def test_scheme_guard_rejects_plaintext_non_loopback_exchange(
     wizard_mass.webserver.auth.authenticate_with_token.assert_not_awaited()
 
 
+def _install_fake_ingress_helper(monkeypatch: pytest.MonkeyPatch, *, is_ingress: bool) -> None:
+    """Install a stub ``is_request_from_ingress`` MA helper that returns ``is_ingress``.
+
+    HA terminates TLS at its public front door (``https://ha.example/…``)
+    and forwards the request to MA over a local socket — so MA sees plain
+    ``http://`` from a non-loopback host, but the public hop *is* HTTPS.
+    The wizard's scheme guard mirrors the ``Origin``-check pattern: when
+    ``music_assistant.controllers.webserver.helpers.auth_middleware
+    .is_request_from_ingress`` returns True, the request is on MA's
+    trusted ingress socket and the plaintext-LAN concern doesn't apply.
+    """
+    import sys  # noqa: PLC0415
+    import types  # noqa: PLC0415
+
+    pkg = types.ModuleType("music_assistant")
+    pkg.__path__ = []
+    controllers = types.ModuleType("music_assistant.controllers")
+    controllers.__path__ = []
+    webserver_pkg = types.ModuleType("music_assistant.controllers.webserver")
+    webserver_pkg.__path__ = []
+    helpers_pkg = types.ModuleType("music_assistant.controllers.webserver.helpers")
+    helpers_pkg.__path__ = []
+    auth_mod = types.ModuleType("music_assistant.controllers.webserver.helpers.auth_middleware")
+    auth_mod.is_request_from_ingress = lambda _req: is_ingress  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "music_assistant", pkg)
+    monkeypatch.setitem(sys.modules, "music_assistant.controllers", controllers)
+    monkeypatch.setitem(sys.modules, "music_assistant.controllers.webserver", webserver_pkg)
+    monkeypatch.setitem(sys.modules, "music_assistant.controllers.webserver.helpers", helpers_pkg)
+    monkeypatch.setitem(
+        sys.modules,
+        "music_assistant.controllers.webserver.helpers.auth_middleware",
+        auth_mod,
+    )
+
+
+async def test_scheme_guard_allows_plaintext_via_ha_ingress(
+    wizard_client: TestClient,
+    wizard_mass: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HA ingress: plaintext non-loopback is OK when the request is on the trusted socket.
+
+    Reproduces the production breakage on
+    ``https://ha.nevskiy.su/api/hassio_ingress/<id>/mcp/v1/connect``:
+    HA forwards the request to MA over a local socket, so the wizard
+    sees ``request.scheme == "http"`` and a non-loopback ``request.host``
+    even though the public hop is HTTPS. Without honouring the ingress
+    helper, the wizard's scheme guard rejected the bootstrap exchange
+    and the user was shown the login fields with
+    ``Plaintext credential traffic from non-loopback hosts is not
+    allowed`` on submit. The guard must recognise the trusted-ingress
+    transport and let the request through.
+    """
+    _install_fake_ingress_helper(monkeypatch, is_ingress=True)
+    resp = await wizard_client.post(
+        "/mcp/v1/connect/exchange",
+        json={"bootstrap": "boot-1"},
+        headers={"Origin": "http://localhost:8095", "Host": "ha.example:8123"},
+    )
+    assert resp.status == 200
+    wizard_mass.webserver.auth.authenticate_with_token.assert_awaited_with("boot-1")
+
+
+async def test_scheme_guard_still_rejects_when_ingress_helper_returns_false(
+    wizard_client: TestClient,
+    wizard_mass: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ingress bypass requires MA's helper to actually confirm the trusted socket.
+
+    A direct LAN request (not via HA ingress) with the same shape — plaintext
+    http, non-loopback host — must still be refused. This pins that the
+    bypass is gated on ``is_request_from_ingress``, not on any other property
+    of the request a hostile client could forge.
+    """
+    _install_fake_ingress_helper(monkeypatch, is_ingress=False)
+    resp = await wizard_client.post(
+        "/mcp/v1/connect/login",
+        json={"username": "admin", "password": "hunter2"},
+        headers={"Origin": "http://localhost:8095", "Host": "192.168.1.42:8095"},
+    )
+    assert resp.status == 400
+    wizard_mass.webserver.auth.login.assert_not_awaited()
+
+
 async def test_info_endpoint_shape(wizard_client: TestClient) -> None:
     """``GET /mcp/v1/connect/info`` returns the meta JSON the UI needs."""
     resp = await wizard_client.get(
