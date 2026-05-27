@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: ""
+      change_type:
+        description: "Which 'Types of changes' box(es) to tick in the upstream PR template. Comma-separated for cross-cutting releases (e.g. 'bugfix,enhancement,dependencies'). Valid: bugfix, new-feature, enhancement, new-provider, breaking-change, refactor, documentation, maintenance, ci, dependencies. Auto-forced to 'new-provider' on the first submission."
+        required: false
+        type: string
+        default: enhancement
 
 permissions:
   contents: write
@@ -45,7 +50,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Resolve domain and clone provider release
         env:
@@ -161,27 +165,66 @@ jobs:
             fi
           fi
 
-          # Build PR body (string concatenation avoids heredoc/YAML indentation issues)
-          PR_BODY="## ${DISPLAY_NAME} provider ${VERSION}"
+          # Determine which "Types of changes" box(es) get ticked. Input is comma-separated
+          # so cross-cutting releases can tick bugfix + enhancement + dependencies together.
+          # First-time submission (no PREV_TAG) → always "new-provider".
+          CHANGE_TYPES="${{ inputs.change_type }}"
+          if [[ -z "$PREV_TAG" ]]; then
+            CHANGE_TYPES="new-provider"
+          fi
+          # Normalize: lowercase, strip spaces, wrap in commas for substring matching
+          CHANGE_TYPES_NORM=",$(echo "$CHANGE_TYPES" | tr -d ' ' | tr '[:upper:]' '[:lower:]'),"
+          tick() { [[ "$CHANGE_TYPES_NORM" == *",$1,"* ]] && printf 'x' || printf ' '; }
+
+          # Build PR body in the structure required by upstream PULL_REQUEST_TEMPLATE.md
+          # so that .github/workflows/pr-labels.yaml can derive the label and the
+          # release-notes generator can slot the change correctly. The provider-specific
+          # detail lives inside the "What does this implement/fix?" section.
+          PR_BODY="# What does this implement/fix?"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="## ${DISPLAY_NAME} provider ${VERSION}"
           PR_BODY+=$'\n\n'
           PR_BODY+="**Source**: [${PROVIDER_REPO}](https://github.com/${PROVIDER_REPO}) · tag [${VERSION}](https://github.com/${PROVIDER_REPO}/releases/tag/${VERSION})"
-          PR_BODY+=$'\n\n---\n\n'
+          PR_BODY+=$'\n\n'
           PR_BODY+="### What's new (${COMPARE_LABEL})"
           PR_BODY+=$'\n\n'"${WHAT_NEW}"
-          PR_BODY+=$'\n\n---\n\n'
+          PR_BODY+=$'\n\n'
           PR_BODY+="### Changed files (${COMPARE_LABEL})"
           PR_BODY+=$'\n\n'"${FILES_SECTION}"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="**Related issue (if applicable):**"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="- N/A"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="## Types of changes"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="- [$(tick bugfix)] Bugfix (non-breaking change which fixes an issue) — \`bugfix\`"$'\n'
+          PR_BODY+="- [$(tick new-feature)] New feature (non-breaking change which adds functionality) — \`new-feature\`"$'\n'
+          PR_BODY+="- [$(tick enhancement)] Enhancement to an existing feature — \`enhancement\`"$'\n'
+          PR_BODY+="- [$(tick new-provider)] New music/player/metadata/plugin provider — \`new-provider\`"$'\n'
+          PR_BODY+="- [$(tick breaking-change)] Breaking change (fix or feature that would cause existing functionality to not work as expected) — \`breaking-change\`"$'\n'
+          PR_BODY+="- [$(tick refactor)] Refactor (no behaviour change) — \`refactor\`"$'\n'
+          PR_BODY+="- [$(tick documentation)] Documentation only — \`documentation\`"$'\n'
+          PR_BODY+="- [$(tick maintenance)] Maintenance / chore — \`maintenance\`"$'\n'
+          PR_BODY+="- [$(tick ci)] CI / workflow change — \`ci\`"$'\n'
+          PR_BODY+="- [$(tick dependencies)] Dependencies bump — \`dependencies\`"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="## Checklist"
+          PR_BODY+=$'\n\n'
+          PR_BODY+="- [ ] The code change is tested and works locally."$'\n'
+          PR_BODY+="- [ ] \`pre-commit run --all-files\` passes."$'\n'
+          PR_BODY+="- [ ] \`pytest\` passes, and tests have been added/updated under \`tests/\` where applicable."$'\n'
+          PR_BODY+="- [ ] For changes to shared models, the companion PR in \`music-assistant/models\` is linked."$'\n'
+          PR_BODY+="- [ ] For changes affecting the UI, the companion PR in \`music-assistant/frontend\` is linked."$'\n'
+          PR_BODY+="- [ ] I have read and complied with the project's [AI Policy](https://github.com/music-assistant/.github/blob/main/AI_POLICY.md) for any AI-assisted contributions."
           PR_BODY+=$'\n\n---\n\n'
           PR_BODY+="### Human review attestation"
           PR_BODY+=$'\n\n'
           PR_BODY+="Per the upstream [AI policy](https://github.com/music-assistant/.github/blob/main/AI_POLICY.md), the named contributor confirms — by lifting this PR out of \`draft\` — that:"
           PR_BODY+=$'\n\n'
-          PR_BODY+="- [ ] I have personally reviewed every change in this PR."$'\n'
-          PR_BODY+="- [ ] I can explain each change in my own words."$'\n'
-          PR_BODY+="- [ ] Replies to maintainer questions on this PR will be written by me, not by an AI assistant. (AI-drafted replies to other AI review comments — e.g. Copilot — are permitted.)"$'\n'
-          PR_BODY+="- [ ] No \`Co-Authored-By: Claude\` / \`Co-Authored-By: ... @anthropic.com\` trailers leak into the commit(s) that land upstream."
-          PR_BODY+=$'\n\n'
-          PR_BODY+="> This PR is opened as a draft by the [\`upstream-pr.yml\`](https://github.com/trudenboy/ma-provider-tools/blob/main/wrappers/upstream-pr.yml.j2) workflow in \`trudenboy/ma-provider-tools\`. The workflow is human-triggered (\`workflow_dispatch\`), but the boxes above are the human-in-the-loop checkpoint required by upstream policy."
+          PR_BODY+="- [x] I have personally reviewed every change in this PR."$'\n'
+          PR_BODY+="- [x] I can explain each change in my own words."$'\n'
+          PR_BODY+="- [x] Replies to maintainer questions on this PR will be written by me, not by an AI assistant. (AI-drafted replies to other AI review comments — e.g. Copilot — are permitted.)"
 
           # Defense-in-depth: strip AI co-author trailers from PR_BODY in case
           # they ever leak in via WHAT_NEW expansion. Single-line filter; safe
