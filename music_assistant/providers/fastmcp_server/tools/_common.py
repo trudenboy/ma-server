@@ -190,10 +190,10 @@ def to_brief_queue(queue: Any, items: Sequence[Any] | None = None) -> QueueBrief
                 )
             )
     # In the canonical MA model PlayerQueue.items is an int (total queue
-    # length), not a list. Fall back to alternate field names for older builds,
-    # and only as a last resort to len(brief_items) — which would under-report
-    # the real length, since `brief_items` is the truncated lookahead from
-    # get_active_queue, not the full queue.
+    # length), not a list. Fall back to alternate field names for older builds.
+    # If none of those resolve, return ``None`` instead of len(brief_items) —
+    # the latter would under-report the real length, since ``brief_items`` is
+    # only the truncated lookahead from get_active_queue, not the full queue.
     raw_total = getattr(queue, "items", None)
     explicit_count = _int(raw_total) if isinstance(raw_total, int) else None
     if explicit_count is None:
@@ -203,7 +203,7 @@ def to_brief_queue(queue: Any, items: Sequence[Any] | None = None) -> QueueBrief
     return QueueBrief(
         queue_id=str(getattr(queue, "queue_id", "")),
         current_index=_int(getattr(queue, "current_index", None)),
-        item_count=explicit_count if explicit_count is not None else len(brief_items),
+        item_count=explicit_count,
         shuffle=bool(getattr(queue, "shuffle_enabled", False)),
         repeat=repeat_value,
         items=brief_items,

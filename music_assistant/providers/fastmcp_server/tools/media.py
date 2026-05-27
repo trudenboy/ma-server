@@ -21,16 +21,24 @@ async def _resolve_uri(mass: MusicAssistant, uri: str) -> Any:
 
     MA's MusicController APIs that mutate library / favorites / play history
     expect a resolved (media_type, library_item_id) pair or a typed media
-    object — not a raw URI string. This helper centralises the lookup.
+    object — not a raw URI string. This helper centralises the lookup and
+    surfaces a distinct ToolError message per failure class so the LLM
+    caller can distinguish "URI typo" from "provider offline".
     """
-    # MA's ``get_item_by_uri`` is typed as returning a MediaItem (no Optional);
-    # missing entries raise instead. Normalise to a ToolError for a consistent
-    # tool-surface error path.
+    from music_assistant_models.errors import (  # noqa: PLC0415
+        InvalidProviderURI,
+        MediaNotFoundError,
+        ProviderUnavailableError,
+    )
+
     try:
         return await mass.music.get_item_by_uri(uri)
-    except Exception as exc:
-        msg = f"Item not found for URI: {uri!r} ({exc})"
-        raise ToolError(msg) from exc
+    except MediaNotFoundError as exc:
+        raise ToolError(f"Item not found for URI: {uri!r}") from exc
+    except InvalidProviderURI as exc:
+        raise ToolError(f"Malformed Music Assistant URI: {uri!r}") from exc
+    except ProviderUnavailableError as exc:
+        raise ToolError(f"Provider for URI {uri!r} is offline or unreachable") from exc
 
 
 async def _resolve_to_library_item(mass: MusicAssistant, uri: str) -> Any:

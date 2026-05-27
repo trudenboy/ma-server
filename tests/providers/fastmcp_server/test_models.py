@@ -260,3 +260,23 @@ def test_page_args_clamps() -> None:
     assert page_args(-5, 5000) == (0, 200)
     assert page_args(0, 0) == (0, 1)
     assert page_args(10, 25) == (10, 25)
+
+
+def test_to_brief_queue_returns_none_count_when_unknown() -> None:
+    """When the queue exposes no canonical count, report ``item_count=None``.
+
+    A silent ``0`` (formerly returned via ``len(brief_items)`` when the
+    truncated lookahead was empty) would tell the LLM the queue is empty
+    when in fact it just doesn't know. ``None`` is the honest answer and
+    lets clients prompt the user instead of acting on false data.
+    """
+    queue = SimpleNamespace(
+        queue_id="q",
+        current_index=0,
+        # No `items` / `items_count` / `items_total` exposed at all.
+        shuffle_enabled=False,
+        repeat_mode=None,
+    )
+    brief = to_brief_queue(queue, items=None)
+    assert brief.item_count is None
+    assert brief.items == []

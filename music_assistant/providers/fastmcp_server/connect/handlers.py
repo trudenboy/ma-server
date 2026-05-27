@@ -207,7 +207,11 @@ def make_login(ctx: WizardContext) -> Callable[[web.Request], Any]:
             return web.json_response({"error": "missing credentials"}, status=400)
 
         try:
-            result = await ctx.mass.webserver.auth.login(
+            # ``Any`` deliberately — MA currently types this as ``dict[str, Any]``
+            # but the shape is not part of the documented contract. A future
+            # migration to a typed ``LoginResult`` dataclass would otherwise
+            # silently flip the success branch to "always invalid credentials".
+            result: Any = await ctx.mass.webserver.auth.login(
                 username=username,
                 password=password,
                 provider_id="builtin",
@@ -216,19 +220,22 @@ def make_login(ctx: WizardContext) -> Callable[[web.Request], Any]:
             LOGGER.exception("Connect Wizard: login raised")
             return web.json_response({"success": False, "error": "login failed"}, status=401)
 
-        if not isinstance(result, dict) or not result.get("success"):
-            err = (
-                result.get("error", "invalid credentials")
-                if isinstance(result, dict)
-                else "invalid credentials"
-            )
+        def _get(key: str, default: Any = None) -> Any:
+            if result is None:
+                return default
+            if isinstance(result, dict):
+                return result.get(key, default)
+            return getattr(result, key, default)
+
+        if not _get("success", False):
+            err = _get("error", "invalid credentials")
             return web.json_response({"success": False, "error": str(err)}, status=401)
 
         return web.json_response(
             {
                 "success": True,
-                "session_token": result.get("access_token"),
-                "user": result.get("user", {}),
+                "session_token": _get("access_token"),
+                "user": _get("user", {}),
             }
         )
 

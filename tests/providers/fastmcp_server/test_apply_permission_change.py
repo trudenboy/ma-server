@@ -85,3 +85,49 @@ async def test_permission_only_change_hot_swaps(
     runtime.start.assert_not_awaited()
     # _allowed_tags rebuilt from new_config (default: 4 query tags enabled).
     assert "query:library" in runtime._allowed_tags
+
+
+@pytest.mark.asyncio
+async def test_start_rolls_back_on_partial_mount_failure(
+    mock_mass: MagicMock, mock_config: MagicMock
+) -> None:
+    """If ``start()`` raises mid-mount, the in-progress state is torn down.
+
+    Previously the well-known route could be registered while the main
+    MCP mount failed, leaving the provider half-mounted: no MCP endpoint
+    but a stale well-known route still answering 200. The new wrapper in
+    :meth:`MCPServerRuntime.start` calls :meth:`stop` on any exception
+    before re-raising, so a retry starts from a clean slate.
+    """
+    from music_assistant.providers.fastmcp_server.server import MCPServerRuntime  # noqa: PLC0415
+
+    runtime = MCPServerRuntime(mock_mass, mock_config, logging.getLogger("t"))
+    runtime._start_impl = AsyncMock(side_effect=RuntimeError("mount blew up"))
+    runtime.stop = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="mount blew up"):
+        await runtime.start()
+
+    runtime.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_rollback_swallows_stop_failure(
+    mock_mass: MagicMock, mock_config: MagicMock
+) -> None:
+    """A rollback that itself errors must not hide the original exception.
+
+    The wrapper uses ``contextlib.suppress(Exception)`` around the rollback
+    call so a failing teardown can't mask the actual start-failure cause —
+    the original ``RuntimeError`` still propagates.
+    """
+    from music_assistant.providers.fastmcp_server.server import MCPServerRuntime  # noqa: PLC0415
+
+    runtime = MCPServerRuntime(mock_mass, mock_config, logging.getLogger("t"))
+    runtime._start_impl = AsyncMock(side_effect=RuntimeError("primary failure"))
+    runtime.stop = AsyncMock(side_effect=RuntimeError("rollback also failed"))
+
+    with pytest.raises(RuntimeError, match="primary failure"):
+        await runtime.start()
+
+    runtime.stop.assert_awaited_once()

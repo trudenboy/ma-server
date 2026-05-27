@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -72,7 +73,22 @@ class MCPServerRuntime:
         return f"{base}{self._mount_path}"
 
     async def start(self) -> None:
-        """Build the FastMCP server and mount it into the MA webserver."""
+        """Build the FastMCP server and mount it into the MA webserver.
+
+        On any partial-mount failure, the in-progress state is rolled back
+        via :meth:`stop` before the exception propagates — so a retry (or a
+        permission-rebuild) starts from a clean slate instead of accumulating
+        orphan well-known routes or zombie ASGI lifespans.
+        """
+        try:
+            await self._start_impl()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self.stop()
+            raise
+
+    async def _start_impl(self) -> None:
+        """Mount the runtime; see :meth:`start` for the public-facing wrapper."""
         from fastmcp import FastMCP  # noqa: PLC0415
 
         from .auth import MASTokenVerifier  # noqa: PLC0415

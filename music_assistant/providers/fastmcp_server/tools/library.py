@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from music_assistant_models.enums import MediaType
 
@@ -239,14 +240,23 @@ def build_library_server(mass: MusicAssistant) -> FastMCP:
         Resolve a track by its Music Assistant URI to a brief summary.
 
         Returns the same ``TrackBrief`` shape that search and list tools emit.
-        Raises if the URI does not resolve — use ``search_tracks`` first if
-        you only have a name or partial identifier.
+        Raises ``ToolError`` if the URI does not resolve, or if it resolves
+        to a non-track (album, playlist, …) — otherwise the brief would
+        silently carry the wrong shape and downstream tools would
+        misinterpret it. Use ``search_tracks`` first if you only have a
+        name or partial identifier.
 
         :param uri: A Music Assistant track URI of the form
             ``<provider>://track/<id>`` (e.g. as found on
             ``TrackBrief.uri``).
         """
         item = await mass.music.get_item_by_uri(uri)
+        media_type = getattr(item, "media_type", None)
+        if media_type != MediaType.TRACK:
+            raise ToolError(
+                f"URI {uri!r} is not a track (got media_type={media_type!r}); "
+                f"pass a `library://track/<n>` URI instead."
+            )
         return to_brief_track(item)
 
     @sub.tool(

@@ -83,11 +83,17 @@ class QueueItemBrief:
 
 @dataclass
 class QueueBrief:
-    """A queue summary for tool responses."""
+    """A queue summary for tool responses.
+
+    ``item_count`` is ``None`` when the upstream queue object exposes neither
+    a canonical total nor an items-count field — better to say "unknown"
+    than to silently return the truncated lookahead length, which would
+    under-report a non-empty queue as ``0``.
+    """
 
     queue_id: str
     current_index: int | None
-    item_count: int
+    item_count: int | None
     shuffle: bool
     repeat: str
     items: list[QueueItemBrief] = field(default_factory=list)

@@ -6,7 +6,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from music_assistant_models.enums import MediaType
 
 from ..models import RecommendationFolderBrief, TrackBrief
 from ..tags import Tag
@@ -99,12 +101,22 @@ def build_metadata_server(mass: MusicAssistant) -> FastMCP:
         """
         Return lyrics for a track on a best-effort basis.
 
-        Returns ``None`` if lyrics are not available for the track.
+        Returns ``None`` if lyrics are not available for the track. Raises
+        ``ToolError`` if the URI resolves to a non-track — without that
+        guard, querying ``metadata.lyrics`` on an album / playlist would
+        silently return ``None`` and the type confusion would never
+        surface to the caller.
 
         :param track_uri: Music Assistant track URI (e.g. as found on
             ``TrackBrief.uri``).
         """
         item = await mass.music.get_item_by_uri(track_uri)
+        media_type = getattr(item, "media_type", None)
+        if media_type != MediaType.TRACK:
+            raise ToolError(
+                f"URI {track_uri!r} is not a track (got media_type={media_type!r}); "
+                f"lyrics only apply to tracks."
+            )
         metadata = getattr(item, "metadata", None)
         lyrics = getattr(metadata, "lyrics", None) if metadata else None
         return str(lyrics) if lyrics else None

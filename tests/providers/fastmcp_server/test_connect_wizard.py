@@ -312,6 +312,52 @@ async def test_login_failure_401(wizard_client: TestClient, wizard_mass: MagicMo
     assert body.get("error") == "bad creds"
 
 
+async def test_login_accepts_dataclass_style_result(
+    wizard_client: TestClient, wizard_mass: MagicMock
+) -> None:
+    """If MA migrates ``login`` to return a typed object, success still surfaces.
+
+    The handler used to ``isinstance(result, dict)`` and fall through to "invalid
+    credentials" for anything else — a silent break on the only credential
+    path. The shape-agnostic accessor handles both forms now.
+    """
+    wizard_mass.webserver.auth.login = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True,
+            access_token="sess-via-dataclass",
+            user={"user_id": "u1", "username": "tester", "role": "admin"},
+        )
+    )
+
+    resp = await wizard_client.post(
+        "/mcp/v1/connect/login",
+        json={"username": "tester", "password": "secret"},
+        headers={"Origin": "http://localhost:8095"},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["session_token"] == "sess-via-dataclass"
+    assert data["user"]["username"] == "tester"
+
+
+async def test_login_dataclass_failure_returns_401(
+    wizard_client: TestClient, wizard_mass: MagicMock
+) -> None:
+    """A typed failure result also surfaces correctly (not just dicts)."""
+    wizard_mass.webserver.auth.login = AsyncMock(
+        return_value=SimpleNamespace(success=False, error="dataclass error")
+    )
+
+    resp = await wizard_client.post(
+        "/mcp/v1/connect/login",
+        json={"username": "x", "password": "y"},
+        headers={"Origin": "http://localhost:8095"},
+    )
+    assert resp.status == 401
+    body = await resp.json()
+    assert body.get("error") == "dataclass error"
+
+
 # ── Per-client token mint ────────────────────────────────────────────────────
 
 
