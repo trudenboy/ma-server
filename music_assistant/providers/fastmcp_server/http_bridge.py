@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from music_assistant.mass import MusicAssistant
 
@@ -214,7 +214,7 @@ async def mount_into_mass(
     mcp: Any,
     mount_path: str = "/mcp/v1",
     extra_origins_csv: str = "",
-) -> Callable[[], None]:
+) -> Callable[[], Awaitable[None]]:
     """Register the FastMCP streamable-HTTP ASGI app under MA's webserver.
 
     :param mass: MusicAssistant instance.
@@ -252,13 +252,15 @@ async def mount_into_mass(
 
     unregister = mass.webserver.register_dynamic_route(f"{mount_path}/*", handler)
 
-    def _unmount() -> None:
+    async def _unmount() -> None:
         with contextlib.suppress(Exception):
             unregister()
-        # ``MCPServerRuntime.stop`` (the only caller) is ``async def``,
-        # so a running loop is guaranteed — dispatch shutdown onto it
-        # without blocking.
-        asyncio.get_running_loop().create_task(_stop_asgi_lifespan(lifespan_state))
+        # Await shutdown so the caller (``MCPServerRuntime.stop``) doesn't
+        # return — and the next ``start()`` doesn't begin — until the
+        # ASGI lifespan task has drained. Previously this was a
+        # fire-and-forget ``create_task`` that raced restarts and could be
+        # GC'd before running, leaking the session-manager task group.
+        await _stop_asgi_lifespan(lifespan_state)
 
     return _unmount
 

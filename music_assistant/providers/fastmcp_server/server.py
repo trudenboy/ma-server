@@ -58,7 +58,7 @@ class MCPServerRuntime:
         raw_path = str(config.get_value(CONF_MOUNT_PATH) or DEFAULT_MOUNT_PATH)
         self._mount_path: str = "/" + raw_path.strip("/")
         self._mcp: Any = None
-        self._unmount: Callable[[], None] | None = None
+        self._unmount: Callable[[], Awaitable[None]] | None = None
         self._unmount_well_known: Callable[[], None] | None = None
         self._unmount_connect: Callable[[], None] | None = None
         # Mutable so apply_permission_change can hot-swap the allowed-tag set
@@ -191,7 +191,7 @@ class MCPServerRuntime:
         """Unregister the HTTP route and drop references."""
         if self._unmount is not None:
             try:
-                self._unmount()
+                await self._unmount()
             except Exception:
                 self._logger.exception("Failed to unregister MCP route")
             self._unmount = None
