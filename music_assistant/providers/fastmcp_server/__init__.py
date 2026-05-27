@@ -96,7 +96,12 @@ def _detect_external_base_url(mass: MusicAssistant, current_user: Any) -> str | 
         client_base = getattr(client, "base_url", None)
         if not client_base:
             continue
-        client_user = getattr(client, "_authenticated_user", None)
+        # Prefer the (currently hypothetical) public name so a future MA rename
+        # transparently takes over; fall back to the underscore-prefixed
+        # internal attribute we rely on today.
+        client_user = getattr(client, "authenticated_user", None) or getattr(
+            client, "_authenticated_user", None
+        )
         if client_user is None:
             continue
         if _user_id(client_user) == target:
