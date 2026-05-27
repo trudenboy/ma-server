@@ -68,12 +68,19 @@ async def test_empty_changed_keys_does_not_restart(
 async def test_permission_only_change_hot_swaps(
     mock_mass: MagicMock, mock_config: MagicMock
 ) -> None:
-    """A permission-key-only change updates ``_allowed_tags`` in place — no restart."""
+    """A permission-key-only change rebuilds ``_allowed_tags`` from the new config.
+
+    The preset tag (``edit:queue``) is intentionally NOT enabled in
+    ``mock_config``'s defaults, while ``query:library`` IS — so a passing
+    test proves the rebuild actually happened. Asserting on a tag that
+    matches the defaults would hold whether the rebuild ran or not (the
+    original tautology we are fixing here).
+    """
     from music_assistant.providers.fastmcp_server.server import MCPServerRuntime  # noqa: PLC0415
 
     runtime = MCPServerRuntime(mock_mass, mock_config, logging.getLogger("t"))
-    # Pretend the runtime has started so _allowed_tags exists and hot-swap is viable.
-    runtime._allowed_tags = {"query:library"}
+    # Preset a tag that's NOT in mock_config defaults — must be REMOVED after the rebuild.
+    runtime._allowed_tags = {"edit:queue"}
     runtime.stop = AsyncMock()
     runtime.start = AsyncMock()
 
@@ -83,8 +90,16 @@ async def test_permission_only_change_hot_swaps(
 
     runtime.stop.assert_not_awaited()
     runtime.start.assert_not_awaited()
-    # _allowed_tags rebuilt from new_config (default: 4 query tags enabled).
-    assert "query:library" in runtime._allowed_tags
+    # The preset tag must be gone (default has edit_queue=False) and the
+    # default-enabled query:library tag must be present (default has
+    # query_library=True). Both checks are necessary to prove the rebuild
+    # actually rebuilt from new_config rather than no-op'd or appended.
+    assert "edit:queue" not in runtime._allowed_tags, (
+        "preset edit:queue tag was not removed — hot-swap did not rebuild from new_config"
+    )
+    assert "query:library" in runtime._allowed_tags, (
+        "default-enabled query:library tag missing — hot-swap rebuild lost defaults"
+    )
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from music_assistant.providers.fastmcp_server.models import (
     AlbumBrief,
     ArtistBrief,
@@ -162,14 +164,49 @@ def test_to_brief_player_no_current_media() -> None:
     assert to_brief_player(player).current_item is None
 
 
-def test_to_brief_player_reads_powered_from_player_state() -> None:
-    """``powered`` is sourced from ``Player.state.powered``.
+@pytest.mark.parametrize(
+    ("player_powered", "state_powered", "expected", "case"),
+    [
+        # 1. ``state`` present, value differs from raw ``powered`` →
+        #    canonical state wins.
+        (False, True, True, "state.powered=True overrides raw .powered=False"),
+        # 2. Contradictory direction — the other way — also wins via state.
+        #    Without this case, a test that always read raw .powered would
+        #    still pass case #1 (because it happens to match expected=True
+        #    when state.powered=True).
+        (True, False, False, "state.powered=False overrides raw .powered=True"),
+    ],
+)
+def test_to_brief_player_powered_prefers_state(
+    player_powered: bool, state_powered: bool, expected: bool, case: str
+) -> None:
+    """When ``Player.state.powered`` is present, it wins over raw ``Player.powered``.
 
     MA core builds ``_state.powered`` from ``__final_power_state`` and
     serialises it in the REST API; the raw ``Player.powered`` property
     returns ``_attr_powered`` which lags behind (and stays ``False`` for
     some virtual player types). The brief must match what
-    ``Player.state.to_dict()`` would emit.
+    ``Player.state.to_dict()`` would emit — i.e. the canonical ``state.powered``
+    value, not the raw attribute.
+    """
+    player = SimpleNamespace(
+        player_id="p1",
+        name="P1",
+        playback_state=SimpleNamespace(value="playing"),
+        volume_level=100,
+        powered=player_powered,
+        current_media=None,
+        state=SimpleNamespace(powered=state_powered, current_media=None),
+    )
+    assert to_brief_player(player).powered is expected, case
+
+
+def test_to_brief_player_powered_falls_back_to_raw_when_no_state() -> None:
+    """Without a ``state`` attribute, the raw ``Player.powered`` is the only signal.
+
+    Pairs with the parametrized test above to pin both branches of the
+    canonical-vs-raw selection: state present (state wins) and state absent
+    (raw wins).
     """
     player = SimpleNamespace(
         player_id="p1",
@@ -178,9 +215,9 @@ def test_to_brief_player_reads_powered_from_player_state() -> None:
         volume_level=100,
         powered=False,
         current_media=None,
-        state=SimpleNamespace(powered=True, current_media=None),
+        # NO `state` attribute at all.
     )
-    assert to_brief_player(player).powered is True
+    assert to_brief_player(player).powered is False
 
 
 def test_to_brief_player_current_item_uses_state_current_media() -> None:
