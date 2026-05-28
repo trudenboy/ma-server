@@ -113,12 +113,42 @@ jobs:
           if [ -d "provider-repo/tests" ]; then
             mkdir -p "tests/providers/${DOMAIN}"
             rsync -av --delete provider-repo/tests/ "tests/providers/${DOMAIN}/"
-            # Rewrite test imports: from provider.X → from music_assistant.providers.DOMAIN.X
-            find "tests/providers/${DOMAIN}/" -name '*.py' -exec \
-              sed -i "s/from provider\./from music_assistant.providers.${DOMAIN}./g" {} +
-            # Rewrite mock.patch string literals: "provider.X" → "music_assistant.providers.DOMAIN.X"
-            find "tests/providers/${DOMAIN}/" -name '*.py' -exec \
-              sed -i "s/\"provider\./\"music_assistant.providers.${DOMAIN}./g" {} +
+
+            NEW_PKG="music_assistant.providers.${DOMAIN}"
+            # Rewrite every shape of `provider`-as-import the provider repos
+            # actually use. Earlier revisions of this wrapper only covered the
+            # dotted-submodule form, so bare `from provider import X`,
+            # multi-line `from provider import (…)`, `import provider.X`,
+            # `import provider as X` and `"provider"` mock-patch strings
+            # slipped through and surfaced upstream as `ModuleNotFoundError:
+            # No module named 'provider'`. Each pattern below pins one of
+            # those shapes; together they should leave no `\bprovider\b`
+            # import-context occurrence behind.
+            find "tests/providers/${DOMAIN}/" -name '*.py' -exec sed -i \
+              -e "s/\\bfrom provider\\./from ${NEW_PKG}./g" \
+              -e "s/\\bfrom provider import\\b/from ${NEW_PKG} import/g" \
+              -e "s/\\bimport provider\\./import ${NEW_PKG}./g" \
+              -e "s/\\bimport provider\\(\\s\\+as\\s\\)/import ${NEW_PKG}\\1/g" \
+              -e "s/\\bimport provider\$/import ${NEW_PKG}/g" \
+              -e "s/\"provider\\./\"${NEW_PKG}./g" \
+              -e "s/'provider\\./'${NEW_PKG}./g" \
+              {} +
+
+            # The longer dotted package path can disturb the alphabetical
+            # ordering ruff-isort enforces upstream, AND push any inline
+            # import that fits comfortably in the provider repo over
+            # upstream's narrower line-length limit. Run isort first to
+            # restore ordering, then run ``ruff format`` so the
+            # rewritten lines are wrapped exactly the way upstream's
+            # pre-commit would wrap them — otherwise upstream's
+            # subsequent format pass moves trailing ``# noqa`` markers
+            # to the wrong row, ruff then strips them as
+            # ``RUF100 unused-noqa``, and the underlying violation
+            # surfaces with no protection. ``pipx`` is preinstalled on
+            # ubuntu-latest and side-steps PEP 668.
+            pipx install --quiet ruff || true
+            ruff check --select I --fix "tests/providers/${DOMAIN}/" || true
+            ruff format "tests/providers/${DOMAIN}/" || true
           fi
 
           # Copy VERSION file alongside manifest so the badge cron can read it
@@ -217,14 +247,6 @@ jobs:
           PR_BODY+="- [ ] For changes to shared models, the companion PR in \`music-assistant/models\` is linked."$'\n'
           PR_BODY+="- [ ] For changes affecting the UI, the companion PR in \`music-assistant/frontend\` is linked."$'\n'
           PR_BODY+="- [ ] I have read and complied with the project's [AI Policy](https://github.com/music-assistant/.github/blob/main/AI_POLICY.md) for any AI-assisted contributions."
-          PR_BODY+=$'\n\n---\n\n'
-          PR_BODY+="### Human review attestation"
-          PR_BODY+=$'\n\n'
-          PR_BODY+="Per the upstream [AI policy](https://github.com/music-assistant/.github/blob/main/AI_POLICY.md), the named contributor confirms — by lifting this PR out of \`draft\` — that:"
-          PR_BODY+=$'\n\n'
-          PR_BODY+="- [x] I have personally reviewed every change in this PR."$'\n'
-          PR_BODY+="- [x] I can explain each change in my own words."$'\n'
-          PR_BODY+="- [x] Replies to maintainer questions on this PR will be written by me, not by an AI assistant. (AI-drafted replies to other AI review comments — e.g. Copilot — are permitted.)"
 
           # Defense-in-depth: strip AI co-author trailers from PR_BODY in case
           # they ever leak in via WHAT_NEW expansion. Single-line filter; safe
