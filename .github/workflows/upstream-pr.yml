@@ -135,14 +135,20 @@ jobs:
               {} +
 
             # The longer dotted package path can disturb the alphabetical
-            # ordering ruff-isort enforces upstream, so a faithful rewrite
-            # still trips I001 unsorted-imports. Sort the rewritten files in
-            # place with the upstream repo's own ruff config (ambient
-            # pyproject.toml) so the resulting PR is byte-for-byte what a
-            # human contributor's `ruff check --fix` would produce. ``pipx``
-            # is preinstalled on ubuntu-latest and side-steps PEP 668.
+            # ordering ruff-isort enforces upstream, AND push any inline
+            # import that fits comfortably in the provider repo over
+            # upstream's narrower line-length limit. Run isort first to
+            # restore ordering, then run ``ruff format`` so the
+            # rewritten lines are wrapped exactly the way upstream's
+            # pre-commit would wrap them — otherwise upstream's
+            # subsequent format pass moves trailing ``# noqa`` markers
+            # to the wrong row, ruff then strips them as
+            # ``RUF100 unused-noqa``, and the underlying violation
+            # surfaces with no protection. ``pipx`` is preinstalled on
+            # ubuntu-latest and side-steps PEP 668.
             pipx install --quiet ruff || true
             ruff check --select I --fix "tests/providers/${DOMAIN}/" || true
+            ruff format "tests/providers/${DOMAIN}/" || true
           fi
 
           # Copy VERSION file alongside manifest so the badge cron can read it
