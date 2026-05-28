@@ -13,10 +13,14 @@ for ``mass``.
 from __future__ import annotations
 
 import importlib.util
+import shutil
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from music_assistant.providers.fastmcp_server.debug import log_reader
 
 
 class FakeWebserver:
@@ -210,3 +214,143 @@ def mock_config() -> MagicMock:
 def have_fastmcp() -> bool:
     """True if ``fastmcp`` is importable in the current environment."""
     return importlib.util.find_spec("fastmcp") is not None
+
+
+@pytest.fixture
+def tmp_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_mass: MagicMock) -> Path:
+    """Sandboxed log root for SafeLogTail tests.
+
+    Copies the fixture log into ``tmp_path`` and (a) patches the class-level
+    ``SafeLogTail.ROOT`` so bare ``SafeLogTail()`` callers see ``tmp_path``,
+    and (b) sets ``mock_mass.storage_path = str(tmp_path)`` so e2e tests that
+    go through ``mounted_debug → build_debug_server(mock_mass) →
+    SafeLogTail(mass)`` resolve to the same sandbox. Tests never touch the
+    real ``~/.musicassistant/`` directory.
+    """
+    src = Path(__file__).parent / "fixtures" / "musicassistant.sample.log"
+    dst = tmp_path / "musicassistant.log"
+    shutil.copyfile(src, dst)
+
+    monkeypatch.setattr(log_reader.SafeLogTail, "ROOT", tmp_path, raising=True)
+    mock_mass.storage_path = str(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def fake_event_emitter(mock_mass: MagicMock) -> Any:
+    """Capture the EventBuffer subscriber and let tests emit synthetic events.
+
+    Replaces ``mock_mass.subscribe`` so the first call stores the callback;
+    tests then call ``emitter.emit(event)`` to drive it.
+    """
+    holder: dict[str, Any] = {"cb": None, "removed": False}
+
+    def _subscribe(cb: Any, event_filter: Any = None, id_filter: Any = None) -> Any:  # noqa: ARG001
+        holder["cb"] = cb
+
+        def _remove() -> None:
+            holder["removed"] = True
+
+        return _remove
+
+    mock_mass.subscribe = MagicMock(side_effect=_subscribe)
+
+    class _Emitter:
+        @property
+        def cb(self) -> Any:
+            return holder["cb"]
+
+        @property
+        def removed(self) -> Any:
+            return holder["removed"]
+
+        def emit(self, event: Any) -> None:
+            if holder["cb"] is None:
+                raise AssertionError("no subscriber registered")
+            holder["cb"](event)
+
+    return _Emitter()
+
+
+@pytest.fixture
+def mounted_debug(mock_mass: MagicMock) -> Any:
+    """Build a root FastMCP with the debug sub-server mounted, all debug tags allowed."""
+    import contextlib  # noqa: PLC0415
+
+    from fastmcp import FastMCP  # noqa: PLC0415
+
+    from music_assistant.providers.fastmcp_server.tools.debug import build_debug_server  # noqa: PLC0415
+
+    mcp = FastMCP(name="test")
+    mcp.mount(build_debug_server(mock_mass, require_confirmation=False), namespace="debug")
+
+    # No tag-restrict middleware here — by default every tag is visible.
+    # mounted_debug_off below applies the restrict filter explicitly.
+    try:
+        yield mcp
+    finally:
+        close = getattr(mcp, "close", None) or getattr(mcp, "shutdown", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+
+
+@pytest.fixture
+def mounted_debug_off(mock_mass: MagicMock) -> Any:
+    """Debug sub-server mounted with the TagFilterMiddleware allowing zero debug tags.
+
+    Uses the project's own ``TagFilterMiddleware`` (provider/middleware.py),
+    not FastMCP's built-in ``restrict_tag`` — the latter is scope-based
+    OAuth authorisation while this provider needs config-driven visibility.
+    """
+    import contextlib  # noqa: PLC0415
+
+    from fastmcp import FastMCP  # noqa: PLC0415
+
+    from music_assistant.providers.fastmcp_server.middleware import TagFilterMiddleware  # noqa: PLC0415
+    from music_assistant.providers.fastmcp_server.server import build_tag_lookup  # noqa: PLC0415
+    from music_assistant.providers.fastmcp_server.tools.debug import build_debug_server  # noqa: PLC0415
+
+    mcp = FastMCP(name="test")
+    mcp.mount(build_debug_server(mock_mass, require_confirmation=False), namespace="debug")
+    mcp.add_middleware(TagFilterMiddleware(lambda: set(), build_tag_lookup(mcp)))
+    try:
+        yield mcp
+    finally:
+        close = getattr(mcp, "close", None) or getattr(mcp, "shutdown", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+
+
+@pytest.fixture
+def mounted_debug_with_events(mock_mass: MagicMock, fake_event_emitter: Any) -> Any:
+    """Debug server with a started EventBuffer wired in.
+
+    Yields ``(mcp, buffer, emitter)`` — tests drive synthetic events
+    through ``emitter.emit(...)`` and read back via either the MCP
+    client or the buffer directly.
+    """
+    import contextlib  # noqa: PLC0415
+
+    from fastmcp import FastMCP  # noqa: PLC0415
+
+    from music_assistant.providers.fastmcp_server.debug.event_buffer import EventBuffer  # noqa: PLC0415
+    from music_assistant.providers.fastmcp_server.tools.debug import build_debug_server  # noqa: PLC0415
+
+    buf = EventBuffer(mock_mass, capacity=500)
+    buf.start()
+
+    mcp = FastMCP(name="test")
+    mcp.mount(
+        build_debug_server(mock_mass, require_confirmation=False, event_buffer=buf),
+        namespace="debug",
+    )
+    try:
+        yield mcp, buf, fake_event_emitter
+    finally:
+        buf.stop()
+        close = getattr(mcp, "close", None) or getattr(mcp, "shutdown", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
