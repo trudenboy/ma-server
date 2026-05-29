@@ -289,6 +289,33 @@ class TestSourceSelection:
         mass.player_queues.play_media.assert_awaited()
         assert provider._active_player_id is None
 
+    async def test_on_source_selected_disabled_redirect_not_repeated(self) -> None:
+        """Repeated rejected selections must not re-issue the redirect play_media.
+
+        When player switching is disabled and a non-target player keeps having
+        the source selected (sendspin bridge / sync-group indirection re-triggers
+        the stream under a player id that never equals the configured target),
+        the redirect ``play_media`` must fire at most once per idempotency window.
+        Otherwise every rejection re-issues the redirect, which re-triggers
+        selection, producing an unbounded ``AudioError`` storm.
+        """
+        mass = _make_mock_mass()
+        config = _make_mock_config({CONF_ALLOW_PLAYER_SWITCH: False})
+        manifest = _make_mock_manifest()
+        provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
+
+        provider._default_player_id = "default-player"
+        mass.players.get_player.return_value = MagicMock()
+
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="Player switching is disabled"):
+                await provider.on_source_selected(
+                    "main", "other-player", "other-player", "session_1"
+                )
+
+        # Three rejected selections, but the redirect fired only once.
+        assert mass.player_queues.play_media.await_count == 1
+
 
 # ------------------------------------------------------------------
 # Clear active player

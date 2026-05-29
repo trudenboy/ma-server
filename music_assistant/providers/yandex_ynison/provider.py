@@ -1263,14 +1263,22 @@ class YandexYnisonProvider(PluginProvider):
         if not self._allow_player_switch:
             current_target = self._get_target_player_id()
             if player_id != current_target and current_target:
-                self.logger.debug(
-                    "Player switching disabled, redirecting selection from %s to %s",
-                    player_id,
-                    current_target,
-                )
-                await self.mass.player_queues.play_media(
-                    current_target, str(self._audio_source.uri)
-                )
+                # Redirect to the configured target, but only once per
+                # idempotency window. The target may be a sendspin bridge /
+                # sync-group whose stream is consumed under a player id that
+                # never equals `current_target`, so each redirect re-triggers
+                # selection here. Re-issuing `play_media` on every rejection
+                # turns that into an unbounded AudioError storm; the raise
+                # below still aborts every wrong-player stream regardless.
+                if self._idempotent("source_redirect", current_target):
+                    self.logger.debug(
+                        "Player switching disabled, redirecting selection from %s to %s",
+                        player_id,
+                        current_target,
+                    )
+                    await self.mass.player_queues.play_media(
+                        current_target, str(self._audio_source.uri)
+                    )
                 msg = f"Player switching is disabled; source must remain on {current_target}"
                 raise RuntimeError(msg)
 
