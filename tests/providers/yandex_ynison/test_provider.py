@@ -1017,9 +1017,11 @@ class TestPCMNormalization:
         # Default (no YM provider linked) → lossy profile
         assert call_kwargs.kwargs["output_format"] == provider._normalized_format
         assert call_kwargs.kwargs["output_format"].content_type == ContentType.PCM_S16LE
-        # No seek args when seek_ms=0, but realtime pacing is always present
+        # No seek args when seek_ms=0. The per-track decode no longer paces
+        # itself with -re (spec 0006): MA's realtime pacer is the single pacing
+        # authority, and dropping -re lets a small read-ahead absorb CDN jitter.
         args = call_kwargs.kwargs.get("extra_input_args", [])
-        assert "-re" in args
+        assert "-re" not in args
         assert "-ss" not in args
 
     async def test_stream_track_seek_adds_ss_arg(self) -> None:
@@ -1061,7 +1063,61 @@ class TestPCMNormalization:
         call_kwargs = mock_ffmpeg.call_args
         args = call_kwargs.kwargs.get("extra_input_args", [])
         assert "-ss" in args
-        assert "-re" in args
+        # -re removed in spec 0006 — realtime pacer is the only pacing authority.
+        assert "-re" not in args
+
+    async def test_stream_track_logs_output_rate_and_bit_depth(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The per-track stream log carries output sample rate AND bit depth.
+
+        Spec 0006 AC6: with the passthrough fast path the declared PCM format
+        IS the delivered audio, so an operator must read the output rate and
+        bit depth — not just the content type — from the one stream log line
+        to tell rate passthrough from a resample.
+        """
+        provider = _make_provider()
+        provider._in_use_by_queue = "player1"
+        provider._normalized_params = dict(PCM_LOSSLESS_PARAMS)
+
+        mock_yandex = MagicMock()
+        sd = MagicMock()
+        sd.expiration = 600
+        sd.duration = 200
+        sd.audio_format = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(return_value=sd)
+
+        async def _fake_audio_stream(_details: object) -> Any:
+            yield b"raw"
+
+        mock_yandex.get_audio_stream = _fake_audio_stream
+        provider._yandex_provider = mock_yandex
+
+        mock_ynison = MagicMock()
+        mock_ynison.update_playing_status = AsyncMock()
+        mock_ynison.state.is_paused = False
+        provider._ynison = mock_ynison
+
+        async def _fake_ffmpeg(**_kwargs: object) -> Any:
+            yield b"pcm"
+
+        with (
+            patch(
+                "music_assistant.providers.yandex_ynison.provider.get_ffmpeg_stream",
+                side_effect=_fake_ffmpeg,
+            ),
+            caplog.at_level("INFO"),
+        ):
+            async for _ in provider._stream_track("track:123"):
+                pass
+
+        stream_lines = [
+            r.getMessage() for r in caplog.records if "Streaming track" in r.getMessage()
+        ]
+        assert stream_lines, "expected a 'Streaming track' log line"
+        line = stream_lines[0]
+        assert "44100Hz" in line
+        assert "24bit" in line
 
     async def test_default_format_is_pcm_s16le(self) -> None:
         """Default AudioSource audio_format is PCM s16le (lossy profile)."""
@@ -1073,7 +1129,11 @@ class TestPCMNormalization:
         assert mapping.audio_format.channels == 2
 
     async def test_superb_quality_uses_lossless_profile(self) -> None:
-        """When YM quality=superb, format switches to PCM s24le/48kHz."""
+        """When YM quality=superb and no hint, format is PCM s24le/44.1kHz.
+
+        Spec 0006: the no-hint lossless floor is CD-rate (44.1 kHz), not
+        48 kHz — a missing format hint must not upsample the common case.
+        """
         provider = _make_provider()
 
         mock_yandex = MagicMock()
@@ -1085,7 +1145,7 @@ class TestPCMNormalization:
 
         mock_yandex.config.get_value.assert_called_with("quality")
         assert provider._normalized_format.content_type == ContentType.PCM_S24LE
-        assert provider._normalized_format.sample_rate == 48000
+        assert provider._normalized_format.sample_rate == 44100
         assert provider._normalized_format.bit_depth == 24
         # AudioSource is rebuilt with the new audio_format on the provider_mapping
         mapping = next(iter(provider._audio_source.provider_mappings))
@@ -1119,7 +1179,7 @@ class TestPCMNormalization:
         provider._yandex_provider = mock_yandex
         provider._update_normalized_format()
 
-        assert provider._normalized_format.sample_rate == 48000
+        assert provider._normalized_format.sample_rate == 44100
         assert provider._normalized_format.bit_depth == 24
         assert provider._normalized_format.content_type == ContentType.PCM_S24LE
 
@@ -1245,6 +1305,70 @@ def _make_ym_provider_stub(
     ym.type = ProviderType.MUSIC
     ym.config = ym_config
     return ym
+
+
+class TestPlayerRateSnap:
+    """_update_normalized_format snaps the declared rate to player capability.
+
+    Spec 0006 AC9-11: the auto rate is snapped down to the nearest sample rate
+    the target player supports, so MA's AudioSource passthrough fast path is
+    hit and no second resampling ffmpeg runs. Explicit overrides are never
+    snapped; an unresolvable player leaves the rate as the hint/floor produced.
+    """
+
+    @staticmethod
+    def _hint(sample_rate: int, bit_depth: int = 24) -> AudioFormat:
+        return AudioFormat(
+            content_type=ContentType.PCM_S24LE if bit_depth == 24 else ContentType.PCM_S16LE,
+            sample_rate=sample_rate,
+            bit_depth=bit_depth,
+            channels=2,
+        )
+
+    @staticmethod
+    def _link_player(provider: YandexYnisonProvider, rates: list[tuple[int, int]]) -> None:
+        player = MagicMock()
+        player.get_supported_sample_rates = MagicMock(return_value=rates)
+        provider._active_player_id = "p1"
+        provider.mass.players.get_player = MagicMock(return_value=player)  # type: ignore[attr-defined]
+
+    async def test_hi_res_rate_snapped_down_to_supported(self) -> None:
+        """A 96 kHz hint on a 48 kHz-max player declares 48 kHz (fast-path hit)."""
+        provider = _make_provider()
+        self._link_player(provider, [(44100, 16), (48000, 24)])
+        provider._update_normalized_format(hint=self._hint(96000))
+        assert provider._normalized_format.sample_rate == 48000
+        # bit depth is outside the snap — it follows the hint, not the player.
+        assert provider._normalized_format.bit_depth == 24
+
+    async def test_rate_snapped_to_only_supported_value(self) -> None:
+        """A 48 kHz hint on a 44.1 kHz-only player declares 44.1 kHz."""
+        provider = _make_provider()
+        self._link_player(provider, [(44100, 16)])
+        provider._update_normalized_format(hint=self._hint(48000))
+        assert provider._normalized_format.sample_rate == 44100
+
+    async def test_supported_rate_left_untouched(self) -> None:
+        """A 48 kHz hint on a player that supports 48 kHz is not snapped (AC10)."""
+        provider = _make_provider()
+        self._link_player(provider, [(44100, 16), (48000, 24)])
+        provider._update_normalized_format(hint=self._hint(48000))
+        assert provider._normalized_format.sample_rate == 48000
+
+    async def test_no_resolvable_player_keeps_hint_rate(self) -> None:
+        """With no target player the hint rate survives and nothing raises (AC10)."""
+        provider = _make_provider()
+        # default mock: get_player → None, all_players → [] → target player None
+        provider._update_normalized_format(hint=self._hint(96000))
+        assert provider._normalized_format.sample_rate == 96000
+
+    async def test_explicit_override_beats_snap(self) -> None:
+        """Explicit output_sample_rate wins over the player snap (AC11)."""
+        provider = _make_provider()
+        provider._cfg_sample_rate = "96000"
+        self._link_player(provider, [(44100, 16), (48000, 24)])
+        provider._update_normalized_format(hint=self._hint(48000))
+        assert provider._normalized_format.sample_rate == 96000
 
 
 class TestResolveTokenOwnMode:
@@ -2023,7 +2147,16 @@ class TestBytesToMs:
     def test_24bit(self) -> None:
         """24-bit stereo 48000Hz: 288000 bytes = 1000ms."""
         provider = _make_provider()
-        provider._normalized_format = make_pcm_format(PCM_LOSSLESS_PARAMS)
+        # Explicit 48000/24 format (decoupled from the no-hint floor constant)
+        # so this exercises the byte→ms math, not whatever rate the floor uses.
+        provider._normalized_format = make_pcm_format(
+            {
+                "content_type": ContentType.PCM_S24LE,
+                "sample_rate": 48000,
+                "bit_depth": 24,
+                "channels": 2,
+            }
+        )
         assert provider._bytes_to_ms(288000) == 1000
 
     def test_zero(self) -> None:

@@ -61,7 +61,6 @@ from .streaming import (
     PCM_LOSSY_PARAMS,
     PROBE_ARGS,
     make_pcm_format,
-    pacing_args,
 )
 from .ynison_client import (
     YnisonClient,
@@ -619,17 +618,26 @@ class YandexYnisonProvider(PluginProvider):
 
         await self._update_metadata_from_stream(stream_details, seek_ms)
 
-        extra_input_args = PROBE_ARGS + pacing_args()
+        # No -re here: MA's realtime pacer is the single pacing authority for
+        # AudioSources. Pacing the decode a second time would pin it to realtime
+        # and forbid the small read-ahead that absorbs CDN jitter; back-pressure
+        # through the generator chain still bounds memory.
+        extra_input_args = list(PROBE_ARGS)
         if seek_ms > 0:
             extra_input_args += ["-ss", f"{seek_ms / 1000.0:.3f}"]
 
         # Use session format when available, otherwise current normalized params
         params = session_params if session_params is not None else self._normalized_params
         out_fmt = make_pcm_format(params)
+        # Log the output rate + bit depth alongside the source format: with the
+        # passthrough fast path this PCM IS the delivered audio, so the line must
+        # let an operator read rate passthrough vs a resample, not just codec.
         self.logger.info(
-            "Streaming track %s → %s: input=%s seek=%dms",
+            "Streaming track %s → %s/%dHz/%dbit: input=%s seek=%dms",
             track_id,
             out_fmt.content_type.value,
+            out_fmt.sample_rate,
+            out_fmt.bit_depth,
             stream_details.audio_format,
             seek_ms,
         )
@@ -1473,6 +1481,38 @@ class YandexYnisonProvider(PluginProvider):
             self._yandex_provider = None
             self._update_source_capabilities()
 
+    def _snap_rate_to_player(self, rate: int) -> int:
+        """Snap *rate* down to the nearest sample rate the target player accepts.
+
+        Best-effort: returns *rate* unchanged when no target player or
+        supported-rate set can be resolved, and never raises.
+
+        :param rate: The sample rate the hint / floor logic chose.
+        :return: A rate the target player can play (``rate`` itself when it is
+            already supported or no player is resolvable).
+        """
+        # Mirror MA's _select_audio_source_pcm_format so the declared format
+        # equals what the AudioSource passthrough picks — keeping MA off its
+        # second resampling ffmpeg.
+        try:
+            player_id = self._get_target_player_id()
+            if not player_id:
+                return rate
+            player = self.mass.players.get_player(player_id)
+            if player is None:
+                return rate
+            supported = [sr for sr, _ in player.get_supported_sample_rates()]
+            if not supported or rate in supported:
+                return rate
+            return max((r for r in supported if r <= rate), default=min(supported))
+        except Exception:
+            self.logger.debug(
+                "Could not snap sample rate to player capabilities; keeping %d Hz",
+                rate,
+                exc_info=True,
+            )
+            return rate
+
     def _update_normalized_format(self, hint: AudioFormat | None = None) -> None:
         """Set PCM normalization profile based on config and YM quality.
 
@@ -1480,9 +1520,11 @@ class YandexYnisonProvider(PluginProvider):
         auto-detection from YM quality. The hint is fed by
         ``_prefetch_format_for_track`` when ``CONF_OUTPUT_SAMPLE_RATE`` is
         ``auto`` so the AudioSource ``provider_mapping.audio_format`` matches
-        the actual source rate of the upcoming track before MA's outer
-        ffmpeg captures it. Without a hint, falls back to YM-quality-based
-        detection (superb/lossless → 24bit/48kHz, else → 16bit/44.1kHz).
+        the actual source rate of the upcoming track. Without a hint, falls
+        back to YM-quality-based detection (superb/lossless → 24bit/44.1kHz,
+        else → 16bit/44.1kHz). The resulting auto/hint rate is then snapped
+        down to the nearest rate the target player supports; a valid explicit
+        override is delivered verbatim and never snapped.
 
         Creates fresh AudioFormat instances each time to prevent mutation by
         MA's FFMpeg._log_reader_task (which sets input_format.codec_type
@@ -1520,9 +1562,11 @@ class YandexYnisonProvider(PluginProvider):
         # the auto-detected base with a warning instead of crashing the load.
         sample_rate = base["sample_rate"]
         bit_depth = base["bit_depth"]
+        explicit_rate = False
         if self._cfg_sample_rate != OUTPUT_AUTO:
             if self._cfg_sample_rate in _VALID_SAMPLE_RATES:
                 sample_rate = int(self._cfg_sample_rate)
+                explicit_rate = True
             else:
                 self.logger.warning(
                     "Invalid %s=%r; falling back to auto-detected %d Hz",
@@ -1530,6 +1574,12 @@ class YandexYnisonProvider(PluginProvider):
                     self._cfg_sample_rate,
                     sample_rate,
                 )
+        # Snap the auto / hint / floor rate to a value the target player accepts
+        # so the declared format matches what MA's AudioSource passthrough picks
+        # and no second resampling ffmpeg is spawned. A valid explicit override
+        # is delivered verbatim and is never snapped.
+        if not explicit_rate:
+            sample_rate = self._snap_rate_to_player(sample_rate)
         if self._cfg_bit_depth != OUTPUT_AUTO:
             if self._cfg_bit_depth in _VALID_BIT_DEPTHS:
                 bit_depth = int(self._cfg_bit_depth)
