@@ -183,6 +183,20 @@ class EmbyProvider(MusicProvider):
                 raise MediaNotFoundError(f"Item {path} not found") from err
             raise
 
+    async def _post(self, path: str, json: dict[str, Any] | None = None) -> None:
+        url = urljoin(self._base_url, path.lstrip("/"))
+        try:
+            async with self._session.post(url, headers=self._headers, json=json) as resp:
+                resp.raise_for_status()
+        except ClientResponseError as err:
+            if err.status == 401:
+                raise LoginFailed("Unauthorized: invalid credentials") from err
+            if err.status == 403:
+                raise ProviderPermissionDenied("Forbidden: insufficient permissions") from err
+            if err.status == 404:
+                raise MediaNotFoundError(f"Item {path} not found") from err
+            raise
+
     async def _search_items(
         self, search_query: str, include_types: str, fields: list[str], limit: int
     ) -> list[dict[str, Any]]:
@@ -503,3 +517,25 @@ class EmbyProvider(MusicProvider):
                 if collection_type == "music":
                     result.append(library)
         return result
+
+    async def on_played(
+        self,
+        media_type: MediaType,
+        prov_item_id: str,
+        fully_played: bool,
+        position: int,
+        media_item: MediaItemType,
+        is_playing: bool = False,
+    ) -> None:
+        """Handle media item played event."""
+        if media_type != MediaType.TRACK:
+            return
+        if fully_played:
+            await self._post(f"Users/{self._user_id}/PlayedItems/{prov_item_id}")
+        if is_playing:
+            await self._post(
+                f"/Users/{self._user_id}/Items/{prov_item_id}/UserData",
+                json={"PlaybackPositionTicks": position * 10000000},
+            )
+        if not fully_played and position == 0:
+            await self._post(f"/Users/{self._user_id}/PlayedItems/{prov_item_id}/Delete")

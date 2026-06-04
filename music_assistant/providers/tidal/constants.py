@@ -13,6 +13,18 @@ WEB_BASE_URL = "https://tidal.com/v1"
 
 # Authentication
 TOKEN_TYPE = "Bearer"
+AUTH_URL = "https://auth.tidal.com/v1/oauth2"
+LOGIN_URL = "https://login.tidal.com/authorize"
+REDIRECT_URI = "https://tidal.com/android/login/auth"
+
+# API paths (relative to BASE_URL unless used with an explicit base_url)
+PLAYLISTS = "playlists"
+PAGES_MIX = "pages/mix"
+FAVORITES_ARTISTS = "favorites/artists"
+FAVORITES_ALBUMS = "favorites/albums"
+FAVORITES_TRACKS = "favorites/tracks"
+FAVORITES_PLAYLISTS = "favorites/playlists"
+FAVORITES_MIXES = "favorites/mixes"
 
 # Actions
 CONF_ACTION_START_PKCE_LOGIN = "start_pkce_login"

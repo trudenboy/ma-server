@@ -297,11 +297,11 @@ async def test_cache_reset_when_exceeding_limit(mass_minimal: MusicAssistant) ->
             return func(*args)
 
         mock_to_thread.side_effect = _side_effect
-        result = await cache._check_and_reset_oversized_cache()
+        await cache._check_oversized_cache()
 
-    assert result is True
+    assert "exceeds recommended maximum" in caplog.text
     for path in db_files:
-        assert not os.path.exists(path)
+        assert os.path.exists(path)
 
 
 async def test_cache_not_reset_when_under_limit(mass_minimal: MusicAssistant) -> None:
@@ -317,9 +317,9 @@ async def test_cache_not_reset_when_under_limit(mass_minimal: MusicAssistant) ->
             return func(*args)
 
         mock_to_thread.side_effect = _side_effect
-        result = await cache._check_and_reset_oversized_cache()
+        await cache._check_oversized_cache()
 
-    assert result is False
+    assert "exceeds recommended maximum" not in caplog.text
     for path in db_files:
         assert os.path.exists(path)
 
@@ -345,9 +345,11 @@ async def test_all_three_db_files_included_in_size(mass_minimal: MusicAssistant)
     assert not os.path.exists(db_path + "-shm")
 
 
-async def test_skip_migration_when_cache_reset(
-    mass_minimal: MusicAssistant,
-    caplog: pytest.LogCaptureFixture,
+# --- allow_expired_cache flag ---
+
+
+async def test_get_with_allow_expired_cache_returns_expired_data(
+    cache: CacheController,
 ) -> None:
     """Test that database migration is skipped when the cache was reset."""
     cache = mass_minimal.cache
@@ -358,14 +360,32 @@ async def test_skip_migration_when_cache_reset(
     assert "Performing database migration" not in caplog.text
 
 
-async def test_skip_vacuum_when_cache_reset(
-    mass_minimal: MusicAssistant,
-    caplog: pytest.LogCaptureFixture,
+async def test_get_with_allow_expired_cache_still_returns_default_when_missing(
+    cache: CacheController,
 ) -> None:
     """Test that database vacuum is skipped when the cache was reset."""
     cache = mass_minimal.cache
 
-    with patch.object(cache, "_check_and_reset_oversized_cache", return_value=True):
-        await cache._setup_database()
+async def test_auto_cleanup_removes_expired_entries(cache: CacheController) -> None:
+    """Test that auto_cleanup removes expired entries by default."""
+    await cache.set("evict", "data", provider="test", expiration=-1)
+    await cache.auto_cleanup()
+    result = await cache.get("evict", provider="test", default="gone", allow_expired_cache=True)
+    assert result == "gone"
 
-    assert "Compacting database" not in caplog.text
+
+async def test_auto_cleanup_keeps_allow_expired_cache_entries(
+    cache: CacheController,
+) -> None:
+    """Test that auto_cleanup keeps expired entries with allow_expired_cache=True."""
+    await cache.set("keep", "data", provider="test", expiration=-1, allow_expired_cache=True)
+    await cache.auto_cleanup()
+    result = await cache.get("keep", provider="test", allow_expired_cache=True)
+    assert result == "data"
+
+
+async def test_auto_cleanup_keeps_fresh_entries(cache: CacheController) -> None:
+    """Test that auto_cleanup keeps fresh entries regardless of the flag."""
+    await cache.set("alive", "data", provider="test", expiration=3600)
+    await cache.auto_cleanup()
+    assert await cache.get("alive", provider="test") == "data"

@@ -26,9 +26,22 @@ from hass_client.utils import (
     get_websocket_url,
 )
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
-from music_assistant_models.enums import ConfigEntryType, ProviderFeature
-from music_assistant_models.errors import LoginFailed, SetupFailedError
+from music_assistant_models.enums import (
+    ConfigEntryType,
+    ContentType,
+    MediaType,
+    ProviderFeature,
+    StreamType,
+)
+from music_assistant_models.errors import (
+    LoginFailed,
+    MusicAssistantError,
+    SetupFailedError,
+    UnsupportedFeaturedException,
+)
+from music_assistant_models.media_items.audio_format import AudioFormat
 from music_assistant_models.player_control import PlayerControl
+from music_assistant_models.streamdetails import StreamDetails
 
 from music_assistant.constants import MASS_LOGO_ONLINE, VERBOSE_LOG_LEVEL
 from music_assistant.helpers.auth import AuthenticationHelper
@@ -38,6 +51,7 @@ from music_assistant.models.plugin import PluginProvider
 from .constants import OFF_STATES, MediaPlayerEntityFeature
 
 if TYPE_CHECKING:
+    from aiohttp import ClientSession
     from hass_client.models import CompressedState, Device, EntityStateEvent
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
@@ -53,17 +67,20 @@ CONF_VERIFY_SSL = "verify_ssl"
 CONF_POWER_CONTROLS = "power_controls"
 CONF_MUTE_CONTROLS = "mute_controls"
 CONF_VOLUME_CONTROLS = "volume_controls"
-
-SUPPORTED_FEATURES: set[ProviderFeature] = (
-    set()
-)  # we don't have any special supported features (yet)
+CONF_TTS_ENTITY = "tts_entity"
+CONF_AI_TASK_ENTITY = "ai_task_entity"
 
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return HomeAssistantProvider(mass, manifest, config, SUPPORTED_FEATURES)
+    supported_features: set[ProviderFeature] = set()
+    if config.get_value(CONF_TTS_ENTITY):
+        supported_features.add(ProviderFeature.TTS)
+    if config.get_value(CONF_AI_TASK_ENTITY):
+        supported_features.add(ProviderFeature.AI_QUERY)
+    return HomeAssistantProvider(mass, manifest, config, supported_features)
 
 
 async def get_config_entries(
@@ -184,7 +201,10 @@ async def get_config_entries(
     # append player controls entries (if we have an active instance)
     if instance_id and (hass_prov := mass.get_provider(instance_id)) and hass_prov.available:
         hass_prov = cast("HomeAssistantProvider", hass_prov)
-        return (*base_entries, *(await _get_player_control_config_entries(hass_prov.hass)))
+        return (
+            *base_entries,
+            *(await _get_config_entries(hass_prov.hass)),
+        )
 
     return (
         *base_entries,
@@ -209,15 +229,28 @@ async def get_config_entries(
             label=CONF_MUTE_CONTROLS,
             default_value=[],
         ),
+        ConfigEntry(
+            key=CONF_TTS_ENTITY,
+            type=ConfigEntryType.STRING,
+            label=CONF_TTS_ENTITY,
+            required=False,
+        ),
+        ConfigEntry(
+            key=CONF_AI_TASK_ENTITY,
+            type=ConfigEntryType.STRING,
+            label=CONF_AI_TASK_ENTITY,
+            required=False,
+        ),
     )
 
 
-async def _get_player_control_config_entries(hass: HomeAssistantClient) -> tuple[ConfigEntry, ...]:
-    """Return all HA state objects for (valid) media_player entities."""
+async def _get_config_entries(hass: HomeAssistantClient) -> tuple[ConfigEntry, ...]:
+    """Return the (entity based) config entries."""
     all_power_entities: list[ConfigValueOption] = []
     all_mute_entities: list[ConfigValueOption] = []
     all_volume_entities: list[ConfigValueOption] = []
-    # collect all entities that are usable for player controls
+    tts_entities: list[ConfigValueOption] = []
+    ai_task_entities: list[ConfigValueOption] = []
     if not hass.connected:
         return ()
     for state in await hass.get_states():
@@ -235,6 +268,12 @@ async def _get_player_control_config_entries(hass: HomeAssistantClient) -> tuple
         if entity_platform in ("number", "input_number"):
             # number and input_number are very similar, both are suitable for volume control
             all_volume_entities.append(ConfigValueOption(name, state["entity_id"]))
+            continue
+        if entity_platform == "tts":
+            tts_entities.append(ConfigValueOption(name, state["entity_id"]))
+            continue
+        if entity_platform == "ai_task":
+            ai_task_entities.append(ConfigValueOption(name, state["entity_id"]))
             continue
 
         # media player can be used as control, depending on features
@@ -256,7 +295,9 @@ async def _get_player_control_config_entries(hass: HomeAssistantClient) -> tuple
     all_power_entities.sort(key=lambda x: x.title)
     all_mute_entities.sort(key=lambda x: x.title)
     all_volume_entities.sort(key=lambda x: x.title)
-    return (
+    tts_entities.sort(key=lambda x: x.title)
+    ai_task_entities.sort(key=lambda x: x.title)
+    entries: list[ConfigEntry] = [
         ConfigEntry(
             key=CONF_POWER_CONTROLS,
             type=ConfigEntryType.STRING,
@@ -293,7 +334,28 @@ async def _get_player_control_config_entries(hass: HomeAssistantClient) -> tuple
             "like to import as player Mute controls in Music Assistant.",
             category="player_controls",
         ),
-    )
+        ConfigEntry(
+            key=CONF_TTS_ENTITY,
+            type=ConfigEntryType.STRING,
+            label="Text-to-Speech entity",
+            required=False,
+            options=tts_entities,
+            default_value=tts_entities[0].value if tts_entities else None,
+            description="Select which Home Assistant TTS entity you like to use for text-to-speech capabilities inside Music Assistant.",
+            category="Features",
+        ),
+        ConfigEntry(
+            key=CONF_AI_TASK_ENTITY,
+            type=ConfigEntryType.STRING,
+            label="AI Task entity",
+            required=False,
+            options=ai_task_entities,
+            default_value=ai_task_entities[0].value if ai_task_entities else None,
+            description="Select which Home Assistant AI Task entity you like to use for AI queries inside Music Assistant.",
+            category="Features",
+        ),
+    ]
+    return tuple(entries)
 
 
 class HomeAssistantProvider(PluginProvider):

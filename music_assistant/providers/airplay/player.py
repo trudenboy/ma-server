@@ -25,12 +25,14 @@ from music_assistant.helpers.util import get_primary_ip_address_from_zeroconf, i
 from music_assistant.models.player import DeviceInfo, Player, PlayerMedia
 
 from .constants import (
-    AIRPLAY2_CONNECT_TIME_MS,
+    AIRPLAY_DEFAULT_SESSION_DELAY_MS,
     AIRPLAY_DISCOVERY_TYPE,
     AIRPLAY_FLOW_PCM_FORMAT,
     AIRPLAY_OUTPUT_BUFFER_DEFAULT_DURATION_MS,
-    AIRPLAY_OUTPUT_BUFFER_MAX_DURATION_MS,
-    AIRPLAY_OUTPUT_BUFFER_MIN_DURATION_MS,
+    AIRPLAY_PCM_FORMAT,
+    AIRPLAY_SESSION_ESTABLISHMENT_LATENCY_DEFAULT_MS,
+    AIRPLAY_SESSION_ESTABLISHMENT_LATENCY_MAX_MS,
+    AIRPLAY_SESSION_ESTABLISHMENT_LATENCY_MIN_MS,
     BASE_PLAYER_FEATURES,
     BROKEN_AIRPLAY_WARN,
     CONF_ACTION_FINISH_PAIRING,
@@ -114,6 +116,9 @@ class AirPlayPlayer(Player):
         self._attr_volume_level = initial_volume
         self._attr_can_group_with = {provider.instance_id}
         self._attr_enabled_by_default = not is_broken_airplay_model(manufacturer, model)
+        self._attr_supported_sample_rates = [
+            (AIRPLAY_PCM_FORMAT.sample_rate, AIRPLAY_PCM_FORMAT.bit_depth)
+        ]
 
     @property
     def protocol(self) -> StreamingProtocol:
@@ -226,14 +231,10 @@ class AirPlayPlayer(Player):
                 category="protocol_generic",
                 advanced=True,
             ),
-            # airplay has fixed sample rate/bit depth so make this config entry static and hidden
-            create_sample_rates_config_entry(
-                supported_sample_rates=[44100], supported_bit_depths=[16], hidden=True
-            ),
             ConfigEntry(
-                key=CONF_AIRPLAY_LATENCY,
+                key=CONF_SESSION_ESTABLISHMENT_LATENCY,
                 type=ConfigEntryType.INTEGER,
-                default_value=AIRPLAY_OUTPUT_BUFFER_DEFAULT_DURATION_MS,
+                default_value=AIRPLAY_SESSION_ESTABLISHMENT_LATENCY_DEFAULT_MS,
                 range=(
                     AIRPLAY_OUTPUT_BUFFER_MIN_DURATION_MS,
                     AIRPLAY_OUTPUT_BUFFER_MAX_DURATION_MS,

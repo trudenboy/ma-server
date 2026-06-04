@@ -7,6 +7,7 @@ import datetime
 import hashlib
 import time
 from contextlib import suppress
+from datetime import UTC
 from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import client_exceptions
@@ -25,6 +26,7 @@ from music_assistant_models.errors import (
     InvalidDataError,
     LoginFailed,
     MediaNotFoundError,
+    RateLimited,
     ResourceTemporarilyUnavailable,
 )
 from music_assistant_models.media_items import (
@@ -302,7 +304,7 @@ class QobuzProvider(MusicProvider):
             raise InvalidDataError(msg)
         return self._parse_playlist(playlist_obj)
 
-    @use_cache(3600 * 24 * 30)  # Cache for 30 days
+    @use_cache(3600 * 24 * 30, allow_expired_cache=True)  # Cache for 30 days
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all album tracks for given album id."""
         params = {"album_id": prov_album_id}
@@ -317,7 +319,7 @@ class QobuzProvider(MusicProvider):
                 await asyncio.sleep(0)
         return result
 
-    @use_cache(3600 * 3)  # Cache for 3 hours
+    @use_cache(3600 * 3, allow_expired_cache=True)  # Cache for 3 hours
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
         """Get playlist tracks."""
         result: list[Track] = []
@@ -344,7 +346,7 @@ class QobuzProvider(MusicProvider):
                 await asyncio.sleep(0)
         return result
 
-    @use_cache(3600 * 24 * 14)  # Cache for 14 days
+    @use_cache(3600 * 24 * 14, allow_expired_cache=True)  # Cache for 14 days
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
         """Get a list of albums for the given artist."""
         result = await self._get_data(
@@ -367,7 +369,7 @@ class QobuzProvider(MusicProvider):
             )
         ]
 
-    @use_cache(3600 * 24 * 14)  # Cache for 14 days
+    @use_cache(3600 * 24 * 14, allow_expired_cache=True)  # Cache for 14 days
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         """Get a list of most popular tracks for the given artist."""
         result = await self._get_data(
@@ -401,10 +403,6 @@ class QobuzProvider(MusicProvider):
                 and str(item["performer"]["id"]) == str(prov_artist_id)
             )
         ]
-
-    async def get_similar_artists(self, prov_artist_id: str) -> None:
-        """Get similar artists for given artist."""
-        # https://www.qobuz.com/api.json/0.2/artist/getSimilarArtists?artist_id=220020&offset=0&limit=3
 
     async def library_add(self, item: MediaItemType) -> bool:
         """Add item to library."""
@@ -667,7 +665,7 @@ class QobuzProvider(MusicProvider):
             album.metadata.label = album_obj["label"]["name"]
         if released_at := album_obj.get("released_at"):
             with suppress(ValueError):
-                album.year = datetime.datetime.fromtimestamp(released_at).year
+                album.year = datetime.datetime.fromtimestamp(released_at, tz=UTC).year
         if album_obj.get("copyright"):
             album.metadata.copyright = album_obj["copyright"]
         if album_obj.get("description"):

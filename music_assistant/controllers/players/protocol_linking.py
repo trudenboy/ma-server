@@ -110,10 +110,10 @@ class ProtocolLinkingMixin:
         if player.state.type == PlayerType.PROTOCOL:
             # Protocol player: try to find a native parent
             self._try_link_protocol_to_native(player)
-        elif player.state.type in (PlayerType.GROUP, PlayerType.STEREO_PAIR):
+        elif player.state.type == PlayerType.GROUP:
             return
         else:
-            # Native player: try to find protocol players to link
+            # Native player (including STEREO_PAIR): try to find protocol players to link
             self._try_link_protocols_to_native(player)
 
     def _try_link_protocol_to_native(self, protocol_player: Player) -> None:
@@ -150,7 +150,7 @@ class ProtocolLinkingMixin:
         :return: True if handled (linked or waiting), False if should fall through.
         """
         if parent_player := self.get_player(cached_parent_id):
-            if parent_player.state.type in (PlayerType.GROUP, PlayerType.STEREO_PAIR):
+            if parent_player.state.type == PlayerType.GROUP:
                 self._clear_protocol_parent_id(protocol_player.player_id)
                 return False
             already_linked = any(
@@ -203,11 +203,7 @@ class ProtocolLinkingMixin:
         for native_player in self.all_players(return_protocol_players=False):
             if native_player.player_id == protocol_player.player_id:
                 continue
-            if native_player.state.type in (
-                PlayerType.PROTOCOL,
-                PlayerType.GROUP,
-                PlayerType.STEREO_PAIR,
-            ):
+            if native_player.state.type in (PlayerType.PROTOCOL, PlayerType.GROUP):
                 continue
 
             # For universal players, check if this protocol player is in its stored list
@@ -376,6 +372,21 @@ class ProtocolLinkingMixin:
                 if protocol_player.protocol_parent_id is not None:
                     return
                 # Link refused (domain duplicate) - fall through to create separate UP
+
+            # Refuse to create a universal player wrapper when the cached parent
+            # config exists but is disabled. The user explicitly turned the
+            # parent device off; surfacing its protocols as a separate player
+            # would defeat that intent.
+            cached_parent_id = self._get_cached_protocol_parent_id(player_id)
+            if cached_parent_id:
+                parent_raw = self.mass.config.get(f"{CONF_PLAYERS}/{cached_parent_id}")
+                if parent_raw and not parent_raw.get("enabled", True):
+                    self.logger.debug(
+                        "Skipping universal player creation for %s: cached parent %s is disabled",
+                        player_id,
+                        cached_parent_id,
+                    )
+                    return
 
             # Find all protocol players that match this device's identifiers
             matching_protocols = self._find_matching_protocol_players(protocol_player)
@@ -1011,6 +1022,9 @@ class ProtocolLinkingMixin:
 
     def _save_protocol_parent_id(self, protocol_player_id: str, parent_id: str) -> None:
         """Save the parent ID for a protocol player for persistence across restarts."""
+        # Only save if the player config still exists to avoid creating partial entries
+        if not self.mass.config.get(f"{CONF_PLAYERS}/{protocol_player_id}"):
+            return
         conf_key = f"{CONF_PLAYERS}/{protocol_player_id}/values/{CONF_PROTOCOL_PARENT_ID}"
         self.mass.config.set(conf_key, parent_id)
 
@@ -1138,6 +1152,9 @@ class ProtocolLinkingMixin:
                         )
                     else:
                         parent_player.update_state()
+                else:
+                    # Parent not registered yet — still purge the cached id
+                    self._remove_protocol_id_from_cache(parent_id, player.player_id)
         else:
             # Native/universal player being removed: handle all linked protocol players.
             # Collect all known protocol IDs from both active links and cached state,

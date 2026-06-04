@@ -177,7 +177,7 @@ def create_didl_metadata(media: PlayerMedia, url: str | None = None) -> str:
                 result += f"&#{unicode_code};"
         return result
 
-    ext = media.uri.split(".")[-1].split("?")[0]
+    ext = uri.split(".")[-1].split("?")[0]
     mime_type = get_mime_type(ext)
     image_url = media.image_url or MASS_LOGO_ONLINE
     if media.media_type in (MediaType.FLOW_STREAM, MediaType.RADIO) or not media.duration:
@@ -192,7 +192,7 @@ def create_didl_metadata(media: PlayerMedia, url: str | None = None) -> str:
             f"<dc:queueItemId>{escape_metadata(uri)}</dc:queueItemId>"
             f"<dc:description>Music Assistant</dc:description>"
             "<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>"
-            f'<res protocolInfo="http-get:*:{mime_type}:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000">{escape_metadata(media.uri)}</res>'
+            f'<res protocolInfo="http-get:*:{mime_type}:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000">{escape_metadata(uri)}</res>'
             "</item>"
             "</DIDL-Lite>"
         )
@@ -219,7 +219,7 @@ def create_didl_metadata(media: PlayerMedia, url: str | None = None) -> str:
         f"<dc:description>Music Assistant</dc:description>"
         f"<upnp:albumArtURI>{escape_metadata(image_url)}</upnp:albumArtURI>"
         "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
-        f'<res duration="{duration_str}" protocolInfo="http-get:*:{mime_type}:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01500000000000000000000000000000">{escape_metadata(media.uri)}</res>'
+        f'<res duration="{duration_str}" protocolInfo="http-get:*:{mime_type}:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01500000000000000000000000000000">{escape_metadata(uri)}</res>'
         '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">RINCON_AssociatedZPUDN</desc>'
         "</item>"
         "</DIDL-Lite>"

@@ -49,10 +49,10 @@ from music_assistant_models.media_items import (
 from music_assistant_models.streamdetails import StreamDetails
 from plexapi.audio import Album as PlexAlbum
 from plexapi.audio import Artist as PlexArtist
-from plexapi.audio import Playlist as PlexPlaylist
 from plexapi.audio import Track as PlexTrack
 from plexapi.base import PlexObject
 from plexapi.myplex import MyPlexAccount, MyPlexPinLogin
+from plexapi.playlist import Playlist as PlexPlaylist
 from plexapi.server import PlexServer
 
 from music_assistant.constants import UNKNOWN_ARTIST
@@ -441,10 +441,6 @@ class PlexProvider(MusicProvider):
         """Set up the music provider by connecting to the server."""
         # silence loggers
         logging.getLogger("plexapi").setLevel(self.logger.level + 10)
-        # silence urllib3 InsecureRequestWarning when certificate verification is disabled
-        # this is expected when connecting to Plex servers using their wildcard certificates
-        # that don't validate against LAN IP addresses
-        logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
         _, library_name = str(self.config.get_value(CONF_LIBRARY_ID)).split(" / ", 1)
 
         def connect() -> PlexServer:
@@ -634,19 +630,19 @@ class PlexProvider(MusicProvider):
 
     async def _search_track_advanced(self, limit: int, **kwargs: Any) -> list[PlexTrack]:
         return cast(
-            "list[PlexPlaylist]",
+            "list[PlexTrack]",
             await self._run_async(self._plex_library.searchTracks, filters=kwargs, limit=limit),
         )
 
     async def _search_album_advanced(self, limit: int, **kwargs: Any) -> list[PlexAlbum]:
         return cast(
-            "list[PlexPlaylist]",
+            "list[PlexAlbum]",
             await self._run_async(self._plex_library.searchAlbums, filters=kwargs, limit=limit),
         )
 
     async def _search_artist_advanced(self, limit: int, **kwargs: Any) -> list[PlexArtist]:
         return cast(
-            "list[PlexPlaylist]",
+            "list[PlexArtist]",
             await self._run_async(self._plex_library.searchArtists, filters=kwargs, limit=limit),
         )
 

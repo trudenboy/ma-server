@@ -10,17 +10,23 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.streamdetails import StreamMetadata
 
-from .constants import RADIO_PARADISE_CHANNELS, STATION_ICONS_BASE_URL
+from .constants import COVER_BASE_URL, RADIO_PARADISE_CHANNELS, STATION_ICONS_BASE_URL
 
 
 def parse_radio(channel_id: str, instance_id: str, provider_domain: str) -> Radio:
-    """Create a Radio object from cached channel information."""
-    channel_info = RADIO_PARADISE_CHANNELS.get(channel_id, {})
+    """
+    Create a Radio object from cached channel information.
+
+    :param channel_id: A known Radio Paradise channel id; callers must validate.
+    :param instance_id: The provider instance id.
+    :param provider_domain: The provider domain string.
+    """
+    channel_info = RADIO_PARADISE_CHANNELS[channel_id]
 
     radio = Radio(
         provider=instance_id,
         item_id=channel_id,
-        name=channel_info.get("name", "Unknown Radio"),
+        name=channel_info["name"],
         provider_mappings={
             ProviderMapping(
                 provider_domain=provider_domain,
@@ -31,18 +37,15 @@ def parse_radio(channel_id: str, instance_id: str, provider_domain: str) -> Radi
         },
     )
 
-    # Add static station icon
-    station_icon = channel_info.get("station_icon")
-    if station_icon:
-        icon_url = f"{STATION_ICONS_BASE_URL}/{station_icon}"
-        radio.metadata.add_image(
-            MediaItemImage(
-                provider=instance_id,
-                type=ImageType.THUMB,
-                path=icon_url,
-                remotely_accessible=True,
-            )
+    icon_url = f"{STATION_ICONS_BASE_URL}/{channel_info['station_icon']}"
+    radio.metadata.add_image(
+        MediaItemImage(
+            provider=instance_id,
+            type=ImageType.THUMB,
+            path=icon_url,
+            remotely_accessible=True,
         )
+    )
 
     return radio
 

@@ -24,6 +24,7 @@ class StreamingProtocol(IntEnum):
 CONF_ENCRYPTION: Final[str] = "encryption"
 CONF_ALAC_ENCODE: Final[str] = "alac_encode"
 CONF_VOLUME_START: Final[str] = "volume_start"
+CONF_SESSION_ESTABLISHMENT_LATENCY: Final[str] = "session_establishment_latency"
 CONF_PASSWORD: Final[str] = "password"
 CONF_AP2PASSWORD: Final[str] = "ap2password"
 CONF_IGNORE_VOLUME: Final[str] = "ignore_volume"
@@ -73,6 +74,7 @@ AIRPLAY_PCM_FORMAT = AudioFormat(
 
 BROKEN_AIRPLAY_MODELS = (
     # Samsung has been repeatedly being reported as having issues with AirPlay (raop and AP2)
+    # Samsung will work with AirPlay2 once PTP timing is implemented for the MA build
     ("Samsung", "*"),
 )
 

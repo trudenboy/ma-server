@@ -182,6 +182,7 @@ class SendspinAirPlayBridge:
                 initial_volume=self.airplay_player.volume_level or 25,
             )
             self._bridge_role.setup_audio_requirements()
+            self._refresh_bridge_timing()
 
         self.logger.info(
             "Sendspin bridge registered for %s (client_id=%s)",
@@ -199,6 +200,21 @@ class SendspinAirPlayBridge:
                 self._bridge_role = None
 
         self.logger.debug("Sendspin bridge stopped for %s", self.airplay_player.display_name)
+
+    def _refresh_bridge_timing(self) -> None:
+        """
+        Push the AirPlay startup latency to the bridge role.
+
+        ``wait_start`` is the lead time the device needs before audio begins, so
+        Sendspin schedules the first chunk that far ahead instead of dropping it.
+        ``min_buffer_ms`` is 0 — the device carries its own jitter buffer.
+        """
+        if self._bridge_role is None:
+            return
+        self._bridge_role.set_timing(
+            required_lead_time_ms=int(self.airplay_player.wait_start),
+            min_buffer_ms=0,
+        )
 
     def _on_stream_start(self, request: ExternalStreamStartRequest) -> None:
         """Handle stream start request from Sendspin server.
@@ -218,6 +234,8 @@ class SendspinAirPlayBridge:
                 self.airplay_player.display_name,
             )
             return
+        # Bridge outlives config changes, so re-read wait_start for the current protocol.
+        self._refresh_bridge_timing()
         # Capture and detach old stream resources before scheduling their cleanup.
         # This prevents the async cleanup from accidentally destroying the new
         # stream's resources, which reuse the same instance variables.
@@ -250,15 +268,25 @@ class SendspinAirPlayBridge:
         Called via the BridgePlayerRole.on_stream_start callback when the
         PushStream begins delivering audio chunks.
         """
-        # Cancel any existing writer task (leftover from previous stream)
-        if self._writer_task is not None and not self._writer_task.done():
-            self._writer_task.cancel()
-        # Re-assert streaming state and clear protocol references so the first
-        # audio chunk triggers a fresh protocol start. This is needed because
-        # the async cleanup scheduled by _on_stream_start may have cleared
-        # _is_streaming and _protocol_start_task between then and now.
-        self._is_streaming = True
+        # The stream might not yet be cleaned up completely (on rapid skips for example)
+        old_stream = self._airplay_stream
+        old_writer_task = self._writer_task
+        old_stream_start_task = self._airplay_stream_start_task
+
+        self._airplay_stream = None
+        self._writer_task = None
         self._airplay_stream_start_task = None
+        self.airplay_player.stream = None
+
+        if old_stream or old_writer_task or old_stream_start_task:
+            prev_cleanup = self._cleanup_task
+            self._cleanup_task = self.mass.create_task(
+                self._cleanup_old_stream(
+                    old_stream, old_writer_task, old_stream_start_task, prev_cleanup
+                )
+            )
+
+        self._is_streaming = True
         self._airplay_stream_ready.clear()
         self._next_expected_timestamp_us = None
         self._drop_until_us = 0
@@ -315,12 +343,6 @@ class SendspinAirPlayBridge:
                 self.airplay_player.display_name,
                 err,
             )
-            # Clean up partially created protocol
-            if self._airplay_stream:
-                with suppress(Exception):
-                    await self._airplay_stream.stop(force=True)
-                self._airplay_stream = None
-                self.airplay_player.stream = None
             # Stop accepting chunks, unblock the writer, and schedule full cleanup
             self._is_streaming = False
             self._airplay_stream_ready.set()

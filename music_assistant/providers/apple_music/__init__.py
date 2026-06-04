@@ -2,69 +2,29 @@
 Apple Music musicprovider support for MusicAssistant.
 
 TODO MUSIC_APP_TOKEN expires after 6 months so should have a distribution mechanism outside
-  compulsory application updates. It is only a semi-private key in JWT format so code be refreshed
-  daily by a GitHub action and downloaded by the provider each initialise.
+  compulsory application updates. It is only a semi-private key in JWT format so could be
+  refreshed daily by a GitHub action and downloaded by the provider each initialise.
 TODO Widevine keys can be obtained dynamically from Apple Music API rather than copied into Docker
   build. This is undocumented but @maxlyth has a working example.
 TODO MUSIC_USER_TOKEN must be refreshed (~min 180 days) and needs mechanism to prompt user to
   re-authenticate in browser.
 TODO Current provider ignores private tracks that are not available in the storefront catalog as
-  streamable url is derived from the catalog id. It is undecumented but @maxlyth has a working
+  streamable url is derived from the catalog id. It is undocumented but @maxlyth has a working
   example to get a streamable url from the library id.
 """
 
 from __future__ import annotations
 
-import base64
-import json
-import os
 import pathlib
 import re
 import time
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import aiofiles
 from aiohttp import web
-from aiohttp.client_exceptions import ClientError
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
-from music_assistant_models.enums import (
-    AlbumType,
-    ConfigEntryType,
-    ContentType,
-    ExternalID,
-    ImageType,
-    MediaType,
-    ProviderFeature,
-    StreamType,
-)
-from music_assistant_models.errors import (
-    LoginFailed,
-    MediaNotFoundError,
-    MusicAssistantError,
-    ResourceTemporarilyUnavailable,
-)
-from music_assistant_models.media_items import (
-    Album,
-    Artist,
-    AudioFormat,
-    BrowseFolder,
-    ItemMapping,
-    MediaItemImage,
-    MediaItemType,
-    Playlist,
-    ProviderMapping,
-    SearchResults,
-    Track,
-    UniqueList,
-)
-from music_assistant_models.streamdetails import StreamDetails
-from pywidevine import PSSH, Cdm, Device, DeviceTypes
-from pywidevine.license_protocol_pb2 import WidevinePsshData
-from shortuuid import uuid
+from music_assistant_models.enums import ConfigEntryType
+from music_assistant_models.errors import LoginFailed
 
-from music_assistant.controllers.cache import use_cache
-from music_assistant.helpers.app_vars import app_var
 from music_assistant.helpers.auth import AuthenticationHelper
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.playlists import fetch_playlist
@@ -78,8 +38,6 @@ from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.apple_music.helpers import browse_playlists
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
-
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
@@ -124,7 +82,7 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return AppleMusicProvider(mass, manifest, config, SUPPORTED_FEATURES)
+    return AppleMusicProvider(mass, manifest, config)
 
 
 async def get_config_entries(
@@ -147,7 +105,7 @@ async def get_config_entries(
         valid = re.findall(r"[a-zA-Z0-9=/+]{32,}==$", token)
         return bool(valid)
 
-    # Check for valid app token (1st with regex and then API check) otherwise display a config field
+    # Check for valid app token (first with regex and then API check)
     default_app_token_valid = False
     async with (
         mass.http_session.get(
@@ -183,9 +141,7 @@ async def get_config_entries(
                 auth_css_path = parent_file_path.joinpath("musickit_auth/musickit_wrapper.css")
                 return web.FileResponse(
                     auth_css_path,
-                    headers={
-                        "content-type": "text/css",
-                    },
+                    headers={"content-type": "text/css"},
                 )
 
             async def serve_mk_glue(request: web.Request) -> web.Response:
@@ -206,9 +162,7 @@ async def get_config_entries(
                 """
                 return web.Response(
                     body=return_html,
-                    headers={
-                        "content-type": "text/javascript",
-                    },
+                    headers={"content-type": "text/javascript"},
                 )
 
             mass.webserver.register_dynamic_route(
@@ -222,7 +176,7 @@ async def get_config_entries(
                 values[CONF_MUSIC_USER_TOKEN] = result["music-user-token"]
                 values[CONF_MUSIC_USER_TOKEN_TIMESTAMP] = result["music-user-token-timestamp"]
             except KeyError:
-                # no music-user-token URL param was found so likely user cancelled the auth
+                # no music-user-token URL param was found, likely user cancelled the auth
                 pass
             except Exception as error:
                 raise LoginFailed(f"Failed to authenticate with Apple '{error}'.")

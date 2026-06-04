@@ -14,7 +14,11 @@ from email.utils import parsedate_to_datetime
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Concatenate
 
-from music_assistant_models.errors import ResourceTemporarilyUnavailable, RetriesExhausted
+from music_assistant_models.errors import (
+    RateLimited,
+    ResourceTemporarilyUnavailable,
+    RetriesExhausted,
+)
 
 from music_assistant.constants import MASS_LOGGER_NAME
 

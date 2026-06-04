@@ -25,7 +25,6 @@ from music_assistant_models.enums import (
     RepeatMode,
 )
 from music_assistant_models.errors import InvalidCommand, MusicAssistantError
-from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.constants import (
     CONF_ENTRY_HTTP_PROFILE_FORCED_2,
@@ -35,11 +34,11 @@ from music_assistant.constants import (
     CONF_OUTPUT_CODEC,
     INTERNAL_PCM_FORMAT,
     VERBOSE_LOG_LEVEL,
-    create_sample_rates_config_entry,
 )
 from music_assistant.helpers.audio import get_mime_type
 from music_assistant.helpers.util import TaskManager
 from music_assistant.models.player import DeviceInfo, Player, PlayerMedia
+from music_assistant.models.smart_fades import SmartFadesMode
 
 from .constants import (
     CONF_ENTRY_DISPLAY,
@@ -100,10 +99,18 @@ class SqueezelitePlayer(Player):
             PlayerFeature.GAPLESS_PLAYBACK,
         }
         self._attr_can_group_with = {provider.instance_id}
+        max_sr = int(self.client.max_sample_rate)
+        self._attr_supported_sample_rates = [
+            (sr, bd)
+            for sr in (44100, 48000, 88200, 96000, 176400, 192000)
+            if sr <= max_sr
+            for bd in (16, 24)
+        ]
         self.multi_client_stream: MultiClientStream | None = None
         self._sync_playpoints: deque[SyncPlayPoint] = deque(maxlen=MIN_REQ_PLAYPOINTS)
         self._do_not_resync_before: float = 0.0
-        self._plugin_source_active: bool = False
+        self._audio_source_active: bool = False
+        self._low_latency_stream: bool = False
         # TEMP: patch slimclient send_strm to adjust buffer thresholds
         # this can be removed when we did a new release of aioslimproto with this change
         # after this has been tested in beta for a while
@@ -144,7 +151,6 @@ class SqueezelitePlayer(Player):
     ) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the player."""
         base_entries = await super().get_config_entries(action=action, values=values)
-        max_sample_rate = int(self.client.max_sample_rate)
         # create preset entries (for players that support it)
         presets = []
         async for playlist in self.mass.music.playlists.iter_library_items(True):
@@ -207,7 +213,7 @@ class SqueezelitePlayer(Player):
 
     async def stop(self) -> None:
         """Handle STOP command on the player."""
-        self._plugin_source_active = False
+        self._audio_source_active = False
         # Clean up any existing multi-client stream
         if self.multi_client_stream is not None:
             await self.multi_client_stream.stop()
@@ -260,13 +266,29 @@ class SqueezelitePlayer(Player):
             )
             return
 
-        # this is a syncgroup, we need to handle this with a multi client stream
-        # Use a fixed 96kHz/24-bit format for syncgroup playback
-        master_audio_format = AudioFormat(
-            content_type=INTERNAL_PCM_FORMAT.content_type,
-            sample_rate=96000,
-            bit_depth=INTERNAL_PCM_FORMAT.bit_depth,
-            channels=2,
+        # this is a syncgroup; we need to handle this with a multi client stream.
+        # pick the master flow format honoring the leader's flow-mode-sample-rate
+        # setting and supported rates. anchor on the first track when its streamdetails
+        # are already resolved so smart/bit-perfect modes start at the right rate.
+        start_queue_item = (
+            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+            if media.source_id and media.queue_item_id
+            else None
+        )
+        smart_fades_mode = (
+            await self.mass.config.get_player_config_value(
+                self.player_id,
+                CONF_SMART_FADES_MODE,
+                default=SmartFadesMode.DISABLED,
+                return_type=SmartFadesMode,
+            )
+            if media.media_type == MediaType.TRACK
+            else SmartFadesMode.DISABLED
+        )
+        master_audio_format = await self.mass.streams.audio.select_flow_pcm_format(
+            self,
+            start_streamdetails=start_queue_item.streamdetails if start_queue_item else None,
+            smartfades_enabled=smart_fades_mode != SmartFadesMode.DISABLED,
         )
 
         # select audio source, we force flow mode
@@ -462,10 +484,14 @@ class SqueezelitePlayer(Player):
         if media.source_id and (queue := self.mass.player_queues.get(media.source_id)):
             self.extra_data["playlist repeat"] = REPEATMODE_MAP[queue.repeat_mode]
             self.extra_data["playlist shuffle"] = int(queue.shuffle_enabled)
-        source_id = media.source_id or (media.custom_data or {}).get("source_id")
-        self._plugin_source_active = (
-            source_id is not None and self.mass.players.get_plugin_source(source_id) is not None
-        )
+        audio_source_active = media.media_type == MediaType.AUDIO_SOURCE
+        low_latency_stream = audio_source_active or media.media_type == MediaType.RADIO
+        # set the flags on the player that owns the slimclient (may differ from self
+        # during group playback where self is the leader but slimplayer is a member)
+        target_player = self.mass.players.get_player(slimplayer.player_id)
+        if isinstance(target_player, SqueezelitePlayer):
+            target_player._audio_source_active = audio_source_active
+            target_player._low_latency_stream = low_latency_stream
         await slimplayer.play_url(
             url=url,
             mime_type=get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0]),
@@ -759,7 +785,7 @@ async def _patched_send_strm(  # noqa: PLR0913
     httpreq: bytes = b"",
 ) -> None:
     """Create stream request message based on given arguments."""
-    if player._plugin_source_active:
+    if player._low_latency_stream:
         threshold = 64  # KB of input buffer data before autostart or notify
         output_threshold = (
             1  # amount of output buffer data before playback starts, in tenths of second

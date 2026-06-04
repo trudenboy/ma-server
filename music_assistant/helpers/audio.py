@@ -1346,6 +1346,9 @@ def get_normalization_mode(
     if not player_config.get_value(CONF_VOLUME_NORMALIZATION):
         # disabled for this player
         return VolumeNormalizationMode.DISABLED
+    if streamdetails.media_type == MediaType.AUDIO_SOURCE:
+        # live/realtime: upstream producer owns loudness, no measurement to converge on
+        return VolumeNormalizationMode.DISABLED
     if streamdetails.target_loudness is None:
         # no target loudness set, disable normalization
         return VolumeNormalizationMode.DISABLED

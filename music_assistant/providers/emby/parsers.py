@@ -27,15 +27,19 @@ from music_assistant.providers.emby.const import (
     ITEM_KEY_ALBUM_NAME,
     ITEM_KEY_ARTIST_ITEMS,
     ITEM_KEY_CONTAINER,
+    ITEM_KEY_GENRES,
     ITEM_KEY_ID,
     ITEM_KEY_IMAGE_TAGS,
     ITEM_KEY_INDEX_NUMBER,
     ITEM_KEY_MEDIA_STREAMS,
     ITEM_KEY_NAME,
     ITEM_KEY_PARENT_INDEX_NUMBER,
+    ITEM_KEY_PRIMARY_IMAGE_ITEM_ID,
     ITEM_KEY_PRODUCTION_YEAR,
     ITEM_KEY_RUNTIME_TICKS,
     ITEM_KEY_TYPE,
+    ITEM_KEY_USER_DATA,
+    USER_DATA_KEY_IS_FAVORITE,
 )
 
 if TYPE_CHECKING:
@@ -127,6 +131,12 @@ def parse_track(
             )
         )
 
+    user_data = item.get(ITEM_KEY_USER_DATA, {})
+    track.favorite = user_data.get(USER_DATA_KEY_IS_FAVORITE, False)
+
+    if genres := item.get(ITEM_KEY_GENRES):
+        track.metadata.genres = set(genres)
+
     return track
 
 
@@ -165,6 +175,12 @@ def parse_artist(
                 remotely_accessible=False,
             )
         )
+
+    user_data = item.get(ITEM_KEY_USER_DATA, {})
+    artist.favorite = user_data.get(USER_DATA_KEY_IS_FAVORITE, False)
+
+    if genres := item.get(ITEM_KEY_GENRES):
+        artist.metadata.genres = set(genres)
 
     return artist
 
@@ -230,6 +246,12 @@ def parse_album(
             )
         )
 
+    user_data = item.get(ITEM_KEY_USER_DATA, {})
+    album.favorite = user_data.get(USER_DATA_KEY_IS_FAVORITE, False)
+
+    if genres := item.get(ITEM_KEY_GENRES):
+        album.metadata.genres = set(genres)
+
     return album
 
 
@@ -267,6 +289,9 @@ def parse_playlist(
                 remotely_accessible=False,
             )
         )
+
+    user_data = item.get(ITEM_KEY_USER_DATA, {})
+    playlist.favorite = user_data.get(USER_DATA_KEY_IS_FAVORITE, False)
 
     return playlist
 

@@ -18,7 +18,6 @@ from music_assistant_models.enums import PlaybackState, PlayerFeature, PlayerTyp
 from music_assistant_models.errors import UnsupportedFeaturedException
 
 from music_assistant.controllers.players import PlayerController
-from music_assistant.helpers.throttle_retry import Throttler
 from tests.common import MockPlayer, MockProvider
 
 
@@ -30,7 +29,18 @@ def mock_mass() -> MagicMock:
     mass.loop = None
     mass.config = MagicMock()
     mass.config.get = MagicMock(return_value=[])
-    mass.config.get_raw_player_config_value = MagicMock(return_value="auto")
+
+    def _get_raw_player_config_value(
+        _player_id: str, key: str, default: str | int | None = None
+    ) -> str | int | None:
+        """Return appropriate defaults for player config values."""
+        if key == "min_volume":
+            return 0
+        if key == "max_volume":
+            return 100
+        return default if default is not None else "auto"
+
+    mass.config.get_raw_player_config_value = MagicMock(side_effect=_get_raw_player_config_value)
     # Return "GLOBAL" for log level config (standard default)
     mass.config.get_raw_core_config_value = MagicMock(return_value="GLOBAL")
     mass.config.set = MagicMock()
@@ -59,10 +69,6 @@ class TestSetMembersValidation:
         member = MockPlayer(provider, "member", "Member")
 
         controller._players = {"leader": leader, "member": member}
-        controller._player_throttlers = {
-            "leader": Throttler(1, 0.05),
-            "member": Throttler(1, 0.05),
-        }
         mock_mass.players = controller
 
         # Should raise exception because leader doesn't support SET_MEMBERS
@@ -82,10 +88,6 @@ class TestSetMembersValidation:
         player_b = MockPlayer(provider_b, "player_b", "Player B")
 
         controller._players = {"player_a": player_a, "player_b": player_b}
-        controller._player_throttlers = {
-            "player_a": Throttler(1, 0.05),
-            "player_b": Throttler(1, 0.05),
-        }
         mock_mass.players = controller
 
         # Should raise exception because players are incompatible
@@ -117,11 +119,6 @@ class TestCacheInvalidationAfterGrouping:
         other._attr_can_group_with = {"test"}
 
         controller._players = {"leader": leader, "member": member, "other": other}
-        controller._player_throttlers = {
-            "leader": Throttler(1, 0.05),
-            "member": Throttler(1, 0.05),
-            "other": Throttler(1, 0.05),
-        }
         mock_mass.players = controller
 
         # Populate caches
@@ -158,10 +155,6 @@ class TestGroupUngroup:
         member._attr_powered = True
 
         controller._players = {"leader": leader, "member": member}
-        controller._player_throttlers = {
-            "leader": Throttler(1, 0.05),
-            "member": Throttler(1, 0.05),
-        }
         mock_mass.players = controller
 
         # Update state after modifying attributes and registering with controller
@@ -216,10 +209,6 @@ class TestPlayerAvailability:
         member._attr_available = False  # Mark as unavailable
 
         controller._players = {"leader": leader, "member": member}
-        controller._player_throttlers = {
-            "leader": Throttler(1, 0.05),
-            "member": Throttler(1, 0.05),
-        }
         mock_mass.players = controller
 
         # Attempting to group with unavailable player should be handled

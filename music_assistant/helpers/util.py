@@ -153,11 +153,21 @@ VERSION_PARTS = (
     "instrumental",
     "karaoke",
     "remaster",
+    "remastered",
     "versie",
     "unplugged",
     "disco",
     "akoestisch",
     "deluxe",
+    "video",
+    "radio",
+    "extended",
+    "single",
+    "edition",
+    "anniversary",
+    "stereo",
+    "album",
+    "bonus",
 )
 IGNORE_TITLE_PARTS = (
     # strings that may be stripped off a title part
@@ -176,6 +186,37 @@ WITH_TITLE_WORDS = (
     "u",
     "you",
     "no",
+)
+
+# Keywords for aggressive search cleaning (includes featuring).
+_VERSION_PATTERN = "|".join(re.escape(v) for v in VERSION_PARTS)
+_FEAT_PATTERN = r"feat(?:uring)?|ft"
+_SEARCH_PATTERN = rf"{_VERSION_PATTERN}|{_FEAT_PATTERN}"
+
+_SEARCH_PAREN_PATTERN = re.compile(
+    rf"[\(\[][^\)\]]*\b({_SEARCH_PATTERN})\b[^\)\]]*[\)\]]",
+    re.IGNORECASE,
+)
+_SEARCH_HYPHEN_PATTERN = re.compile(
+    rf"(\s*-\s*(\d{{4}}|{_SEARCH_PATTERN}).*)$",
+    re.IGNORECASE,
+)
+
+# Superfluous suffixes to strip for display (video/audio markers, etc.)
+_DISPLAY_STRIP_PATTERN = re.compile(
+    r"\s*[\(\[]"
+    r"(official\s+)?(lyric\s+|music\s+)?(video|audio|visualizer|clip)"
+    r"[\)\]]$",
+    re.IGNORECASE,
+)
+
+# Featuring patterns for stripping from titles (not in parentheses).
+_FEATURING_PATTERNS = (
+    " featuring ",
+    " feat. ",
+    " feat ",
+    " ft. ",
+    " ft ",
 )
 
 
@@ -240,6 +281,29 @@ def normalize_unicode(value: str | None) -> str | None:
 def parse_title_and_version(title: str, track_version: str | None = None) -> tuple[str, str]:
     """Try to parse version from the title."""
     version = track_version or ""
+
+    # Strip featuring, bracketed version info, and hyphen suffixes (e.g. "- Remastered 2019")
+    if strip_for_search:
+        title = _SEARCH_PAREN_PATTERN.sub("", title)
+        title = _SEARCH_HYPHEN_PATTERN.sub("", title)
+        # Strip bare featuring credits (not in parentheses)
+        title_lower = title.lower()
+        for pattern in _FEATURING_PATTERNS:
+            if pattern in title_lower:
+                idx = title_lower.find(pattern)
+                title = title[:idx]
+                break
+        # Clean up dangling hyphens and extra spaces
+        title = re.sub(r"\s*-\s*$", "", title)
+        title = re.sub(r"\s+", " ", title).strip()
+        return title, version
+
+    # Strip video/audio suffixes like "(Official Video)"
+    if strip_for_display:
+        title = _DISPLAY_STRIP_PATTERN.sub("", title).strip()
+        return title, version
+
+    # Standard version parsing
     for regex in (r"\(.*?\)", r"\[.*?\]", r" - .*"):
         for title_part in re.findall(regex, title):
             # Extract the content without brackets/dashes for checking

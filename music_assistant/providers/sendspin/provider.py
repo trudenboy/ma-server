@@ -6,13 +6,20 @@ import asyncio
 from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlsplit
 
 from aiosendspin.server import ClientAddedEvent, ClientRemovedEvent, SendspinEvent, SendspinServer
 from music_assistant_models.enums import ProviderFeature
 
 from music_assistant.mass import MusicAssistant
+from music_assistant.models.player import Player
 from music_assistant.models.player_provider import PlayerProvider
-from music_assistant.providers.sendspin.player import SendspinPlayer
+from music_assistant.providers.sendspin.constants import CONF_SENDSPIN_STATIC_DELAY
+from music_assistant.providers.sendspin.player import (
+    SendspinBasePlayer,
+    SendspinPlayer,
+    SendspinVisualizerPlayer,
+)
 
 if TYPE_CHECKING:
     from aiosendspin.models.core import ClientHelloPayload
@@ -22,6 +29,40 @@ if TYPE_CHECKING:
     from music_assistant.providers.hass import HomeAssistantProvider
 
 
+DEFAULT_SENDSPIN_CLIENT_PORT = 8928
+DEFAULT_SENDSPIN_CLIENT_PATH = "/sendspin"
+
+
+def _manual_client_url(address: str) -> str:
+    """Convert a manually configured Sendspin host/IP to a client WebSocket URL."""
+    stripped_address = address.strip()
+    if not stripped_address:
+        raise ValueError("Address is empty")
+
+    if "://" in stripped_address:
+        return stripped_address
+
+    try:
+        parsed_ip = ip_address(stripped_address)
+    except ValueError:
+        pass
+    else:
+        return (
+            f"ws://{format_ip_for_url(str(parsed_ip))}:"
+            f"{DEFAULT_SENDSPIN_CLIENT_PORT}{DEFAULT_SENDSPIN_CLIENT_PATH}"
+        )
+
+    parsed_address = urlsplit(f"//{stripped_address}")
+    if parsed_address.hostname is None:
+        raise ValueError("Address does not contain a host")
+
+    return (
+        f"ws://{format_ip_for_url(parsed_address.hostname)}:"
+        f"{parsed_address.port or DEFAULT_SENDSPIN_CLIENT_PORT}"
+        f"{parsed_address.path or DEFAULT_SENDSPIN_CLIENT_PATH}"
+    )
+
+
 class SendspinProvider(PlayerProvider):
     """Player Provider for Sendspin."""
 
@@ -29,8 +70,10 @@ class SendspinProvider(PlayerProvider):
     unregister_cbs: list[Callable[[], None]]
     _pending_unregisters: dict[str, asyncio.Event]
     _bridge_identifiers: dict[str, dict[IdentifierType, str]]
+    _bridge_static_delay_defaults: dict[str, int]
     _client_event_versions: dict[str, int]
     _client_event_task_counts: dict[str, int]
+    _manual_ip_config: tuple[str, ...]
     _unloading: bool
 
     def __init__(
@@ -38,11 +81,20 @@ class SendspinProvider(PlayerProvider):
     ) -> None:
         """Initialize a new Sendspin player provider."""
         super().__init__(mass, manifest, config)
+        # Handle config option for manual IP's
+        manual_ip_config = cast("list[str]", config.get_value(CONF_ENTRY_MANUAL_DISCOVERY_IPS.key))
+        self._manual_ip_config = tuple(address for address in manual_ip_config if address.strip())
         self.server_api = SendspinServer(
             self.mass.loop, mass.server_id, "Music Assistant", self.mass.http_session
         )
+        # Pitch (YINFFT) is the heaviest visualizer DSP and result quality is
+        # still very mixed, needs more testing. Disable it globally for now to
+        # spare low-power hosts.
+        self.server_api.set_visualizer_pitch_enabled(enabled=False)
         self._pending_unregisters = {}
         self._bridge_identifiers = {}
+        self._bridge_static_delay_defaults = {}
+        self._bridge_player_types: dict[str, PlayerType] = {}
         self._client_event_versions = {}
         self._client_event_task_counts = {}
         self._unloading = False
@@ -290,12 +342,13 @@ class SendspinProvider(PlayerProvider):
                 self.logger.debug("Skipping stale update event for %s", client_id)
                 return
             existing_player = self.mass.players.get_player(client_id)
-            if not isinstance(existing_player, SendspinPlayer):
+            if not isinstance(existing_player, SendspinBasePlayer):
                 return
             previous_device_info = existing_player.device_info
             previous_type = existing_player.type
             existing_player._refresh_client_info(sendspin_client)
-            existing_player.restore_bridge_identity(previous_device_info, previous_type)
+            if isinstance(existing_player, SendspinPlayer):
+                existing_player.restore_bridge_identity(previous_device_info, previous_type)
             await self._apply_hass_name_override(existing_player, client_id)
             if not self._is_current_client_event(client_id, event_version):
                 self.logger.debug("Skipping stale update event for %s after refresh", client_id)
@@ -323,6 +376,20 @@ class SendspinProvider(PlayerProvider):
             host=self.mass.streams.bind_ip,
             advertise_addresses=[cast("str", self.mass.streams.publish_ip)],
         )
+        for address in self._manual_ip_config:
+            try:
+                url = _manual_client_url(address)
+            except ValueError as err:
+                self.logger.warning(
+                    "Ignoring invalid manual Sendspin client address %s: %s", address, err
+                )
+                continue
+            self.logger.debug("Connecting to manually configured Sendspin client at %s", url)
+            self.server_api.connect_to_client(
+                url,
+                retry_initial_connection=True,
+                retry_indefinitely=True,
+            )
 
     async def unload(self, is_removed: bool = False) -> None:
         """
