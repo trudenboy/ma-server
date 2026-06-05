@@ -13,7 +13,7 @@ dependencies = [
   "pycares==4.11.0",
   "aiohttp_asyncmdnsresolver==0.1.1",
   "Brotli>=1.0.9",
-  "aiohttp==3.13.5",
+  "aiohttp==3.14.0",
   "aiohttp-fast-zlib==0.3.0",
   "aiohttp-socks==0.11.0",
   "aiofiles==24.1.0",
@@ -150,7 +150,6 @@ enable_error_code = [
 exclude = [
   '^music_assistant/controllers/music.py$',
   '^music_assistant/helpers/app_vars.py',
-  '^music_assistant/providers/apple_music/.*$',
   '^music_assistant/providers/plex/.*$',
   '^music_assistant/providers/plex_connect/.*$',
   '^music_assistant/providers/sonic_analysis/vendored_clap/.*$',

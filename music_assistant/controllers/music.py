@@ -71,6 +71,7 @@ from music_assistant.constants import (
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
     DEFAULT_GENRE_MAPPING,
+    GENRE_ICONS_DIR_NAME,
     LOUDNESS_MEASUREMENT_MIN_LUFS,
     PROVIDERS_WITH_SHAREABLE_URLS,
 )
@@ -116,7 +117,7 @@ CONF_RESET_DB = "reset_db"
 DEFAULT_SYNC_INTERVAL = 12 * 60  # default sync interval in minutes
 CONF_SYNC_INTERVAL = "sync_interval"
 CONF_DELETED_PROVIDERS = "deleted_providers"
-DB_SCHEMA_VERSION: Final[int] = 40
+DB_SCHEMA_VERSION: Final[int] = 41
 # tracks longer that this will not be included in radio mode
 RADIO_TRACK_MAX_DURATION_SECS: Final[int] = 20 * 60
 _DYNAMIC_RADIO_BASE_SAMPLE_SIZE: Final[int] = 5
@@ -671,6 +672,7 @@ class MusicController(CoreController):
         queue_id: str | None = None,
         fully_played_only: bool = True,
         user_initiated_only: bool = False,
+        played_after_timestamp: int | None = None,
     ) -> list[ItemMapping]:
         """Return a list of the last played items.
 
@@ -680,6 +682,8 @@ class MusicController(CoreController):
         :param queue_id: Filter by specific queue ID.
         :param fully_played_only: If True, only return fully played items.
         :param user_initiated_only: If True, only return items initiated by the user.
+        :param played_after_timestamp: If set, only return items played at or after this
+            epoch-seconds timestamp.
         """
         if media_types is None:
             media_types = MediaType.ALL
@@ -705,6 +709,9 @@ class MusicController(CoreController):
         if queue_id:
             query += "AND queue_id = :queue_id "
             params["queue_id"] = queue_id
+        if played_after_timestamp is not None:
+            query += "AND timestamp >= :played_after_timestamp "
+            params["played_after_timestamp"] = played_after_timestamp
         query += "ORDER BY timestamp DESC"
         db_rows = await self.mass.music.database.get_rows_from_query(
             query, params=params or None, limit=limit
@@ -2900,6 +2907,39 @@ class MusicController(CoreController):
             except Exception as err:
                 if "duplicate column" not in str(err):
                     raise
+
+        if prev_version <= 40:
+            # genre icons were previously stored with an absolute filesystem path to
+            # the builtin SVG, which is install-location dependent. after a runtime
+            # upgrade or relocation (e.g. the python3.13 -> python3.14 site-packages
+            # move) that path no longer existed, so genre icons 404'd via imageproxy.
+            # rewrite them to the install-independent "<GENRE_ICONS_DIR_NAME>/<file>"
+            # form; the builtin provider resolves that against RESOURCES_DIR at serve
+            # time.
+            genre_dir_marker = f"/resources/{GENRE_ICONS_DIR_NAME}/"
+            async for db_row in self._database.iter_items(DB_TABLE_GENRES):
+                raw_metadata = db_row["metadata"]
+                if not raw_metadata:
+                    continue
+                metadata = json_loads(raw_metadata)
+                images = metadata.get("images")
+                if not images:
+                    continue
+                changed = False
+                for image in images:
+                    path = image.get("path")
+                    if not (image.get("provider") == "builtin" and isinstance(path, str)):
+                        continue
+                    norm = path.replace("\\", "/")
+                    if genre_dir_marker in norm and norm.endswith(".svg"):
+                        image["path"] = f"{GENRE_ICONS_DIR_NAME}/{norm.rsplit('/', 1)[-1]}"
+                        changed = True
+                if changed:
+                    await self._database.update(
+                        DB_TABLE_GENRES,
+                        {"item_id": db_row["item_id"]},
+                        {"metadata": serialize_to_json(metadata)},
+                    )
 
         # save changes
         await self._database.commit()
