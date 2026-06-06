@@ -71,6 +71,7 @@ from music_assistant.constants import (
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
     DEFAULT_GENRE_MAPPING,
+    GENRE_ICONS_DIR_NAME,
     LOUDNESS_MEASUREMENT_MIN_LUFS,
     PROVIDERS_WITH_SHAREABLE_URLS,
 )
@@ -163,7 +164,7 @@ class MusicController(CoreController):
         values: dict[str, ConfigValueType] | None = None,
     ) -> tuple[ConfigEntry, ...]:
         """Return all Config Entries for this core module (if any)."""
-        entries = (
+        entries: tuple[ConfigEntry, ...] = (
             ConfigEntry(
                 key=CONF_RESET_DB,
                 type=ConfigEntryType.ACTION,
@@ -195,8 +196,9 @@ class MusicController(CoreController):
         # setup library database
         await self._setup_database()
         # make sure to finish any removal jobs
-        for removed_provider in self.mass.config.get_raw_core_config_value(
-            self.domain, CONF_DELETED_PROVIDERS, []
+        for removed_provider in cast(
+            "list[str]",
+            self.mass.config.get_raw_core_config_value(self.domain, CONF_DELETED_PROVIDERS, []),
         ):
             await self.cleanup_provider(removed_provider)
         # schedule cleanup task for matching provider instances
@@ -274,7 +276,7 @@ class MusicController(CoreController):
                     continue
                 # handle mediatype specific sync config
                 conf_key = f"library_sync_{media_type}s"
-                sync_conf = await self.mass.config.get_provider_config_value(
+                sync_conf: ConfigValueType = await self.mass.config.get_provider_config_value(
                     provider.instance_id, conf_key
                 )
                 if not sync_conf:
@@ -339,7 +341,7 @@ class MusicController(CoreController):
             category=CACHE_CATEGORY_SEARCH_RESULTS,
             base_class=SearchResults,
         ):
-            return cache
+            return cast("SearchResults", cache)
         if not media_types:
             media_types = MediaType.ALL
         # Check if the search query is a streaming provider public shareable URL
@@ -651,10 +653,10 @@ class MusicController(CoreController):
             isinstance(prov, PluginProvider)
             and ProviderFeature.AUDIO_SOURCE in prov.supported_features
         ):
-            initiable: list[MediaItemType | BrowseFolder] = [
+            initiable_items: list[MediaItemType | BrowseFolder] = [
                 source for source in await prov.get_audio_sources() if source.can_initiate
             ]
-            return [*prepend_items, *initiable]
+            return [*prepend_items, *initiable_items]
         # limit -1 to account for the prepended items
         prov_items = await prov.browse(path=path)
         return prepend_items + prov_items
@@ -668,6 +670,7 @@ class MusicController(CoreController):
         queue_id: str | None = None,
         fully_played_only: bool = True,
         user_initiated_only: bool = False,
+        played_after_timestamp: int | None = None,
     ) -> list[ItemMapping]:
         """Return a list of the last played items.
 
@@ -677,6 +680,8 @@ class MusicController(CoreController):
         :param queue_id: Filter by specific queue ID.
         :param fully_played_only: If True, only return fully played items.
         :param user_initiated_only: If True, only return items initiated by the user.
+        :param played_after_timestamp: If set, only return items played at or after this
+            epoch-seconds timestamp.
         """
         if media_types is None:
             media_types = MediaType.ALL
@@ -702,6 +707,9 @@ class MusicController(CoreController):
         if queue_id:
             query += "AND queue_id = :queue_id "
             params["queue_id"] = queue_id
+        if played_after_timestamp is not None:
+            query += "AND timestamp >= :played_after_timestamp "
+            params["played_after_timestamp"] = played_after_timestamp
         query += "ORDER BY timestamp DESC"
         db_rows = await self.mass.music.database.get_rows_from_query(
             query, params=params or None, limit=limit
@@ -2296,9 +2304,9 @@ class MusicController(CoreController):
         # on top of the list.
         safe_title_str = create_safe_string(search_query)
         if " - " in search_query:
-            artist, title_alt = search_query.split(" - ", 1)
+            artist_name, title_alt = search_query.split(" - ", 1)
             safe_title_alt = create_safe_string(title_alt)
-            safe_artist_str = create_safe_string(artist)
+            safe_artist_str = create_safe_string(artist_name)
         else:
             safe_artist_str = None
             safe_title_alt = None
@@ -2330,7 +2338,9 @@ class MusicController(CoreController):
         """Schedule Library sync for given provider and media type."""
         # handle mediatype specific sync config
         conf_key = f"library_sync_{media_type}s"
-        sync_conf = await self.mass.config.get_provider_config_value(provider.instance_id, conf_key)
+        sync_conf: ConfigValueType = await self.mass.config.get_provider_config_value(
+            provider.instance_id, conf_key
+        )
         if not sync_conf:
             self.mass.tasks.unregister_scheduled_task(self._get_sync_task_id(provider, media_type))
             return
@@ -2471,18 +2481,18 @@ class MusicController(CoreController):
                 DB_TABLE_PODCASTS,
             ):
                 try:
-                    await self._database.execute(
+                    await self.database.execute(
                         f"ALTER TABLE {table} ADD COLUMN search_name TEXT DEFAULT '' NOT NULL"
                     )
-                    await self._database.execute(
+                    await self.database.execute(
                         f"ALTER TABLE {table} ADD COLUMN search_sort_name TEXT DEFAULT '' NOT NULL"
                     )
                 except Exception as err:
                     if "duplicate column" not in str(err):
                         raise
                 # migrate all existing values
-                async for db_row in self._database.iter_items(table):
-                    await self._database.update(
+                async for db_row in self.database.iter_items(table):
+                    await self.database.update(
                         table,
                         {"item_id": db_row["item_id"]},
                         {
@@ -2499,7 +2509,7 @@ class MusicController(CoreController):
                 DB_TABLE_AUDIOBOOKS,
                 DB_TABLE_PODCASTS,
             ):
-                async for db_row in self._database.iter_items(table):
+                async for db_row in self.database.iter_items(table):
                     if '"release_date":null' in db_row["metadata"]:
                         continue
                     metadata = json_loads(db_row["metadata"])
@@ -2508,7 +2518,7 @@ class MusicController(CoreController):
                     except (KeyError, ValueError):
                         # this is not a valid date, so we set it to None
                         metadata["release_date"] = None
-                        await self._database.update(
+                        await self.database.update(
                             table,
                             {"item_id": db_row["item_id"]},
                             {
@@ -2528,16 +2538,16 @@ class MusicController(CoreController):
                 "audiobooks",
                 "podcasts",
             ):
-                await self._database.execute(f"DROP TRIGGER IF EXISTS update_{db_table}_timestamp;")
+                await self.database.execute(f"DROP TRIGGER IF EXISTS update_{db_table}_timestamp;")
 
         if prev_version <= 18:
             # add in_library column to provider_mappings table
-            await self._database.execute(
+            await self.database.execute(
                 f"ALTER TABLE {DB_TABLE_PROVIDER_MAPPINGS} ADD COLUMN in_library "
                 "BOOLEAN NOT NULL DEFAULT 0;"
             )
             # migrate existing entries in provider_mappings which are filesystem
-            await self._database.execute(
+            await self.database.execute(
                 f"UPDATE {DB_TABLE_PROVIDER_MAPPINGS} SET in_library = 1 "
                 "WHERE provider_domain in ('filesystem_local', 'filesystem_smb');"
             )
@@ -2546,7 +2556,7 @@ class MusicController(CoreController):
             # drop column cache_checksum from playlists table
             # this is no longer used and is a leftover from previous designs
             try:
-                await self._database.execute(
+                await self.database.execute(
                     f"ALTER TABLE {DB_TABLE_PLAYLISTS} DROP COLUMN cache_checksum"
                 )
             except Exception as err:
@@ -2555,13 +2565,13 @@ class MusicController(CoreController):
 
         if prev_version <= 21:
             # drop table for smart fades analysis - it will be recreated with needed columns
-            await self._database.execute("DROP TABLE IF EXISTS smart_fades_analysis")
+            await self.database.execute("DROP TABLE IF EXISTS smart_fades_analysis")
             await self.__create_database_tables()
 
         if prev_version <= 22:
             # add userid column to playlog table
             try:
-                await self._database.execute(
+                await self.database.execute(
                     f"ALTER TABLE {DB_TABLE_PLAYLOG} ADD COLUMN userid TEXT"
                 )
             except Exception as err:
@@ -2571,8 +2581,8 @@ class MusicController(CoreController):
             # The UNIQUE constraint will be updated when the table is recreated
             # For now, we'll keep the old constraint and add a new one via unique index
             try:
-                await self._database.execute(f"DROP INDEX IF EXISTS {DB_TABLE_PLAYLOG}_unique_idx")
-                await self._database.execute(
+                await self.database.execute(f"DROP INDEX IF EXISTS {DB_TABLE_PLAYLOG}_unique_idx")
+                await self.database.execute(
                     f"CREATE UNIQUE INDEX {DB_TABLE_PLAYLOG}_unique_idx "
                     f"ON {DB_TABLE_PLAYLOG}(item_id,provider,media_type,userid)"
                 )
@@ -2583,7 +2593,7 @@ class MusicController(CoreController):
         if prev_version <= 23:
             # add is_unique column to provider_mappings table
             try:
-                await self._database.execute(
+                await self.database.execute(
                     f"ALTER TABLE {DB_TABLE_PROVIDER_MAPPINGS} ADD COLUMN is_unique BOOLEAN"
                 )
             except Exception as err:
@@ -2593,14 +2603,14 @@ class MusicController(CoreController):
         if prev_version <= 24:
             # add queue_id and user_initiated columns to playlog table
             try:
-                await self._database.execute(
+                await self.database.execute(
                     f"ALTER TABLE {DB_TABLE_PLAYLOG} ADD COLUMN queue_id TEXT"
                 )
             except Exception as err:
                 if "duplicate column" not in str(err):
                     raise
             try:
-                await self._database.execute(
+                await self.database.execute(
                     f"ALTER TABLE {DB_TABLE_PLAYLOG} "
                     "ADD COLUMN user_initiated BOOLEAN NOT NULL DEFAULT 1"
                 )
@@ -2611,24 +2621,24 @@ class MusicController(CoreController):
         if prev_version <= 26:
             # force in_library=True for provider mappings from non-streaming providers
             # streaming providers will be automatically added to library when synced
-            await self._database.execute(
+            await self.database.execute(
                 f"UPDATE {DB_TABLE_PROVIDER_MAPPINGS} SET in_library = 1 "
                 "WHERE provider_domain NOT IN "
                 "('spotify', 'deezer', 'tidal', 'qobuz', 'apple_music', 'ytmusic');"
             )
             # also set in_library=True for all radio items
-            await self._database.execute(
+            await self.database.execute(
                 f"UPDATE {DB_TABLE_PROVIDER_MAPPINGS} SET in_library = 1 "
                 "WHERE media_type = 'radio';"
             )
             # remove invalid playlist provider mappings for playlists which are not in library
-            await self._database.execute(
+            await self.database.execute(
                 f"DELETE FROM {DB_TABLE_PROVIDER_MAPPINGS} "
                 "WHERE media_type = 'playlist' AND in_library = 0;"
             )
 
         # save changes
-        await self._database.commit()
+        await self.database.commit()
 
         # always clear the cache after a db migration
         await self.mass.cache.clear()
