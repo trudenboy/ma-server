@@ -329,7 +329,7 @@ class StreamsAudio:
         extra_input_args = streamdetails.extra_input_args or []
 
         # work out audio source for these streamdetails
-        audio_source: str | AsyncGenerator[bytes, None]
+        audio_source: str | AsyncGenerator[bytes]
         stream_type = streamdetails.stream_type
         if stream_type == StreamType.CUSTOM:
             music_prov = mass.get_provider(streamdetails.provider)
@@ -609,7 +609,7 @@ class StreamsAudio:
                     )
                     streamdetails.stream_title = cleaned_stream_title
 
-    async def get_reconnecting_radio_stream(self, url: str) -> AsyncGenerator[bytes, None]:
+    async def get_reconnecting_radio_stream(self, url: str) -> AsyncGenerator[bytes]:
         """
         Yield continuous radio stream data, automatically reconnecting on disconnect.
 
@@ -713,7 +713,7 @@ class StreamsAudio:
         streamdetails: StreamDetails,
         seek_position: int = 0,
         verify_ssl: bool = True,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """Get audio stream from HTTP."""
         mass = self.mass
         self.logger.debug(
@@ -781,7 +781,7 @@ class StreamsAudio:
         filename: str,
         streamdetails: StreamDetails,
         seek_position: int = 0,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """Get audio stream from local accessible file."""
         if seek_position:
             assert streamdetails.duration, "Duration required for seek requests"
@@ -819,7 +819,7 @@ class StreamsAudio:
         self,
         streamdetails: StreamDetails,
         seek_position: int = 0,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """
         Return audio stream for a concatenation of multiple files.
 
@@ -1249,7 +1249,8 @@ class StreamsAudio:
         seek_position: int = 0,
         playback_speed: float = 1.0,
         raise_on_error: bool = True,
-    ) -> AsyncGenerator[bytes, None]:
+        normalization_override: VolumeNormalizationMode | None = None,
+    ) -> AsyncGenerator[bytes]:
         """
         Get the (PCM) audio stream for a single queue item.
 
@@ -1429,7 +1430,7 @@ class StreamsAudio:
         pcm_format: AudioFormat,
         smart_fades_mode: SmartFadesMode = SmartFadesMode.SMART_CROSSFADE,
         standard_crossfade_duration: int = 10,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """Get the audio stream for a single queue item with (smart) crossfade to the next item."""
         queue = self.mass.player_queues.get(queue_item.queue_id)
         if not queue:
@@ -1502,6 +1503,12 @@ class StreamsAudio:
         # Round down to nearest frame boundary
         crossfade_buffer_size = (crossfade_buffer_size // frame_size) * frame_size
         fade_out_data: bytes | None = None
+
+        # pin the body to DYNAMIC when the intro was baked DYNAMIC,
+        # else a late measurement flips it and causes a volume jump
+        norm_override: VolumeNormalizationMode | None = None
+        if crossfade_data and crossfade_data.normalization_mode == VolumeNormalizationMode.DYNAMIC:
+            norm_override = VolumeNormalizationMode.DYNAMIC
 
         if crossfade_data:
             # yield the second half of the crossfade from the previous track first
@@ -1697,7 +1704,7 @@ class StreamsAudio:
 
     async def get_queue_flow_stream(
         self, queue: PlayerQueue, start_queue_item: QueueItem, pcm_format: AudioFormat
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """
         Get a flow stream of all tracks in the queue as raw PCM audio.
 
@@ -2126,7 +2133,7 @@ class StreamsAudio:
     # --- Private methods ---
 
     @asynccontextmanager
-    async def _connect_radio_stream(self, url: str, **kwargs: Any) -> AsyncGenerator[Any, None]:
+    async def _connect_radio_stream(self, url: str, **kwargs: Any) -> AsyncGenerator[Any]:
         """
         Connect to a radio stream URL with fallback for legacy SSL/TLS configurations.
 

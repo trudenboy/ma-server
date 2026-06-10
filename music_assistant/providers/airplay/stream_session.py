@@ -61,7 +61,7 @@ class AirPlayStreamSession:
         self.last_paused: float | None = None
         self._first_chunk_received = asyncio.Event()
 
-    async def start(self, audio_source: AsyncGenerator[bytes, None]) -> None:
+    async def start(self, audio_source: AsyncGenerator[bytes]) -> None:
         """Initialize stream session for all players."""
         cur_time = time.time()
         has_airplay2_client = any(
@@ -208,7 +208,7 @@ class AirPlayStreamSession:
 
             await self._start_client(airplay_player, start_ntp)
 
-    async def _audio_streamer(self, audio_source: AsyncGenerator[bytes, None]) -> None:
+    async def _audio_streamer(self, audio_source: AsyncGenerator[bytes]) -> None:
         """Stream audio to all players."""
         pcm_sample_size = self.pcm_format.pcm_sample_size
         watchdog_task = asyncio.create_task(self._silence_watchdog(pcm_sample_size))

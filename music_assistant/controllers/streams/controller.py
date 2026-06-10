@@ -592,7 +592,11 @@ class StreamsController(CoreController):
         enable_icy = request.headers.get("Icy-MetaData", "") == "1" and icy_preference != "disabled"
         icy_meta_interval = 256000 if icy_preference == "full" else 16384
 
-        # prepare request, add some DLNA/UPNP compatible headers
+        # prepare request, add some DLNA/UPNP compatible headers.
+        # icy-name (in DEFAULT_STREAM_HEADERS) is always present so players have a
+        # readable stream name; the rest of the ICY/shoutcast metadata headers are
+        # only advertised when the client actually requested ICY metadata, rather
+        # than on every flow response.
         headers = {
             **DEFAULT_STREAM_HEADERS,
             **ICY_HEADERS,
@@ -839,7 +843,7 @@ class StreamsController(CoreController):
         player_id: str | None = None,
         force_flow_mode: bool = False,
         use_flow_stream_buffering: bool = False,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """
         Get a stream of the given media as raw PCM audio.
 
@@ -950,7 +954,7 @@ class StreamsController(CoreController):
         provider_instance_id_or_domain: str,
         item_id: str,
         media_type: MediaType = MediaType.TRACK,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """Create a 30 seconds preview audioclip for the given media item."""
         if not (music_prov := self.mass.get_provider(provider_instance_id_or_domain)):
             raise ProviderUnavailableError
@@ -984,7 +988,7 @@ class StreamsController(CoreController):
         output_format: AudioFormat,
         pre_announce: bool | str = False,
         pre_announce_url: str = ANNOUNCE_ALERT_FILE,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         """Get the special announcement stream."""
         announcement_data: asyncio.Queue[bytes | None] = asyncio.Queue(10)
         # we are doing announcement in PCM first to avoid multiple encodings
@@ -1023,7 +1027,7 @@ class StreamsController(CoreController):
 
         self.mass.create_task(fetch_announcement())
 
-        async def _announcement_stream() -> AsyncGenerator[bytes, None]:
+        async def _announcement_stream() -> AsyncGenerator[bytes]:
             """Generate the PCM audio stream for the announcement + optional pre-announce."""
             if pre_announce:
                 async for chunk in get_ffmpeg_stream(

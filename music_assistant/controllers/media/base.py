@@ -540,7 +540,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         self,
         provider_instance_id_or_domain: str,
         provider_item_id: str | None = None,
-    ) -> AsyncGenerator[ItemCls, None]:
+    ) -> AsyncGenerator[ItemCls]:
         """Iterate all records from database for given provider."""
         limit: int = 500
         offset: int = 0

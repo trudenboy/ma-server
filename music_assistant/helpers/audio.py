@@ -1090,7 +1090,7 @@ def get_parts_from_position(
 async def get_silence(
     duration: int,
     output_format: AudioFormat,
-) -> AsyncGenerator[bytes, None]:
+) -> AsyncGenerator[bytes]:
     """Create stream of silence, encoded to format of choice."""
     if output_format.content_type.is_pcm():
         # pcm = just zeros
@@ -1130,11 +1130,11 @@ async def get_silence(
 
 
 async def resample_pcm_audio(
-    input_audio: bytes | AsyncGenerator[bytes, None],
+    input_audio: bytes | AsyncGenerator[bytes],
     input_format: AudioFormat,
     output_format: AudioFormat,
     chunk_size: int | None = None,
-) -> AsyncGenerator[bytes, None]:
+) -> AsyncGenerator[bytes]:
     """
     Resample PCM audio from input_format to output_format using ffmpeg.
 
@@ -1148,7 +1148,7 @@ async def resample_pcm_audio(
     if chunk_size is None:
         chunk_size = output_format.pcm_sample_size
 
-    async def _as_generator() -> AsyncGenerator[bytes, None]:
+    async def _as_generator() -> AsyncGenerator[bytes]:
         if isinstance(input_audio, bytes):
             yield input_audio
         else:

@@ -13,7 +13,7 @@ from io import StringIO
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
-from aiohttp import ClientConnectorError
+from aiohttp import ClientError
 from duration_parser import parse as parse_str_duration
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
 from music_assistant_models.enums import (
@@ -290,7 +290,7 @@ class YoutubeMusicProvider(MusicProvider):
         parsed_results.tracks = tracks
         return parsed_results
 
-    async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
+    async def get_library_artists(self) -> AsyncGenerator[Artist]:
         """Retrieve all library artists from Youtube Music."""
         artists_obj = await get_library_artists(
             headers=self._headers, language=self.language, user=self._yt_user
@@ -298,7 +298,7 @@ class YoutubeMusicProvider(MusicProvider):
         for artist in artists_obj:
             yield self._parse_artist(artist)
 
-    async def get_library_albums(self) -> AsyncGenerator[Album, None]:
+    async def get_library_albums(self) -> AsyncGenerator[Album]:
         """Retrieve all library albums from Youtube Music."""
         albums_obj = await get_library_albums(
             headers=self._headers, language=self.language, user=self._yt_user
@@ -306,7 +306,7 @@ class YoutubeMusicProvider(MusicProvider):
         for album in albums_obj:
             yield self._parse_album(album, album["browseId"])
 
-    async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
+    async def get_library_playlists(self) -> AsyncGenerator[Playlist]:
         """Retrieve all library playlists from the provider."""
         playlists_obj = await get_library_playlists(
             headers=self._headers, language=self.language, user=self._yt_user
@@ -317,7 +317,7 @@ class YoutubeMusicProvider(MusicProvider):
                 continue
             yield self._parse_playlist(playlist)
 
-    async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
+    async def get_library_tracks(self) -> AsyncGenerator[Track]:
         """Retrieve library tracks from Youtube Music."""
         tracks_obj = await get_library_tracks(
             headers=self._headers, language=self.language, user=self._yt_user
@@ -331,7 +331,7 @@ class YoutubeMusicProvider(MusicProvider):
                 full_track = await self.get_track(track["videoId"])
                 yield full_track
 
-    async def get_library_podcasts(self) -> AsyncGenerator[Podcast, None]:
+    async def get_library_podcasts(self) -> AsyncGenerator[Podcast]:
         """Retrieve the library podcasts from Youtube Music."""
         podcasts_obj = await get_library_podcasts(
             headers=self._headers, language=self.language, user=self._yt_user
@@ -502,9 +502,7 @@ class YoutubeMusicProvider(MusicProvider):
         podcast_obj = await get_podcast(prov_podcast_id, headers=self._headers)
         return self._parse_podcast(podcast_obj)
 
-    async def get_podcast_episodes(
-        self, prov_podcast_id: str
-    ) -> AsyncGenerator[PodcastEpisode, None]:
+    async def get_podcast_episodes(self, prov_podcast_id: str) -> AsyncGenerator[PodcastEpisode]:
         """Get all episodes from a podcast."""
         podcast_obj = await get_podcast(prov_podcast_id, headers=self._headers)
         podcast_obj["podcastId"] = prov_podcast_id
@@ -685,43 +683,72 @@ class YoutubeMusicProvider(MusicProvider):
     async def recommendations(self) -> list[RecommendationFolder]:
         """Get available recommendations."""
         recommendations = await get_home(self._headers, self.language, user=self._yt_user)
-        folders = []
-        for section in recommendations:
-            folder = RecommendationFolder(
-                name=section["title"],
-                item_id=f"{self.instance_id}_{section['title']}",
-                provider=self.instance_id,
-                icon=determine_recommendation_icon(section["title"]),
-            )
-            for recommended_item in section.get("contents", []):
-                if not recommended_item:
-                    continue  # yeah this seems to happen sometimes ?!
-                if recommended_item.get("videoId"):
-                    # Probably a track
-                    try:
-                        track = self._parse_track(recommended_item)
-                        folder.items.append(track)
-                    except InvalidDataError:
-                        self.logger.debug("Invalid track in recommendations: %s", recommended_item)
+
+        def _parse_sections() -> list[RecommendationFolder]:
+            # building model objects from the raw payload is CPU-bound; run off the event loop
+            folders: list[RecommendationFolder] = []
+            for section in recommendations:
+                folder = RecommendationFolder(
+                    name=section["title"],
+                    item_id=f"{self.instance_id}_{section['title']}",
+                    provider=self.instance_id,
+                    icon=determine_recommendation_icon(section["title"]),
+                )
+                for recommended_item in section.get("contents", []):
+                    if not recommended_item:
+                        continue  # yeah this seems to happen sometimes ?!
+                    if recommended_item.get("videoId"):
+                        # Probably a track
+                        try:
+                            track = self._parse_track(recommended_item)
+                            folder.items.append(track)
+                        except InvalidDataError:
+                            self.logger.debug(
+                                "Invalid track in recommendations: %s", recommended_item
+                            )
+                            continue
+                    elif recommended_item.get("playlistId"):
+                        # Probably a playlist
+                        recommended_item["id"] = recommended_item["playlistId"]
+                        del recommended_item["playlistId"]
+                        folder.items.append(self._parse_playlist(recommended_item))
+                    elif recommended_item.get("browseId"):
+                        # Probably an album
+                        folder.items.append(self._parse_album(recommended_item))
+                    elif recommended_item.get("subscribers"):
+                        # Probably artist
+                        folder.items.append(self._parse_album(recommended_item))
+                    elif recommended_item.get("videoType") == "MUSIC_VIDEO_TYPE_PODCAST_EPISODE":
+                        # Podcast episodes show up here without a videoId/browseId,
+                        # so there is no playable item to build from them
+                        self.logger.debug(
+                            "Skipping podcast episode in recommendation folder: %s",
+                            recommended_item.get("title"),
+                        )
                         continue
-                elif recommended_item.get("playlistId"):
-                    # Probably a playlist
-                    recommended_item["id"] = recommended_item["playlistId"]
-                    del recommended_item["playlistId"]
-                    folder.items.append(self._parse_playlist(recommended_item))
-                elif recommended_item.get("browseId"):
-                    # Probably an album
-                    folder.items.append(self._parse_album(recommended_item))
-                elif recommended_item.get("subscribers"):
-                    # Probably artist
-                    folder.items.append(self._parse_album(recommended_item))
-                else:
-                    self.logger.warning(
-                        "Unknown item type in recommendation folder: %s", recommended_item
-                    )
-                    continue
-            folders.append(folder)
+                    else:
+                        self.logger.warning(
+                            "Unknown item type in recommendation folder: %s", recommended_item
+                        )
+                        continue
+                folders.append(folder)
+            return folders
+
+        folders = await asyncio.to_thread(_parse_sections)
         # Also add personalized mixes if available
+        mixed_for_you_folder = await self._get_mixed_for_you_folder()
+        if mixed_for_you_folder.items:
+            folders.append(mixed_for_you_folder)
+
+        return folders
+
+    @use_cache(3600 * 24, allow_expired_cache=True)  # Cache for 24 hours
+    async def _get_mixed_for_you_folder(self) -> RecommendationFolder:
+        """
+        Build the "Mixed for you" recommendation folder from the user's personal mixes.
+
+        :return: The folder, which has no items when no personal mixes are available.
+        """
         mixed_for_you_folder = RecommendationFolder(
             name="Mixed for you",
             item_id=f"{self.instance_id}_mixed_for_you",
@@ -754,10 +781,7 @@ class YoutubeMusicProvider(MusicProvider):
         mixed_for_you_folder.items.extend(
             preview for preview in playlist_previews if preview is not None
         )
-        if mixed_for_you_folder.items:
-            folders.append(mixed_for_you_folder)
-
-        return folders
+        return mixed_for_you_folder
 
     async def _post_data(self, endpoint: str, data: dict[str, str], **kwargs: Any) -> Any:
         """Post data to the given endpoint."""
@@ -1134,7 +1158,8 @@ class YoutubeMusicProvider(MusicProvider):
                 response.raise_for_status()
                 self.logger.debug("PO Token server responded with %s", response.status)
                 return response.status == 200
-        except ClientConnectorError:
+        except (ClientError, TimeoutError) as err:
+            self.logger.debug("PO Token server ping failed: %s", err)
             return False
 
     async def _user_has_ytm_premium(self) -> bool:
