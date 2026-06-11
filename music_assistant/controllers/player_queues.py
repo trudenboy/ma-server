@@ -219,6 +219,7 @@ class PlayerQueuesController(CoreController):
         self._prev_states: dict[str, CompareState] = {}
         self._transitioning_players: set[str] = set()
         self._play_action_refcount: dict[str, int] = {}
+        self._last_counted_play: dict[str, str] = {}
         self.manifest.name = "Player Queues controller"
         self.manifest.description = (
             "Music Assistant's core controller which manages the queues for all players."
@@ -250,20 +251,20 @@ class PlayerQueuesController(CoreController):
                 label="Items to select when you play a (in-library) artist.",
                 options=[
                     ConfigValueOption(
-                        title="Only tracks that are in your library",
+                        title="Artist top tracks only",
+                        value="top_tracks",
+                    ),
+                    ConfigValueOption(
+                        title="In-library tracks for the artist only",
                         value="library_tracks",
                     ),
                     ConfigValueOption(
-                        title="Tracks from all albums that are in your library",
-                        value="library_album_tracks",
+                        title="Prefer library, fall back to top",
+                        value="prefer_library",
                     ),
                     ConfigValueOption(
-                        title="The artist's top tracks (from streaming provider(s))",
+                        title="All tracks from all providers",
                         value="all_tracks",
-                    ),
-                    ConfigValueOption(
-                        title="Tracks from all the artist's albums (from streaming provider(s))",
-                        value="all_album_tracks",
                     ),
                 ],
             ),
@@ -1215,6 +1216,7 @@ class PlayerQueuesController(CoreController):
         self._prev_states.pop(player_id, None)
         self._transitioning_players.discard(player_id)
         self._play_action_refcount.pop(player_id, None)
+        self._last_counted_play.pop(player_id, None)
 
     async def load_next_queue_item(
         self,
@@ -1899,59 +1901,78 @@ class PlayerQueuesController(CoreController):
             artist.item_id, artist.provider
         )
 
+    async def _library_artist_tracks(self, artist: Artist) -> list[Track]:
+        """
+        Return the in-library tracks for the given artist (empty if it is not saved).
+
+        :param artist: The artist to resolve in-library tracks for.
+        """
+        if (library_artist := await self._resolve_library_artist(artist)) is None:
+            return []
+        return await self.mass.music.artists.tracks(library_artist.item_id, "library")
+
+    async def _provider_artist_tracks(self, artist: Artist) -> list[Track]:
+        """
+        Return all of the artist's tracks across its (streaming) providers.
+
+        :param artist: The artist to resolve provider tracks for.
+        """
+        unique_providers = self.mass.music.get_unique_providers()
+        tracks: list[Track] = []
+        for mapping in artist.provider_mappings:
+            if mapping.provider_instance not in unique_providers:
+                continue
+            tracks.extend(
+                await self.mass.music.artists.tracks(mapping.item_id, mapping.provider_instance)
+            )
+        return tracks
+
     async def get_artist_tracks(self, artist: Artist) -> list[Track]:
-        """Return tracks for given artist, based on user preference."""
+        """Return the tracks to play for the given artist, based on user preference."""
         artist_items_conf = self.mass.config.get_raw_core_config_value(
             self.domain,
             CONF_DEFAULT_ENQUEUE_SELECT_ARTIST,
             ENQUEUE_SELECT_ARTIST_DEFAULT_VALUE,
         )
         self.logger.info(
-            "Fetching tracks to play for artist %s",
-            artist.name,
+            "Fetching tracks to play for artist %s (selection: %s)", artist.name, artist_items_conf
         )
-        # track-based selection
-        if artist_items_conf == "library_tracks":
-            # operates on the in-library artist; bail out if it is not (yet) saved
-            if (library_artist := await self._resolve_library_artist(artist)) is None:
-                return []
-            tracks = await self.mass.music.artists.tracks(library_artist.item_id, "library")
-            random.shuffle(tracks)
-            return tracks
-        if artist_items_conf == "all_tracks":
-            # the artist's top tracks across the (streaming) providers
+        if artist_items_conf == "top_tracks":
             tracks = await self.mass.music.artists.top_tracks(artist.item_id, artist.provider)
             random.shuffle(tracks)
             return tracks
-        # album-based selection
-        albums: list[Album] = []
-        if artist_items_conf == "library_album_tracks":
-            # operates on the in-library artist; leave albums empty if it is not (yet) saved
-            if (library_artist := await self._resolve_library_artist(artist)) is not None:
-                albums = await self.mass.music.artists.albums(library_artist.item_id, "library")
-        elif artist_items_conf == "all_album_tracks":
-            # all (unique) albums across the (streaming) providers attached to the artist,
-            # respecting the user provider filter and a single instance per streaming domain
-            unique_providers = self.mass.music.get_unique_providers()
-            unique_ids: set[str] = set()
-            for mapping in artist.provider_mappings:
-                if mapping.provider_instance not in unique_providers:
+        # legacy "library_album_tracks" also resolves to the in-library tracks
+        if artist_items_conf in ("library_tracks", "library_album_tracks"):
+            tracks = await self._library_artist_tracks(artist)
+            random.shuffle(tracks)
+            return tracks
+        if artist_items_conf == "prefer_library":
+            tracks = await self._library_artist_tracks(artist)
+            if not tracks:
+                tracks = await self.mass.music.artists.top_tracks(artist.item_id, artist.provider)
+            random.shuffle(tracks)
+            return tracks
+        result: list[Track] = []
+        seen: set[str] = set()
+        sources = await asyncio.gather(
+            self._library_artist_tracks(artist),
+            self._provider_artist_tracks(artist),
+            return_exceptions=True,
+        )
+        for source in sources:
+            if isinstance(source, BaseException):
+                self.logger.warning(
+                    "Error resolving some tracks for artist %s", artist.name, exc_info=source
+                )
+                continue
+            for track in source:
+                unique_id = f"{track.name}.{track.version}"
+                if unique_id in seen:
                     continue
-                for album in await self.mass.music.artists.get_provider_artist_albums(
-                    mapping.item_id, mapping.provider_instance
-                ):
-                    unique_id = f"{album.name}.{album.version}"
-                    if unique_id in unique_ids:
-                        continue
-                    unique_ids.add(unique_id)
-                    albums.append(album)
-        all_tracks: list[Track] = []
-        for album in albums:
-            for album_track in await self.mass.music.albums.tracks(album.item_id, album.provider):
-                if album_track not in all_tracks:
-                    all_tracks.append(album_track)
-        random.shuffle(all_tracks)
-        return all_tracks
+                seen.add(unique_id)
+                result.append(track)
+        random.shuffle(result)
+        return result
 
     async def get_album_tracks(
         self, album: Album, start_item: str | None, sort_by: str | None = None
@@ -2450,19 +2471,9 @@ class PlayerQueuesController(CoreController):
             return list(await self.get_playlist_tracks(media_item, start_item, sort_by=sort_by))
         if media_item.media_type == MediaType.ARTIST:
             media_item = cast("Artist", media_item)
-            self.mass.create_task(
-                self.mass.music.mark_item_played(
-                    media_item, userid=userid, queue_id=queue_id, user_initiated=True
-                )
-            )
             return list(await self.get_artist_tracks(media_item))
         if media_item.media_type == MediaType.ALBUM:
             media_item = cast("Album", media_item)
-            self.mass.create_task(
-                self.mass.music.mark_item_played(
-                    media_item, userid=userid, queue_id=queue_id, user_initiated=True
-                )
-            )
             return list(await self.get_album_tracks(media_item, start_item, sort_by=sort_by))
         if media_item.media_type == MediaType.GENRE:
             media_item = cast("Genre", media_item)
@@ -3171,17 +3182,25 @@ class PlayerQueuesController(CoreController):
                 duration,
             )
         # add entry to playlog - this also handles resume of podcasts/audiobooks
-        self.mass.create_task(
-            self.mass.music.mark_item_played(
-                media_item,
-                fully_played=fully_played,
-                seconds_played=seconds_played,
-                is_playing=is_playing,
-                userid=queue.userid,
-                queue_id=queue.queue_id,
-                user_initiated=False,
+        if self._should_mark_played(
+            queue.queue_id, item_to_report.queue_item_id, fully_played, is_playing
+        ):
+            self.mass.create_task(
+                self.mass.music.mark_item_played(
+                    media_item,
+                    fully_played=fully_played,
+                    seconds_played=seconds_played,
+                    is_playing=is_playing,
+                    userid=queue.userid,
+                    queue_id=queue.queue_id,
+                    user_initiated=False,
+                )
             )
-        )
+            if fully_played and not is_playing:
+                if credit_album := self._enqueued_album_for_track(
+                    queue, item_to_report, media_item
+                ):
+                    self.mass.create_task(self._mark_album_played(credit_album, media_item, queue))
 
         album: Album | ItemMapping | None = getattr(media_item, "album", None)
         # signal 'media item played' event,
@@ -3224,6 +3243,57 @@ class PlayerQueuesController(CoreController):
                 userid=queue.userid,
                 player_id=queue.queue_id,
             ),
+        )
+
+    def _enqueued_album_for_track(
+        self, queue: PlayerQueue, item_to_report: QueueItem, media_item: MediaItemType
+    ) -> Album | None:
+        """
+        Return the album to credit for this played track, or None.
+
+        Only an album the user explicitly enqueued is eligible, and only on the first
+        track of a contiguous run of its tracks (the previous queue item must belong to
+        a different album), so a single album play is credited once.
+        """
+        album = getattr(media_item, "album", None)
+        if album is None:
+            return None
+        enqueued = next(
+            (
+                item
+                for item in queue.enqueued_media_items
+                if isinstance(item, Album) and item == album
+            ),
+            None,
+        )
+        if enqueued is None:
+            return None
+        index = self.index_by_id(queue.queue_id, item_to_report.queue_item_id)
+        if index:
+            prev_item = self.get_item(queue.queue_id, index - 1)
+            prev_album = (
+                getattr(prev_item.media_item, "album", None)
+                if prev_item and prev_item.media_item
+                else None
+            )
+            if prev_album == album:
+                return None
+        return enqueued
+
+    async def _mark_album_played(
+        self, album: Album, track: MediaItemType, queue: PlayerQueue
+    ) -> None:
+        """Mark an enqueued album played, skipping artists already credited via its track."""
+        self.logger.debug(
+            "Credited album '%s' as played (triggered by track '%s')", album.name, track.name
+        )
+        skip = await self.mass.music.resolve_library_artist_ids(getattr(track, "artists", []))
+        await self.mass.music.mark_item_played(
+            album,
+            userid=queue.userid,
+            queue_id=queue.queue_id,
+            user_initiated=False,
+            skip_artist_ids=list(skip),
         )
 
     async def _cleanup_stale_queue_buffers(self, queue_id: str, current_index: int) -> None:

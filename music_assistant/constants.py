@@ -187,6 +187,9 @@ DB_TABLE_GENRES: Final[str] = "genres"
 DB_TABLE_GENRE_MEDIA_ITEM_MAPPING: Final[str] = "genre_media_item_mapping"
 DB_TABLE_GENRE_MEDIA_ITEM_EXCLUSION: Final[str] = "genre_media_item_exclusion"
 
+# Min fraction of a database file reclaimable before a startup VACUUM is worth running.
+VACUUM_MIN_RECLAIM_RATIO: Final[float] = 0.2
+
 # Loudness measurements at or below this value are considered unreliable:
 # ebur128 reports ~-70 LUFS when it receives near-silence or very little
 # audio (e.g. when a stream was cancelled early).
@@ -726,6 +729,16 @@ CONF_ENTRY_WARN_PREVIEW = ConfigEntry(
     type=ConfigEntryType.ALERT,
     label="Please note that this feature/provider is still in early stages. \n\n"
     "Functionality may still be limited and/or bugs may occur!",
+    required=False,
+)
+
+CONF_ENTRY_UNOFFICIAL_PROVIDER = ConfigEntry(
+    key="unofficial_provider_note",
+    type=ConfigEntryType.ALERT,
+    label="This is an unofficial integration that is not affiliated with, supported by, "
+    "or endorsed by the music service. It relies on interfaces that are not officially "
+    "supported and may stop working at any time. Use of this provider may also be subject "
+    "to the service's terms of use.",
     required=False,
 )
 
