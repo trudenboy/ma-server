@@ -102,5 +102,5 @@ ya-dialogs-api==2.4.0
 ya-passport-auth==1.4.1
 yandex-music==3.0.0
 ytmusicapi==1.11.5
-zeroconf==0.149.7
+zeroconf==0.149.12
 zvuk-music[async]==0.6.1
