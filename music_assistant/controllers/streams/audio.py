@@ -1503,6 +1503,7 @@ class StreamsAudio:
         # Round down to nearest frame boundary
         crossfade_buffer_size = (crossfade_buffer_size // frame_size) * frame_size
         fade_out_data: bytes | None = None
+        uncredited_tail_bytes = 0
 
         # pin the body to DYNAMIC when the intro was baked DYNAMIC,
         # else a late measurement flips it and causes a volume jump
@@ -2033,7 +2034,7 @@ class StreamsAudio:
             for pcm_slice in iter_pcm_slices(last_fadeout_part, pcm_format, 1000):
                 yield pcm_slice
                 await asyncio.sleep(0)
-            # correct seconds streamed/duration
+            # correct seconds streamed - the duration already includes the tail
             last_part_seconds = len(last_fadeout_part) / pcm_sample_size
             streamdetails = queue_track.streamdetails
             assert streamdetails is not None

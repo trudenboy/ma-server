@@ -152,7 +152,8 @@ def _extract_imageproxy_params(url: str) -> tuple[str, str] | None:
 
 
 def player_image_url(mass: MusicAssistant, url: str | None) -> str | None:
-    """Rewrite a public-webserver imageproxy URL to the internal streams server.
+    """
+    Rewrite an imageproxy URL for consumption by a (physical) player.
 
     :param mass: The MusicAssistant instance.
     :param url: Image URL as produced for frontend/API consumers.

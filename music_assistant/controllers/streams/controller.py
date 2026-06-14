@@ -56,7 +56,7 @@ from music_assistant.controllers.streams.constants import (
     CONF_BUFFER_SIZE_DEFAULT,
     CONF_SMART_FADES_LOG_LEVEL,
     DEFAULT_PORT,
-    BufferSize,
+    get_available_buffer_sizes,
 )
 from music_assistant.controllers.streams.smart_fades.analyzer import SmartFadesAnalyzer
 from music_assistant.helpers.audio import (
@@ -144,10 +144,11 @@ class StreamsController(CoreController):
                 "good balance for most systems.\n"
                 "- **Maximum**: Large buffer, "
                 "best performance for systems with plenty of memory.",
+                # Only offer presets the host's RAM can sustain (Balanced >= 4GB,
+                # Maximum >= 8GB); see get_available_buffer_sizes.
                 options=[
-                    ConfigValueOption("Minimal", BufferSize.MINIMAL.value),
-                    ConfigValueOption("Balanced", BufferSize.BALANCED.value),
-                    ConfigValueOption("Maximum", BufferSize.MAXIMUM.value),
+                    ConfigValueOption(size.value.title(), size.value)
+                    for size in get_available_buffer_sizes()
                 ],
                 required=False,
                 category="playback",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
@@ -28,6 +29,8 @@ from .constants import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from music_assistant_models.player import PlayerSource
 
     from .provider import SyncGroupProvider
@@ -342,9 +345,13 @@ class SyncGroupPlayer(Player):
         # formed (e.g. after _dissolve_and_reform left us powered with no leader).
         # _form_syncgroup is idempotent so calling it here is cheap when already formed.
         await self._form_syncgroup()
-        await self.mass.players.cmd_resume(
-            self.player_id, self._attr_active_source, self._attr_current_media
-        )
+        # Hold the group's playback lock until the leader actually reports playing
+        # so a concurrent (un)group command can't race the in-flight start — which
+        # would otherwise leave a player streaming outside the group.
+        async with self._await_leader_playback():
+            await self.mass.players.cmd_resume(
+                self.player_id, self._attr_active_source, self._attr_current_media
+            )
 
     async def poll(self) -> None:
         """Poll player for state updates."""
@@ -362,7 +369,10 @@ class SyncGroupPlayer(Player):
         if sync_leader := self.sync_leader:
             # Use internal handler to target the sync leader directly,
             # bypassing group/sync redirect that would loop back to this player.
-            await self.mass.players._handle_play_media(sync_leader.player_id, media)
+            # Hold the group's playback lock until the leader confirms playback
+            # (see play()) so a concurrent (un)group command can't race the start.
+            async with self._await_leader_playback():
+                await self.mass.players._handle_play_media(sync_leader.player_id, media)
         else:
             raise RuntimeError("An empty group cannot play media, consider adding members first")
 
@@ -563,6 +573,28 @@ class SyncGroupPlayer(Player):
                 await self.mass.players._handle_set_members(
                     self.sync_leader, player_ids_to_add=members_to_sync
                 )
+
+    @asynccontextmanager
+    async def _await_leader_playback(self) -> AsyncIterator[None]:
+        """
+        Wait for the sync leader to confirm playback for the command run in the body.
+
+        Wrap the play/resume call that targets the leader in this context manager.
+        The group's playback lock (held by the caller) then stays acquired until the
+        leader actually reports playing, so a concurrent (un)group command cannot
+        race a start that has not yet taken effect at the device. A no-op when there
+        is no leader to wait on.
+        """
+        if (leader := self.sync_leader) is None:
+            yield
+            return
+        async with self.mass.players.wait_for_player_update(
+            leader.player_id,
+            attribute_name="playback_state",
+            attribute_value=PlaybackState.PLAYING,
+            timeout=PLAYBACK_START_TIMEOUT,
+        ):
+            yield
 
     async def _dissolve_syncgroup(self) -> None:
         """Dissolve the current syncgroup by ungrouping all members."""
