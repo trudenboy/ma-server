@@ -9,6 +9,7 @@ from music_assistant.controllers.streams.audio_analysis import SMART_FADES_ANALY
 from music_assistant.controllers.streams.smart_fades.fades import (
     SmartCrossFade,
     SmartFade,
+    SmartFadeNotApplicable,
     StandardCrossFade,
 )
 from music_assistant.helpers.audio import align_audio_to_frame_boundary, strip_silence

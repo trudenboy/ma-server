@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 
 import pytest
 from music_assistant_models.enums import ContentType
