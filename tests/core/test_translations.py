@@ -21,6 +21,7 @@ from music_assistant_models.translations import TRANSLATION_RESOLVER
 from music_assistant.controllers import translations as translations_module
 from music_assistant.controllers.config import _with_translation_owner
 from music_assistant.controllers.music import MusicController
+from music_assistant.controllers.tasks.controller import _namespaced_translation_key
 from music_assistant.controllers.translations import (
     SOURCE_LANGUAGE,
     TranslationController,
@@ -28,7 +29,11 @@ from music_assistant.controllers.translations import (
     _format,
     _locale_candidates,
 )
-from scripts.build_translations import _flatten_into, build_translations_source
+from scripts.build_translations import (
+    _flatten_into,
+    _resolve_references,
+    build_translations_source,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -65,6 +70,43 @@ def test_flatten_into() -> None:
         "provider.ytmusic.config_entries.cookie.description": "From a session.",
         "provider.ytmusic.media.mixes": "Your Mixes",
     }
+
+
+def test_namespaced_translation_key() -> None:
+    """A bare task key is namespaced under background_task; any dotted key is left as-is."""
+    assert _namespaced_translation_key("database_cleanup") == "background_task.database_cleanup"
+    assert _namespaced_translation_key(None) is None
+    # any key that already carries a namespace (a ".") is returned unchanged
+    assert _namespaced_translation_key("background_task.x") == "background_task.x"
+    assert _namespaced_translation_key("settings.sync") == "settings.sync"
+    assert (
+        _namespaced_translation_key("core.metadata.background_task.x")
+        == "core.metadata.background_task.x"
+    )
+
+
+def test_resolve_references_validated_and_omitted() -> None:
+    """A reference reuses an existing string: its target is validated and the key is omitted."""
+    resolved = _resolve_references(
+        {
+            "common.media.recommendations.recommended_tracks.name": "Recommended tracks",
+            "provider.deezer.media.recommendations.recommended_tracks.name": (
+                "[%key:common::media::recommendations::recommended_tracks::name%]"
+            ),
+        }
+    )
+    # the shared (target) string stays; the referencing key is dropped (resolved via the fallback)
+    assert resolved == {
+        "common.media.recommendations.recommended_tracks.name": "Recommended tracks",
+    }
+
+
+def test_resolve_references_missing_target_raises() -> None:
+    """A reference whose target does not exist fails the build with a clear error."""
+    with pytest.raises(ValueError, match="Unresolved translation reference"):
+        _resolve_references(
+            {"provider.deezer.media.x.name": "[%key:common::media::does::not::exist%]"}
+        )
 
 
 def test_candidate_keys_common_rewrite() -> None:
@@ -349,9 +391,10 @@ def test_recommendation_folder_localized_serialization() -> None:
 def test_provider_sync_task_localized_serialization() -> None:
     """Provider-sync BackgroundTasks resolve their name from the built catalog with the provider name.
 
-    Guards that every key returned by MusicController._get_sync_task_translation_key has a matching
-    common.background_task.* entry authored in strings.json, that the provider name fills the {0}
-    placeholder, and that the translation machinery is stripped from the wire under a resolver.
+    Guards that every key returned by MusicController._get_sync_task_translation_key resolves to a
+    core.music.background_task.* entry authored in strings.json (the tasks controller namespaces the
+    bare key under the background_task group), that the provider name fills the {0} placeholder, and
+    that the translation machinery is stripped from the wire under a resolver.
     """
     ctrl = _make_controller()
     ctrl._source = build_translations_source()
@@ -371,13 +414,42 @@ def test_provider_sync_task_localized_serialization() -> None:
             key = get_key(None, media_type)  # type: ignore[arg-type]
             task = BackgroundTask(
                 name=f"Sync Spotify {media_type.value}s",  # in-code English fallback
-                translation_key=key,
+                translation_key=_namespaced_translation_key(key),
                 translation_args=["Spotify"],
+                translation_owner="core.music",
             )
             serialized = task.to_dict()
             assert serialized["name"] == name
             assert "translation_key" not in serialized
             assert "translation_args" not in serialized
+
+
+def test_core_owned_strings_moved_out_of_common() -> None:
+    """Owner-specific strings live under their owner namespace, not in the shared common space.
+
+    Background-task names and the stream server's network/normalization config entries each belong
+    to a single core module (or provider), so they are authored there rather than in common; only
+    genuinely shared strings (e.g. the bind address, used by several modules) stay in common.
+    """
+    source = build_translations_source()
+    # background-task names moved to their owning module/provider
+    assert "core.music.background_task.sync_provider_artists" in source
+    assert "core.music.background_task.database_cleanup" in source
+    assert "core.cache.background_task.cache_database_cleanup" in source
+    assert (
+        "provider.lastfm_recommendations.background_task.refresh_lastfm_recommendations" in source
+    )
+    # stream-server config entries moved to core.streams
+    assert "core.streams.config_entries.publish_ip.label" in source
+    assert "core.streams.config_entries.background_scan_concurrency.label" in source
+    assert "core.streams.config_entries.volume_normalization_radio.label" in source
+    # none of the relocated keys remain in common
+    assert not any(key.startswith("common.background_task.") for key in source)
+    assert "common.config_entries.publish_ip.label" not in source
+    assert "common.config_entries.volume_normalization_radio.label" not in source
+    # genuinely shared network config (built by several modules) stays in common
+    assert "common.config_entries.bind_ip.label" in source
+    assert "common.config_entries.bind_port.label" in source
 
 
 def test_error_result_message_localized_serialization() -> None:
@@ -501,7 +573,7 @@ def test_media_names_are_keyed_by_media_type() -> None:
     assert source["common.media.genre.jazz.name"] == "Jazz"
     assert source["common.media.playlist.random_album.name"]  # built-in playlists -> playlist.*
     assert source["common.media.folder.albums.name"] == "Albums"  # browse-folder titles
-    assert source["common.media.recommendations.made_for_you.name"] == "Made for you"
+    assert source["common.media.recommendations.recommended_tracks.name"] == "Recommended tracks"
     # the old flat keys are gone (would silently break localization if left behind)
     for stale in (
         "common.media.jazz.name",  # genre was flat
