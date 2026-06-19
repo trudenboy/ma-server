@@ -247,8 +247,8 @@ async def get_config_entries(
             type=ConfigEntryType.STRING,
             required=True,
             options=[
-                ConfigValueOption(_NetworkType.LASTFM.value, title="Last.FM"),
-                ConfigValueOption(_NetworkType.LIBREFM.value, title="LibreFM"),
+                ConfigValueOption(_NetworkType.LASTFM.value),
+                ConfigValueOption(_NetworkType.LIBREFM.value),
             ],
             default_value=network_type.value,
             value=network_type.value,
@@ -307,8 +307,7 @@ async def get_config_entries(
                     type=ConfigEntryType.ALERT,
                     required=False,
                     default_value=None,
-                    label=f"Successfully logged in as {username}, "
-                    "don't forget to hit save to complete the setup",
+                    translation_params=[username],
                 ),
             )
 
@@ -317,7 +316,8 @@ async def get_config_entries(
             ConfigEntry(
                 key=CONF_ACTION_AUTH,
                 type=ConfigEntryType.ACTION,
-                label=f"Authorize with {network_type.value}",
+                translation_key="authorize",
+                translation_params=[network_type.value],
                 action=CONF_ACTION_AUTH,
             ),
         )
