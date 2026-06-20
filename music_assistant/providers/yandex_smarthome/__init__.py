@@ -143,7 +143,8 @@ def _resolve_direct_client_secret(
     instance_id: str | None,
     values: dict[str, ConfigValueType],
 ) -> str:
-    """Return the direct-mode per-install OAuth client secret.
+    """
+    Return the direct-mode OAuth client secret for the current install.
 
     The frontend does not echo SECURE_STRING fields back into ``values`` on
     re-open, so prefer the saved provider config; fall back to the in-flight
@@ -334,9 +335,29 @@ async def _handle_config_actions(
     return otp_code
 
 
-async def _list_player_options(mass: MusicAssistant) -> list[ConfigValueOption]:
-    """Build the player-picker options list."""
-    options: list[ConfigValueOption] = []
+async def _run_auto_create_action(
+    mass: MusicAssistant,
+    values: dict[str, ConfigValueType],
+    connection_type: str,
+    instance_id: str | None,
+) -> None:
+    """
+    Execute the experimental auto-create-skill action.
+
+    Never re-raises: all errors are persisted into the artifacts blob so
+    the UI can show a FAILED state on the next render rather than
+    crashing the config form.
+    """
+    # MA's frontend supplies ``values["session_id"]`` when it triggers an
+    # action — AuthenticationHelper listens on that exact id to open
+    # and later close the popup. If we roll our own id nothing listens
+    # and the popup never appears. Fall back to a local uuid only if the
+    # frontend happened not to pass one (shouldn't happen in practice).
+    session_id = str(values.get("session_id") or uuid.uuid4().hex)
+    values[CONF_AUTO_CREATE_SESSION_ID] = session_id
+    artifacts_raw = values.get(CONF_AUTO_CREATE_ARTIFACTS)
+    artifacts = load_artifacts(str(artifacts_raw) if artifacts_raw else None)
+
     try:
         for player in mass.players.all_players():
             state = player.state
