@@ -34,8 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class SharedGroupStream:
-    """
-    Shared audio stream for a player group.
+    """Shared audio stream for a player group.
 
     One ffmpeg process produces audio, multiple TV clients read from a shared buffer.
     Late joiners receive buffered data first (catch-up), then live chunks.
@@ -418,8 +417,7 @@ class MSXBridgeProvider(PlayerProvider):
         self._player_last_activity[player_id] = time.time()
 
     def on_player_disabled(self, player_id: str) -> None:
-        """
-        Handle player disabled: do not unregister (base would unregister).
+        """Handle player disabled: do not unregister (base would unregister).
 
         MSX players are registered on demand; unregister on disable would remove them
         from the list. On enable, discovery is empty so the player would not come back
@@ -438,8 +436,7 @@ class MSXBridgeProvider(PlayerProvider):
         # Player was never unregistered (see on_player_disabled), so nothing to do.
 
     async def remove_player(self, player_id: str) -> None:
-        """
-        Remove (delete) a player from this provider.
+        """Remove (delete) a player from this provider.
 
         Called when user chooses to remove the player from MA.
         This fully unregisters the player. It will reappear if the TV reconnects.
@@ -501,8 +498,7 @@ class MSXBridgeProvider(PlayerProvider):
             self.http_server.broadcast_resume(player_id)
 
     def notify_play_stopped(self, player_id: str) -> None:
-        """
-        Notify WebSocket clients that playback stopped (MA stop -> MSX).
+        """Notify WebSocket clients that playback stopped (MA stop -> MSX).
 
         Sends broadcast_stop + cancel_streams twice — same as Disable flow, which
         stops playback on MSX instantly (vs single signal with ~30s delay).
@@ -580,8 +576,7 @@ class MSXBridgeProvider(PlayerProvider):
         return self.group_stream_mode == GROUP_STREAM_MODE_SHARED
 
     def is_redirect_stream_mode(self) -> bool:
-        """
-        Check if MA redirect stream mode is enabled.
+        """Check if MA redirect stream mode is enabled.
 
         NOTE: Redirect mode is a scaffold for future MA Streamserver integration
         (MA 2.6+). It is NOT exposed in the provider config UI — users cannot
@@ -681,8 +676,7 @@ class MSXBridgeProvider(PlayerProvider):
         media: Any,
         output_format: str = "mp3",
     ) -> str | None:
-        """
-        Get direct stream URL from MA Streamserver for redirect mode.
+        """Get direct stream URL from MA Streamserver for redirect mode.
 
         NOTE: This is a scaffold for future MA Streamserver integration. The
         ``/api/streams/single/...`` route does not exist in current MA versions.
