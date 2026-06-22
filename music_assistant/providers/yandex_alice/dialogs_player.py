@@ -51,7 +51,7 @@ def _first(items: Any) -> Any:
     """Return the first item of a Sequence, or None if empty/not-a-sequence."""
     try:
         return next(iter(items))
-    except (StopIteration, TypeError):
+    except StopIteration, TypeError:
         return None
 
 
