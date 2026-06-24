@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import builtins
 import contextlib
 import logging
 import os
@@ -95,6 +96,7 @@ from music_assistant.constants import (
     CONF_ENTRY_VOLUME_NORMALIZATION,
     CONF_EXPOSE_PLAYER_TO_HA,
     CONF_HIDE_IN_UI,
+    CONF_LINKED_PROTOCOL_IDS,
     CONF_MUTE_CONTROL,
     CONF_ONBOARD_DONE,
     CONF_PLAYER_DSP,
@@ -106,6 +108,7 @@ from music_assistant.constants import (
     CONF_PREFERRED_OUTPUT_PROTOCOL,
     CONF_PROTOCOL_CATEGORY_PREFIX,
     CONF_PROTOCOL_KEY_SPLITTER,
+    CONF_PROTOCOL_PARENT_ID,
     CONF_PROVIDERS,
     CONF_SERVER_ID,
     CONF_SMART_FADES_MODE,
@@ -477,50 +480,7 @@ class ConfigController:
         else:
             provider = None
             supported_features = getattr(prov_mod, "SUPPORTED_FEATURES", set())
-        extra_entries: list[ConfigEntry] = []
-        if manifest.type == ProviderType.MUSIC:
-            # library sync settings
-            if ProviderFeature.LIBRARY_ARTISTS in supported_features:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_ARTISTS)
-            if ProviderFeature.LIBRARY_ALBUMS in supported_features:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_ALBUMS)
-                if (
-                    provider
-                    and isinstance(provider, MusicProvider)
-                    and provider.is_streaming_provider
-                ):
-                    extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_ALBUM_TRACKS)
-            if ProviderFeature.LIBRARY_TRACKS in supported_features:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_TRACKS)
-            if ProviderFeature.LIBRARY_PLAYLISTS in supported_features:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS)
-                if (
-                    provider
-                    and isinstance(provider, MusicProvider)
-                    and provider.is_streaming_provider
-                ):
-                    extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_PLAYLIST_TRACKS)
-            if ProviderFeature.LIBRARY_AUDIOBOOKS in supported_features:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_AUDIOBOOKS)
-            if ProviderFeature.LIBRARY_PODCASTS in supported_features:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_PODCASTS)
-            if ProviderFeature.LIBRARY_RADIOS in supported_features:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_RADIOS)
-            # sync export settings
-            if supported_features.intersection(
-                {
-                    ProviderFeature.LIBRARY_ARTISTS_EDIT,
-                    ProviderFeature.LIBRARY_ALBUMS_EDIT,
-                    ProviderFeature.LIBRARY_TRACKS_EDIT,
-                    ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
-                    ProviderFeature.LIBRARY_AUDIOBOOKS_EDIT,
-                    ProviderFeature.LIBRARY_PODCASTS_EDIT,
-                    ProviderFeature.LIBRARY_RADIOS_EDIT,
-                }
-            ):
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_BACK)
-            if provider and isinstance(provider, MusicProvider) and provider.is_streaming_provider:
-                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_DELETIONS)
+        extra_entries = self._build_sync_entries(manifest, supported_features, provider)
 
         all_entries = [
             *DEFAULT_PROVIDER_CONFIG_ENTRIES,
@@ -1502,6 +1462,52 @@ class ConfigController:
             msg = "Password decryption failed"
             raise InvalidDataError(msg) from err
 
+    def _build_sync_entries(
+        self,
+        manifest: Any,
+        supported_features: builtins.set[ProviderFeature],
+        provider: Any,
+    ) -> list[ConfigEntry]:
+        """Build sync-related ConfigEntry list based on provider features."""
+        if manifest.type != ProviderType.MUSIC:
+            return []
+        extra_entries: list[ConfigEntry] = []
+        # library sync settings
+        if ProviderFeature.LIBRARY_ARTISTS in supported_features:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_ARTISTS)
+        if ProviderFeature.LIBRARY_ALBUMS in supported_features:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_ALBUMS)
+            if provider and isinstance(provider, MusicProvider) and provider.is_streaming_provider:
+                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_ALBUM_TRACKS)
+        if ProviderFeature.LIBRARY_TRACKS in supported_features:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_TRACKS)
+        if ProviderFeature.LIBRARY_PLAYLISTS in supported_features:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS)
+            if provider and isinstance(provider, MusicProvider) and provider.is_streaming_provider:
+                extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_PLAYLIST_TRACKS)
+        if ProviderFeature.LIBRARY_AUDIOBOOKS in supported_features:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_AUDIOBOOKS)
+        if ProviderFeature.LIBRARY_PODCASTS in supported_features:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_PODCASTS)
+        if ProviderFeature.LIBRARY_RADIOS in supported_features:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_RADIOS)
+        # sync export settings
+        if supported_features.intersection(
+            {
+                ProviderFeature.LIBRARY_ARTISTS_EDIT,
+                ProviderFeature.LIBRARY_ALBUMS_EDIT,
+                ProviderFeature.LIBRARY_TRACKS_EDIT,
+                ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
+                ProviderFeature.LIBRARY_AUDIOBOOKS_EDIT,
+                ProviderFeature.LIBRARY_PODCASTS_EDIT,
+                ProviderFeature.LIBRARY_RADIOS_EDIT,
+            }
+        ):
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_BACK)
+        if provider and isinstance(provider, MusicProvider) and provider.is_streaming_provider:
+            extra_entries.append(CONF_ENTRY_LIBRARY_SYNC_DELETIONS)
+        return extra_entries
+
     def _parse_player_queue_config(
         self, queue_id: str, raw_conf: dict[str, Any]
     ) -> PlayerQueueConfig:
@@ -1591,6 +1597,12 @@ class ConfigController:
                     player_id,
                 )
                 changed = True
+
+        # Clear self-referential protocol links: a player whose protocol_parent_id or
+        # linked_protocol_ids pointed at its own id was hidden as its own protocol child.
+        # TODO: remove after 2.10 release
+        if self._migrate_self_referential_protocol_links():
+            changed = True
 
         # Drop the persisted schedule for the metadata maintenance tasks that were hardcoded
         # to run at 04:00 local. They are now registered under new ("_v2") task ids with a
@@ -1705,6 +1717,31 @@ class ConfigController:
                     player_id,
                 )
         return True
+
+    def _migrate_self_referential_protocol_links(self) -> bool:
+        """Clear protocol links that point a player at its own id."""
+        all_player_configs = self._data.get(CONF_PLAYERS, {})
+        if not isinstance(all_player_configs, dict):
+            return False
+        changed = False
+        for player_id, player_cfg in all_player_configs.items():
+            if not isinstance(player_cfg, dict):
+                continue
+            values = player_cfg.get("values")
+            if not isinstance(values, dict):
+                continue
+            repaired = False
+            if values.get(CONF_PROTOCOL_PARENT_ID) == player_id:
+                values[CONF_PROTOCOL_PARENT_ID] = None
+                repaired = True
+            linked = values.get(CONF_LINKED_PROTOCOL_IDS)
+            if isinstance(linked, list) and player_id in linked:
+                values[CONF_LINKED_PROTOCOL_IDS] = [pid for pid in linked if pid != player_id]
+                repaired = True
+            if repaired:
+                LOGGER.warning("Repaired self-referential protocol link for %s", player_id)
+                changed = True
+        return changed
 
     def _migrate_metadata_maintenance_schedule(self) -> bool:
         """Remove the orphaned persisted state for the pre-randomization metadata task ids."""
