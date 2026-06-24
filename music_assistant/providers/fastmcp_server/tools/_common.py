@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
@@ -26,7 +26,7 @@ from ..models import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from fastmcp import Context
+    from fastmcp import Context, FastMCP
 
 MAX_PAGE = 200
 DEFAULT_PAGE = 50
@@ -45,9 +45,49 @@ TIMEOUT_BULK = 60.0
 TIMEOUT_INTERACTIVE = 120.0
 
 
-async def confirm_or_raise(ctx: Context | None, prompt: str, *, enabled: bool) -> None:
+class _LeanToolView:
+    """A pass-through view of a FastMCP sub-server with a lean tool decorator.
+
+    Forwards every attribute to the wrapped server, except ``tool``: its
+    decorator defaults ``output_schema=None`` so tools registered through this
+    view omit the auto-generated ``outputSchema``. Tools still register on the
+    wrapped server; this object is a thin facade, not a separate registry.
     """
-    Ask the MCP client to confirm a destructive operation.
+
+    def __init__(self, sub: FastMCP) -> None:
+        self._sub = sub
+
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        # An explicit output_schema still wins; we only supply the default.
+        kwargs.setdefault("output_schema", None)
+        return self._sub.tool(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sub, name)
+
+
+def lean_schema_view(sub: FastMCP) -> FastMCP:
+    """Return a view of ``sub`` whose tools omit their output schema.
+
+    FastMCP otherwise auto-generates an ``outputSchema`` from each tool's
+    return dataclass; those schemas dominate the gated config/debug namespaces'
+    context footprint. Register a namespace's tools through this view to shrink
+    that footprint for MCP hosts without tool-search deferred loading. The typed
+    return value is unaffected — FastMCP still serializes it into the tool
+    result's text content.
+
+    Unlike mutating ``sub.tool`` in place, this leaves the FastMCP instance
+    untouched, so it does not depend on ``tool`` being a writable attribute.
+
+    :param sub: The FastMCP sub-server to wrap.
+    """
+    # The view duck-types the subset of FastMCP that the tool builders use
+    # (the ``tool`` decorator); typed as FastMCP so call sites stay clean.
+    return cast("FastMCP", _LeanToolView(sub))
+
+
+async def confirm_or_raise(ctx: Context | None, prompt: str, *, enabled: bool) -> None:
+    """Ask the MCP client to confirm a destructive operation.
 
     If ``enabled`` is False, or there is no Context (direct unit-test
     invocation), or the client returns ``NotImplementedError`` (no elicit
@@ -147,8 +187,7 @@ def to_brief_radio(radio: Any) -> RadioBrief:
 
 
 def to_brief_player(player: Any, active_queue: Any = None) -> PlayerBrief:
-    """
-    Convert a Player-like object to ``PlayerBrief``.
+    """Convert a Player-like object to ``PlayerBrief``.
 
     :param player: a Player-like object.
     :param active_queue: the player's active ``PlayerQueue`` (or ``None``).
@@ -264,8 +303,7 @@ def to_brief_player(player: Any, active_queue: Any = None) -> PlayerBrief:
 
 
 def to_brief_queue(queue: Any, items: Sequence[Any] | None = None) -> QueueBrief:
-    """
-    Convert a PlayerQueue-like object to ``QueueBrief``.
+    """Convert a PlayerQueue-like object to ``QueueBrief``.
 
     :param queue: queue-like object with ``queue_id``, ``current_index``, etc.
     :param items: optional iterable of queue items to include.
@@ -342,8 +380,7 @@ def _str_or_none(value: Any) -> str | None:
 
 
 def _volume_fields(player: Any, player_state: Any) -> tuple[bool | None, int | None, bool | None]:
-    """
-    Extract ``(volume_muted, group_volume, group_volume_muted)`` from a player object.
+    """Extract ``(volume_muted, group_volume, group_volume_muted)`` from a player object.
 
     Volume/mute fields live canonically on ``Player.state`` — the raw dataclass
     attrs are caches that lag. ``group_volume`` is only ever populated on the
@@ -373,8 +410,7 @@ def _volume_fields(player: Any, player_state: Any) -> tuple[bool | None, int | N
 
 
 def safe_active_queue(mass: Any, player_id: str) -> Any:
-    """
-    Resolve a player's active queue, degrading to ``None`` on any error.
+    """Resolve a player's active queue, degrading to ``None`` on any error.
 
     MA's queue resolver walks ``player.state`` and recurses through sync
     leaders / group players, so a single partially-populated player could
@@ -399,8 +435,7 @@ class ExternalNowPlaying(NamedTuple):
 
 
 def _external_now_playing(queue_item: Any) -> ExternalNowPlaying | None:
-    """
-    Return the controlling provider and track title for a plugin source item.
+    """Return the controlling provider and track title for a plugin source item.
 
     Detects a "Connect"-style external source (Spotify Connect, AirPlay,
     Yandex Ynison) — these surface as a single queue item whose stream is a
@@ -428,8 +463,7 @@ def _external_now_playing(queue_item: Any) -> ExternalNowPlaying | None:
 
 
 def to_resource_text(value: Any) -> str | None:
-    """
-    Serialize a resource handler's return value as JSON text.
+    """Serialize a resource handler's return value as JSON text.
 
     FastMCP's resource read API requires handlers to return
     ``str | bytes | list[ResourceContents]``. MA domain objects expose
