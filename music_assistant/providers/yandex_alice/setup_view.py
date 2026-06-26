@@ -179,7 +179,7 @@ def _stamp(entries: Iterable[ConfigEntry], category: str) -> tuple[ConfigEntry, 
                     category_translation_key=f"yandex_alice.category.{category}",
                 )
             )
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             with contextlib.suppress(Exception):
                 e.category = category
                 e.category_translation_key = f"yandex_alice.category.{category}"
