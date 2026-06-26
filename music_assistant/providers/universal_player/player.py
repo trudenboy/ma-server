@@ -22,6 +22,14 @@ if TYPE_CHECKING:
     from .provider import UniversalPlayerProvider
 
 
+# Volume and mute are excluded: the base Player resolves those to the protocol player.
+FORWARDED_FEATURES = {
+    PlayerFeature.PAUSE,
+    PlayerFeature.SEEK,
+    PlayerFeature.NEXT_PREVIOUS,
+}
+
+
 class UniversalPlayer(Player):
     """
     Universal Player implementation.

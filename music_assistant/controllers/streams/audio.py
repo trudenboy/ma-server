@@ -1387,7 +1387,9 @@ class StreamsAudio:
             finished = True
         except AudioError as err:
             streamdetails.stream_error = True
-            queue_item.available = False
+            # revoke availability when the stream never produced any audio
+            if bytes_received == 0:
+                queue_item.available = False
             if raise_on_error:
                 raise
             logger.error(
