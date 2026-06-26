@@ -146,7 +146,7 @@ jobs:
             # ``RUF100 unused-noqa``, and the underlying violation
             # surfaces with no protection. ``pipx`` is preinstalled on
             # ubuntu-latest and side-steps PEP 668.
-            pipx install --quiet ruff || true
+            pipx install --quiet 'ruff<0.15' || true  # 0.15.x formatter emits invalid `except A, B:`
             ruff check --select I --fix "tests/providers/${DOMAIN}/" || true
             ruff format "tests/providers/${DOMAIN}/" || true
           fi
