@@ -109,6 +109,10 @@ class StreamsController(CoreController):
         self.audio = StreamsAudio(mass)
         self._smart_fades_analyzer = SmartFadesAnalyzer(self)
 
+    def output_stream_active(self) -> bool:
+        """Return whether a queue stream (single item or flow) is actively serving a player."""
+        return self._active_output_streams > 0
+
     @property
     def base_url(self) -> str:
         """Return the base_url for the streamserver."""
@@ -560,7 +564,7 @@ class StreamsController(CoreController):
             )
         return resp
 
-    async def serve_queue_flow_stream(self, request: web.Request) -> web.StreamResponse:
+    async def serve_queue_flow_stream(self, request: web.Request) -> web.StreamResponse:  # noqa: PLR0915
         """Stream Queue Flow audio to player."""
         self._log_request(request)
         queue_id = request.match_info["queue_id"]
@@ -664,19 +668,38 @@ class StreamsController(CoreController):
                 and current_item.streamdetails
                 and current_item.streamdetails.stream_title
             ):
-                title = current_item.streamdetails.stream_title
-            elif queue and current_item and current_item.name:
-                title = current_item.name
-            else:
-                title = "Music Assistant"
-            metadata = f"StreamTitle='{title}';".encode()
-            if icy_preference == "full" and current_item and current_item.image:
-                metadata += f"StreamURL='{current_item.image.path}'".encode()
-            while len(metadata) % 16 != 0:
-                metadata += b"\x00"
-            length = len(metadata)
-            length_b = chr(int(length / 16)).encode()
-            await resp.write(length_b + metadata)
+                try:
+                    await resp.write(chunk)
+                except BrokenPipeError, ConnectionResetError, ConnectionError:
+                    # race condition
+                    break
+
+                if not enable_icy:
+                    continue
+
+                # if icy metadata is enabled, send the icy metadata after the chunk
+                if (
+                    # use current item here and not buffered item, otherwise
+                    # the icy metadata will be too much ahead
+                    (current_item := queue.current_item)
+                    and current_item.streamdetails
+                    and current_item.streamdetails.stream_title
+                ):
+                    title = current_item.streamdetails.stream_title
+                elif queue and current_item and current_item.name:
+                    title = current_item.name
+                else:
+                    title = "Music Assistant"
+                metadata = f"StreamTitle='{title}';".encode()
+                if icy_preference == "full" and current_item and current_item.image:
+                    metadata += f"StreamURL='{current_item.image.path}'".encode()
+                while len(metadata) % 16 != 0:
+                    metadata += b"\x00"
+                length = len(metadata)
+                length_b = chr(int(length / 16)).encode()
+                await resp.write(length_b + metadata)
+        finally:
+            self._active_output_streams -= 1
 
         return resp
 

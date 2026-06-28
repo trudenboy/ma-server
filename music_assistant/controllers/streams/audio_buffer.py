@@ -51,6 +51,14 @@ class AudioBufferEOF(Exception):
     """Exception raised when the audio buffer reaches end-of-file."""
 
 
+class AudioBufferDiscarded(Exception):
+    """
+    Raised when a passive (analysis) reader requests a chunk evicted from the retained window.
+
+    Means the reader is a full window behind playback, so its session is dropped.
+    """
+
+
 class AudioBuffer:
     """
     Raw PCM audio buffer with seek support and optional filter processing.
@@ -125,6 +133,11 @@ class AudioBuffer:
         """Return number of seconds of audio currently available."""
         return len(self._chunks)
 
+    @property
+    def first_buffered_chunk(self) -> int:
+        """Return the chunk number of the oldest chunk still retained in the buffer."""
+        return self._discarded_chunks
+
     # -- Public methods --
 
     def register_chunk_callback(self, callback: ChunkCallback) -> None:
@@ -191,6 +204,34 @@ class AudioBuffer:
                 chunk_number += 1
             except AudioBufferEOF:
                 break
+
+    async def read_chunk_for_analysis(self, chunk_number: int) -> bytes:
+        """
+        Return one PCM chunk for a passive (analysis) reader, waiting until it is available.
+
+        A read-only accessor: it leaves the buffer untouched — no discard, no producer-space
+        signalling, no inactivity-timer reset — so an analysis reader never affects playback's
+        buffering.
+
+        :param chunk_number: Absolute chunk index to read.
+        :raises AudioBufferEOF: the stream ended before this chunk.
+        :raises AudioBufferDiscarded: the chunk has been evicted from the retained window (the
+            reader is a full window behind playback) or the buffer was torn down.
+        """
+        async with self._data_available:
+            while True:
+                if self.cancelled:
+                    raise AudioBufferDiscarded
+                if chunk_number < self._discarded_chunks:
+                    raise AudioBufferDiscarded
+                index = chunk_number - self._discarded_chunks
+                if index < len(self._chunks):
+                    return self._chunks[index]
+                if self._producer_error:
+                    raise self._producer_error
+                if self._eof_received:
+                    raise AudioBufferEOF
+                await self._data_available.wait()
 
     async def get_stream(
         self,
@@ -442,7 +483,6 @@ class AudioBuffer:
 
         Waits for space when the buffer is full (backpressure).
         """
-        chunk_position = -1
         async with self._lock:
             if self._cancelled:
                 return

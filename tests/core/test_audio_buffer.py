@@ -13,6 +13,7 @@ from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.controllers.streams.audio_buffer import (
     AudioBuffer,
+    AudioBufferDiscarded,
     AudioBufferEOF,
 )
 from music_assistant.controllers.streams.constants import (
@@ -282,7 +283,7 @@ async def test_seek_in_raw_stream() -> None:
     assert chunks[0] == _make_chunk(5)
 
 
-# -- Chunk callbacks --
+# -- Analysis reader (read_chunk_for_analysis) --
 
 
 @pytest.mark.asyncio
@@ -294,9 +295,8 @@ async def test_chunk_callback_receives_data() -> None:
         received.append((position, data))
 
     buf = AudioBuffer(TEST_PCM_FORMAT, buffer_size=BufferSize.MINIMAL)
-    buf.register_chunk_callback(_callback)
-    buf.fill(_make_source(3), source_name="test")
-    await asyncio.sleep(0.1)
+    await buf._put(_make_chunk(0))
+    await buf._put(_make_chunk(1))
 
     # 3 data chunks + 1 EOF signal
     assert len(received) == 4
@@ -317,12 +317,12 @@ async def test_chunk_callback_eof_signal() -> None:
             eof_positions.append(position)
 
     buf = AudioBuffer(TEST_PCM_FORMAT, buffer_size=BufferSize.MINIMAL)
-    buf.register_chunk_callback(_callback)
-    buf.fill(_make_source(5), source_name="test")
-    await asyncio.sleep(0.1)
+    reader = asyncio.ensure_future(buf.read_chunk_for_analysis(0))
+    await asyncio.sleep(0.05)
+    assert not reader.done()  # nothing buffered yet
 
-    assert len(eof_positions) == 1
-    assert eof_positions[0] == 5  # total chunks
+    await buf._put(_make_chunk(0))
+    assert await asyncio.wait_for(reader, timeout=1.0) == _make_chunk(0)
 
 
 @pytest.mark.asyncio
@@ -335,12 +335,37 @@ async def test_callbacks_cleared_on_clear() -> None:
         call_count += 1
 
     buf = AudioBuffer(TEST_PCM_FORMAT, buffer_size=BufferSize.MINIMAL)
-    buf.register_chunk_callback(_callback)
-    await buf._put(ONE_SECOND_CHUNK)
-    assert call_count == 1
+    await buf._put(_make_chunk(0))
+    await buf._set_eof()
 
+    assert await buf.read_chunk_for_analysis(0) == _make_chunk(0)
+    with pytest.raises(AudioBufferEOF):
+        await buf.read_chunk_for_analysis(1)
+
+
+@pytest.mark.asyncio
+async def test_read_chunk_for_analysis_raises_discarded_when_evicted() -> None:
+    """Requesting a chunk that has been evicted from the window raises AudioBufferDiscarded."""
+    buf = AudioBuffer(TEST_PCM_FORMAT, buffer_size=BufferSize.MINIMAL)
+    await buf._put(_make_chunk(0))
+    # Simulate the playback consumer sliding the window past chunk 0.
+    buf._chunks.popleft()
+    buf._discarded_chunks += 1
+    assert buf.first_buffered_chunk == 1
+
+    with pytest.raises(AudioBufferDiscarded):
+        await buf.read_chunk_for_analysis(0)
+
+
+@pytest.mark.asyncio
+async def test_read_chunk_for_analysis_raises_discarded_on_clear() -> None:
+    """A reader blocked on a torn-down buffer is released with AudioBufferDiscarded."""
+    buf = AudioBuffer(TEST_PCM_FORMAT, buffer_size=BufferSize.MINIMAL)
+    reader = asyncio.ensure_future(buf.read_chunk_for_analysis(0))
+    await asyncio.sleep(0.05)
     await buf.clear()
-    assert len(buf._chunk_callbacks) == 0
+    with pytest.raises(AudioBufferDiscarded):
+        await asyncio.wait_for(reader, timeout=1.0)
 
 
 # -- Buffer size limits --
