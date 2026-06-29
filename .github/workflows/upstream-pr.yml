@@ -139,23 +139,28 @@ jobs:
               -e "s/\"provider\\./\"${NEW_PKG}./g" \
               -e "s/'provider\\./'${NEW_PKG}./g" \
               {} +
-
-            # The longer dotted package path can disturb the alphabetical
-            # ordering ruff-isort enforces upstream, AND push any inline
-            # import that fits comfortably in the provider repo over
-            # upstream's narrower line-length limit. Run isort first to
-            # restore ordering, then run ``ruff format`` so the
-            # rewritten lines are wrapped exactly the way upstream's
-            # pre-commit would wrap them — otherwise upstream's
-            # subsequent format pass moves trailing ``# noqa`` markers
-            # to the wrong row, ruff then strips them as
-            # ``RUF100 unused-noqa``, and the underlying violation
-            # surfaces with no protection. ``pipx`` is preinstalled on
-            # ubuntu-latest and side-steps PEP 668.
-            pipx install --quiet 'ruff<0.15' || true  # 0.15.x formatter emits invalid `except A, B:`
-            ruff check --select I --fix "tests/providers/${DOMAIN}/" || true
-            ruff format "tests/providers/${DOMAIN}/" || true
           fi
+
+          # Reconcile the synced provider source AND tests with upstream's lint
+          # config before committing. The provider repo mirrors upstream *main*
+          # (which enforces D212 — multi-line docstring summary on the first
+          # line); a PR that targets *dev* — which enforces the incompatible
+          # D213, summary on the second line — would otherwise fail the upstream
+          # `lint` job on every multi-line docstring, plus any other rule dev
+          # enforces that main does not. ruff is deterministic, so running its
+          # autofix + format here reproduces upstream's own pre-commit edits in
+          # place. This also restores the isort ordering and noqa wrapping the
+          # `provider.`->dotted-package rewrite above can disturb (otherwise the
+          # upstream format pass shifts trailing `# noqa` markers and ruff then
+          # strips them as RUF100, exposing the underlying violation). The full
+          # check subsumes the previous tests-only `--select I` import-sort;
+          # `--unsafe-fixes` covers the D213 / RUF012 class of fixes. ``pipx``
+          # is preinstalled on ubuntu-latest and side-steps PEP 668.
+          pipx install --quiet 'ruff<0.15' || true  # 0.15.x formatter emits invalid `except A, B:`
+          RUFF_TARGETS="$DEST"
+          [ -d "tests/providers/${DOMAIN}" ] && RUFF_TARGETS="$RUFF_TARGETS tests/providers/${DOMAIN}"
+          ruff check --fix --unsafe-fixes $RUFF_TARGETS || true
+          ruff format $RUFF_TARGETS || true
 
           # Copy VERSION file alongside manifest so the badge cron can read it
           # from this branch / from the upstream tree after the PR merges.
