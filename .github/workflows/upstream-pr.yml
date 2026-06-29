@@ -50,6 +50,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Persist the PAT (not the default GITHUB_TOKEN App) as the git
+          # credential: the upstream/<domain> branch is built from upstream/dev,
+          # which carries .github/workflows/*.yml, and a GitHub App token cannot
+          # push refs that touch workflow files. FORK_SYNC_PAT must hold the
+          # `workflow` scope (classic) / Workflows: write (fine-grained).
+          token: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Resolve domain and clone provider release
         env:
@@ -133,23 +139,36 @@ jobs:
               -e "s/\"provider\\./\"${NEW_PKG}./g" \
               -e "s/'provider\\./'${NEW_PKG}./g" \
               {} +
-
-            # The longer dotted package path can disturb the alphabetical
-            # ordering ruff-isort enforces upstream, AND push any inline
-            # import that fits comfortably in the provider repo over
-            # upstream's narrower line-length limit. Run isort first to
-            # restore ordering, then run ``ruff format`` so the
-            # rewritten lines are wrapped exactly the way upstream's
-            # pre-commit would wrap them — otherwise upstream's
-            # subsequent format pass moves trailing ``# noqa`` markers
-            # to the wrong row, ruff then strips them as
-            # ``RUF100 unused-noqa``, and the underlying violation
-            # surfaces with no protection. ``pipx`` is preinstalled on
-            # ubuntu-latest and side-steps PEP 668.
-            pipx install --quiet 'ruff<0.15' || true  # 0.15.x formatter emits invalid `except A, B:`
-            ruff check --select I --fix "tests/providers/${DOMAIN}/" || true
-            ruff format "tests/providers/${DOMAIN}/" || true
           fi
+
+          # Reconcile the synced provider source AND tests with upstream's lint
+          # config before committing. The provider repo mirrors upstream *main*
+          # (which enforces D212 — multi-line docstring summary on the first
+          # line); a PR that targets *dev* — which enforces the incompatible
+          # D213, summary on the second line — would otherwise fail the upstream
+          # `lint` job on every multi-line docstring, plus any other rule dev
+          # enforces that main does not. ruff is deterministic, so running its
+          # autofix + format here reproduces upstream's own pre-commit edits in
+          # place. This also restores the isort ordering and noqa wrapping the
+          # `provider.`->dotted-package rewrite above can disturb (otherwise the
+          # upstream format pass shifts trailing `# noqa` markers and ruff then
+          # strips them as RUF100, exposing the underlying violation). The full
+          # check subsumes the previous tests-only `--select I` import-sort;
+          # `--unsafe-fixes` covers the D213 / RUF012 class of fixes. ``pipx``
+          # is preinstalled on ubuntu-latest and side-steps PEP 668.
+          # Match upstream's pinned ruff exactly so this format pass is
+          # byte-identical to the upstream `lint` job — a different ruff version
+          # reformats differently (e.g. PEP 758 `except A, B:` wrapping) and the
+          # upstream ruff-format hook then fails on our committed output. Read
+          # the rev from upstream's own `.pre-commit-config.yaml` so we stay in
+          # lockstep as they bump it; fall back to latest if it can't be parsed.
+          RUFF_REV=$(grep -A3 'astral-sh/ruff-pre-commit' .pre-commit-config.yaml \
+            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          pipx install --quiet "ruff==${RUFF_REV#v}" || pipx install --quiet ruff || true
+          RUFF_TARGETS="$DEST"
+          [ -d "tests/providers/${DOMAIN}" ] && RUFF_TARGETS="$RUFF_TARGETS tests/providers/${DOMAIN}"
+          ruff check --fix --unsafe-fixes $RUFF_TARGETS || true
+          ruff format $RUFF_TARGETS || true
 
           # Copy VERSION file alongside manifest so the badge cron can read it
           # from this branch / from the upstream tree after the PR merges.
@@ -157,6 +176,20 @@ jobs:
           # objects, add --exclude=VERSION to the rsync above (escape hatch).
           if [ -f provider-repo/VERSION ]; then
             cp provider-repo/VERSION "music_assistant/providers/${DOMAIN}/VERSION"
+          fi
+
+          # Regenerate the Lokalise English source (translations/en.json) from the
+          # synced strings.json so upstream's build_translations_source pre-commit
+          # hook finds no diff. Without this, the provider's strings.json reaches
+          # upstream but en.json still reflects the previous state, and the hook
+          # rewrites it during the upstream `lint` job → failure. The script reads
+          # the strings.json files directly (only needs orjson, no MA runtime), so
+          # install just that and run it with plain python to avoid a full uv sync.
+          if [ -f scripts/build_translations.py ]; then
+            python3 -m pip install --quiet --break-system-packages orjson 2>/dev/null \
+              || python3 -m pip install --quiet orjson 2>/dev/null || true
+            python3 -m scripts.build_translations \
+              || python3 scripts/build_translations.py || true
           fi
 
           # Remove the cloned provider-repo dir before staging to avoid adding it as a submodule
