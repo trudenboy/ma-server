@@ -156,15 +156,16 @@ jobs:
           # check subsumes the previous tests-only `--select I` import-sort;
           # `--unsafe-fixes` covers the D213 / RUF012 class of fixes. ``pipx``
           # is preinstalled on ubuntu-latest and side-steps PEP 668.
-          # Match upstream's pinned ruff exactly so this format pass is
+          # Match upstream's pinned ruff exactly so this fix/format pass is
           # byte-identical to the upstream `lint` job — a different ruff version
-          # reformats differently (e.g. PEP 758 `except A, B:` wrapping) and the
-          # upstream ruff-format hook then fails on our committed output. Read
-          # the rev from upstream's own `.pre-commit-config.yaml` so we stay in
-          # lockstep as they bump it; fall back to latest if it can't be parsed.
-          RUFF_REV=$(grep -A3 'astral-sh/ruff-pre-commit' .pre-commit-config.yaml \
-            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-          pipx install --quiet "ruff==${RUFF_REV#v}" || pipx install --quiet ruff || true
+          # resolves rules like D213 differently, and upstream's ruff-check then
+          # re-finds violations on our committed output. Upstream's ruff hooks run
+          # `uv run ruff` against the `ruff==X.Y.Z` pin in its own pyproject.toml,
+          # so read the version from there (NOT .pre-commit-config — upstream uses
+          # system hooks, not astral-sh/ruff-pre-commit). Fall back to latest only
+          # if it can't be parsed.
+          RUFF_REQ=$(grep -oE 'ruff==[0-9]+\.[0-9]+\.[0-9]+' pyproject.toml | head -1)
+          pipx install --quiet "${RUFF_REQ:-ruff}" || pipx install --quiet ruff || true
           RUFF_TARGETS="$DEST"
           [ -d "tests/providers/${DOMAIN}" ] && RUFF_TARGETS="$RUFF_TARGETS tests/providers/${DOMAIN}"
           ruff check --fix --unsafe-fixes $RUFF_TARGETS || true
