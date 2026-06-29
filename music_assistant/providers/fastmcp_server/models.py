@@ -129,6 +129,17 @@ class QueueBrief:
 
 
 @dataclass
+class AddToQueueResult:
+    """Confirmation of a successful ``add_to_queue`` call."""
+
+    item_id: str
+    uri: str
+    name: str
+    option: str
+    index: int | None = None
+
+
+@dataclass
 class RecommendationFolderBrief:
     """One curated recommendation folder (e.g. "Mood: Focus") with its track URIs."""
 
