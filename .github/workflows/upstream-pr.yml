@@ -156,7 +156,15 @@ jobs:
           # check subsumes the previous tests-only `--select I` import-sort;
           # `--unsafe-fixes` covers the D213 / RUF012 class of fixes. ``pipx``
           # is preinstalled on ubuntu-latest and side-steps PEP 668.
-          pipx install --quiet 'ruff<0.15' || true  # 0.15.x formatter emits invalid `except A, B:`
+          # Match upstream's pinned ruff exactly so this format pass is
+          # byte-identical to the upstream `lint` job — a different ruff version
+          # reformats differently (e.g. PEP 758 `except A, B:` wrapping) and the
+          # upstream ruff-format hook then fails on our committed output. Read
+          # the rev from upstream's own `.pre-commit-config.yaml` so we stay in
+          # lockstep as they bump it; fall back to latest if it can't be parsed.
+          RUFF_REV=$(grep -A3 'astral-sh/ruff-pre-commit' .pre-commit-config.yaml \
+            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          pipx install --quiet "ruff==${RUFF_REV#v}" || pipx install --quiet ruff || true
           RUFF_TARGETS="$DEST"
           [ -d "tests/providers/${DOMAIN}" ] && RUFF_TARGETS="$RUFF_TARGETS tests/providers/${DOMAIN}"
           ruff check --fix --unsafe-fixes $RUFF_TARGETS || true
@@ -168,6 +176,20 @@ jobs:
           # objects, add --exclude=VERSION to the rsync above (escape hatch).
           if [ -f provider-repo/VERSION ]; then
             cp provider-repo/VERSION "music_assistant/providers/${DOMAIN}/VERSION"
+          fi
+
+          # Regenerate the Lokalise English source (translations/en.json) from the
+          # synced strings.json so upstream's build_translations_source pre-commit
+          # hook finds no diff. Without this, the provider's strings.json reaches
+          # upstream but en.json still reflects the previous state, and the hook
+          # rewrites it during the upstream `lint` job → failure. The script reads
+          # the strings.json files directly (only needs orjson, no MA runtime), so
+          # install just that and run it with plain python to avoid a full uv sync.
+          if [ -f scripts/build_translations.py ]; then
+            python3 -m pip install --quiet --break-system-packages orjson 2>/dev/null \
+              || python3 -m pip install --quiet orjson 2>/dev/null || true
+            python3 -m scripts.build_translations \
+              || python3 scripts/build_translations.py || true
           fi
 
           # Remove the cloned provider-repo dir before staging to avoid adding it as a submodule
