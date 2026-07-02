@@ -448,9 +448,8 @@ class PlayerQueuesController(CoreController):
     @api_command("player_queues/dont_stop_the_music")
     def set_dont_stop_the_music(self, queue_id: str, dont_stop_the_music_enabled: bool) -> None:
         """Configure Don't stop the music setting on the queue."""
-        providers_available_with_similar_tracks = any(
-            ProviderFeature.SIMILAR_TRACKS in provider.supported_features
-            for provider in self.mass.music.providers
+        providers_available_with_similar_tracks = bool(
+            self.mass.get_providers_supporting_feature(ProviderFeature.SIMILAR_TRACKS)
         )
         if dont_stop_the_music_enabled and not providers_available_with_similar_tracks:
             raise UnsupportedFeaturedException(
@@ -1497,13 +1496,16 @@ class PlayerQueuesController(CoreController):
             return
         # handle play: replace current loaded/playing index with new item(s)
         if option == QueueOption.PLAY:
+            # an idle/empty queue has no current item to insert after, so insert at and
+            # start from the very first index instead of skipping past it
+            play_at_index = 0 if queue.current_index is None else insert_at_index
             await self.load(
                 queue_id,
                 queue_items=queue_items,
-                insert_at_index=insert_at_index,
+                insert_at_index=play_at_index,
                 shuffle=shuffle,
             )
-            next_index = min(insert_at_index, len(self._queue_items[queue_id]) - 1)
+            next_index = min(play_at_index, len(self._queue_items[queue_id]) - 1)
             await self.play_index(queue_id, next_index)
             return
         # handle add: add/append item(s) to the remaining queue items

@@ -917,6 +917,10 @@ class AirPlayPlayer(Player):
             and (parent_player := self.mass.players.get_player(self.protocol_parent_id))
             and parent_player.state.volume_level is not None
         ):
+            if self._has_native_protocol_parent:
+                # Native parent volume is on the receiver/amplifier scale.
+                # Keep the AirPlay child volume learned from DACP feedback instead.
+                return
             if self._attr_volume_level == parent_player.state.volume_level:
                 return
             self._attr_volume_level = parent_player.state.volume_level
@@ -949,6 +953,14 @@ class AirPlayPlayer(Player):
         if self._active_pairing:
             await self._active_pairing.close()
             self._active_pairing = None
+
+    @property
+    def _has_native_protocol_parent(self) -> bool:
+        """Return True if this AirPlay protocol player is linked to a native parent."""
+        if not self.protocol_parent_id:
+            return False
+        parent_player = self.mass.players.get_player(self.protocol_parent_id)
+        return bool(parent_player and parent_player.volume_control == PLAYER_CONTROL_NATIVE)
 
     def _get_sync_clients(self) -> list[AirPlayPlayer]:
         """Get all sync clients for a player."""

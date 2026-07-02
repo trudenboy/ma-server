@@ -83,6 +83,7 @@ from music_assistant.constants import (
     CONF_ENTRY_VOLUME_NORMALIZATION_TARGET,
     CONF_EXPOSE_PLAYER_TO_HA,
     CONF_HIDE_IN_UI,
+    CONF_LINKED_PROTOCOL_IDS,
     CONF_MUTE_CONTROL,
     CONF_ONBOARD_DONE,
     CONF_PLAYER_DSP,
@@ -93,6 +94,7 @@ from music_assistant.constants import (
     CONF_PREFERRED_OUTPUT_PROTOCOL,
     CONF_PROTOCOL_CATEGORY_PREFIX,
     CONF_PROTOCOL_KEY_SPLITTER,
+    CONF_PROTOCOL_PARENT_ID,
     CONF_PROVIDERS,
     CONF_SERVER_ID,
     CONF_SMART_FADES_MODE,
@@ -522,6 +524,19 @@ class ConfigController:
         """Set (or update) the default name for a provider."""
         conf_key = f"{CONF_PROVIDERS}/{instance_id}/default_name"
         self.set(conf_key, default_name)
+
+    def update_provider_last_error(self, instance_id: str, error: str | None) -> None:
+        """
+        Persist (or clear) a provider's last_error.
+
+        Only writes if the provider config still exists; this avoids re-creating a
+        config entry that was removed while a load was still in flight, which would
+        leave a stub entry without a domain. See #5728.
+        """
+        conf_key = f"{CONF_PROVIDERS}/{instance_id}"
+        if not self.get(conf_key):
+            return
+        self.set(f"{conf_key}/last_error", error)
 
     @api_command("config/players")
     async def get_player_configs(
@@ -1449,6 +1464,20 @@ class ConfigController:
                 LOGGER.info("Migrated AirPlay credentials for player %s", player_id)
             changed = True
 
+        # Drop orphaned provider config stubs: a load failure could write last_error back to a
+        # provider key whose config had already been removed (e.g. removing an unsupported
+        # provider while a load/retry was still in flight), leaving an entry with only a
+        # last_error and no 'domain'. Such stubs crash get_provider_configs on startup.
+        # TODO: remove after 2.11 release
+        if self._migrate_orphaned_provider_stubs():
+            changed = True
+
+        # Clear self-referential protocol links: a player whose protocol_parent_id or
+        # linked_protocol_ids pointed at its own id was hidden as its own protocol child.
+        # TODO: remove after 2.10 release
+        if self._migrate_self_referential_protocol_links():
+            changed = True
+
         # Drop the persisted schedule for the metadata maintenance tasks that were hardcoded
         # to run at 04:00 local. They are now registered under new ("_v2") task ids with a
         # randomized full-day schedule (to avoid spiking the shared MusicBrainz mirror), so the
@@ -1459,6 +1488,46 @@ class ConfigController:
 
         if changed:
             await self._async_save()
+
+    def _migrate_orphaned_provider_stubs(self) -> bool:
+        """Remove provider config stubs left without a 'domain' key (see #5728)."""
+        providers = self._data.get(CONF_PROVIDERS, {})
+        if not isinstance(providers, dict):
+            return False
+        orphaned = [
+            instance_id
+            for instance_id, cfg in providers.items()
+            if isinstance(cfg, dict) and "domain" not in cfg
+        ]
+        for instance_id in orphaned:
+            del providers[instance_id]
+            LOGGER.warning("Removed orphaned provider config stub %s", instance_id)
+        return bool(orphaned)
+
+    def _migrate_self_referential_protocol_links(self) -> bool:
+        """Clear protocol links that point a player at its own id."""
+        all_player_configs = self._data.get(CONF_PLAYERS, {})
+        if not isinstance(all_player_configs, dict):
+            return False
+        changed = False
+        for player_id, player_cfg in all_player_configs.items():
+            if not isinstance(player_cfg, dict):
+                continue
+            values = player_cfg.get("values")
+            if not isinstance(values, dict):
+                continue
+            repaired = False
+            if values.get(CONF_PROTOCOL_PARENT_ID) == player_id:
+                values[CONF_PROTOCOL_PARENT_ID] = None
+                repaired = True
+            linked = values.get(CONF_LINKED_PROTOCOL_IDS)
+            if isinstance(linked, list) and player_id in linked:
+                values[CONF_LINKED_PROTOCOL_IDS] = [pid for pid in linked if pid != player_id]
+                repaired = True
+            if repaired:
+                LOGGER.warning("Repaired self-referential protocol link for %s", player_id)
+                changed = True
+        return changed
 
     def _migrate_metadata_maintenance_schedule(self) -> bool:
         """Remove the orphaned persisted state for the pre-randomization metadata task ids."""
