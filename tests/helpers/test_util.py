@@ -1,8 +1,9 @@
 """Tests for music_assistant.helpers.util helpers."""
 
 import asyncio
+import time
 from collections.abc import Iterator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -10,6 +11,7 @@ from music_assistant.helpers import util
 from music_assistant.helpers.util import (
     get_source_ip_for_target,
     load_provider_module,
+    sanitize_http_header_value,
     select_free_port,
 )
 
@@ -152,3 +154,122 @@ class TestLoadProviderModule:
             install_mock.side_effect = None
             await load_provider_module("sendspin", ["aiosendspin[server]==6.1.1"])
         assert install_mock.await_count == 2
+
+
+class TestGetIpAddresses:
+    """get_ip_addresses caches the (expensive) adapter enumeration for a short while."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_cache(self) -> Iterator[None]:
+        """Run every test against an empty module-level cache."""
+        util._ip_addresses_cache.clear()
+        util._ip_addresses_pending.clear()
+        yield
+        util._ip_addresses_cache.clear()
+        util._ip_addresses_pending.clear()
+
+    @pytest.fixture
+    def enumerate_mock(self) -> Iterator[MagicMock]:
+        """Replace the blocking adapter enumeration with a counting fake."""
+        with patch(
+            "music_assistant.helpers.util._enumerate_ip_addresses",
+            return_value=("192.168.1.10",),
+        ) as mock:
+            yield mock
+
+    def test_falls_back_to_loopback_without_routable_addresses(self) -> None:
+        """With no routable addresses at all, loopback is returned instead of an empty tuple."""
+        with patch("music_assistant.helpers.util.ifaddr.get_adapters", return_value=[]):
+            assert util._enumerate_ip_addresses(include_ipv6=True) == ("127.0.0.1",)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_callers_share_a_single_probe(self, enumerate_mock: MagicMock) -> None:
+        """Concurrent callers within the TTL all get the result of one enumeration."""
+        results = await asyncio.gather(*(util.get_ip_addresses() for _ in range(10)))
+        assert all(result == ("192.168.1.10",) for result in results)
+        assert enumerate_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_sequential_calls_within_ttl_reuse_the_cache(
+        self, enumerate_mock: MagicMock
+    ) -> None:
+        """A repeated call shortly after the first is served from the cache."""
+        assert await util.get_ip_addresses() == ("192.168.1.10",)
+        assert await util.get_ip_addresses() == ("192.168.1.10",)
+        assert enumerate_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cache_is_kept_per_ipv6_flag(self, enumerate_mock: MagicMock) -> None:
+        """include_ipv6 True/False are distinct probes (each cached separately)."""
+        await util.get_ip_addresses(include_ipv6=False)
+        await util.get_ip_addresses(include_ipv6=True)
+        await util.get_ip_addresses(include_ipv6=True)
+        assert enumerate_mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_expired_cache_triggers_a_new_probe(self, enumerate_mock: MagicMock) -> None:
+        """Once the TTL passed, the next call enumerates the adapters again."""
+        await util.get_ip_addresses()
+        # age the cached entry beyond the TTL
+        cached_at, addresses = util._ip_addresses_cache[False]
+        util._ip_addresses_cache[False] = (
+            cached_at - util.IP_ADDRESSES_CACHE_TTL - 1,
+            addresses,
+        )
+        await util.get_ip_addresses()
+        assert enumerate_mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cancelled_caller_does_not_break_concurrent_callers(self) -> None:
+        """Cancelling one caller must not cancel the shared probe for the others."""
+
+        def slow_enumerate(_include_ipv6: bool) -> tuple[str, ...]:
+            time.sleep(0.1)
+            return ("192.168.1.10",)
+
+        with patch(
+            "music_assistant.helpers.util._enumerate_ip_addresses",
+            side_effect=slow_enumerate,
+        ) as enumerate_mock:
+            task_a = asyncio.create_task(util.get_ip_addresses())
+            task_b = asyncio.create_task(util.get_ip_addresses())
+            # let both callers await the (same) in-flight probe, then cancel one
+            await asyncio.sleep(0.02)
+            task_a.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task_a
+            assert await task_b == ("192.168.1.10",)
+        assert enumerate_mock.call_count == 1
+
+
+class TestSanitizeHttpHeaderValue:
+    """sanitize_http_header_value strips characters aiohttp forbids in response headers."""
+
+    def test_clean_value_unchanged(self) -> None:
+        """A regular track name passes through untouched."""
+        assert sanitize_http_header_value("AC/DC - Thunderstruck") == "AC/DC - Thunderstruck"
+
+    def test_newline_and_carriage_return_replaced(self) -> None:
+        """CR/LF (the classic header injection vector) are replaced with spaces."""
+        assert sanitize_http_header_value("Artist -\r\nEvil: header") == "Artist -  Evil: header"
+
+    def test_all_c0_control_chars_and_del_replaced(self) -> None:
+        r"""
+        Every char aiohttp's _FORBIDDEN_HEADER_CHARS_RE rejects is replaced.
+
+        Regression test for https://github.com/music-assistant/support/issues/5791
+        where a control char (other than \n, \r, \t) in a FLAC tag crashed
+        serve_queue_item_stream with a 500.
+        """
+        for codepoint in [*range(0x20), 0x7F]:
+            value = f"Artist - Some{chr(codepoint)}Track"
+            sanitized = sanitize_http_header_value(value)
+            assert sanitized == "Artist - Some Track", f"codepoint {codepoint:#04x} not replaced"
+
+    def test_non_ascii_preserved(self) -> None:
+        """Non-ASCII text is allowed in headers and must be preserved."""
+        assert sanitize_http_header_value("Björk - Jóga") == "Björk - Jóga"
+
+    def test_leading_trailing_whitespace_stripped(self) -> None:
+        """Control chars at the edges don't leave dangling whitespace."""
+        assert sanitize_http_header_value("\x00Artist - Track\x1f") == "Artist - Track"
