@@ -44,7 +44,8 @@ async def test_resource_toggle_triggers_full_restart(
 async def test_lean_admin_schema_toggle_triggers_full_restart(
     mock_mass: MagicMock, mock_config: MagicMock
 ) -> None:
-    """Toggling ``lean_admin_schema`` must restart — it is read at build time.
+    """
+    Toggling ``lean_admin_schema`` must restart — it is read at build time.
 
     The flag decides whether config/debug tools are registered with output
     schemas, which happens once during :meth:`start`. If a future change
