@@ -52,49 +52,12 @@ TIMEOUT_INTERACTIVE = 120.0
 
 
 class _LeanToolView:
-    """
-    A pass-through view of a FastMCP sub-server with a lean tool decorator.
+    """A pass-through view of a FastMCP sub-server with a lean tool decorator.
 
     Forwards every attribute to the wrapped server, except ``tool``: its
     decorator defaults ``output_schema=None`` so tools registered through this
     view omit the auto-generated ``outputSchema``. Tools still register on the
     wrapped server; this object is a thin facade, not a separate registry.
-    """
-
-    def __init__(self, sub: FastMCP) -> None:
-        self._sub = sub
-
-    def tool(self, *args: Any, **kwargs: Any) -> Any:
-        # An explicit output_schema still wins; we only supply the default.
-        kwargs.setdefault("output_schema", None)
-        return self._sub.tool(*args, **kwargs)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._sub, name)
-
-
-def lean_schema_view(sub: FastMCP) -> FastMCP:
-    """
-    Return a view of ``sub`` whose tools omit their output schema.
-
-    FastMCP otherwise auto-generates an ``outputSchema`` from each tool's
-    return dataclass; those schemas dominate the gated config/debug namespaces'
-    context footprint. Register a namespace's tools through this view to shrink
-    that footprint for MCP hosts without tool-search deferred loading. The typed
-    return value is unaffected — FastMCP still serializes it into the tool
-    result's text content.
-
-    Unlike mutating ``sub.tool`` in place, this leaves the FastMCP instance
-    untouched, so it does not depend on ``tool`` being a writable attribute.
-
-    :param sub: The FastMCP sub-server to wrap.
-    """
-    # The view duck-types the subset of FastMCP that the tool builders use
-    # (the ``tool`` decorator); typed as FastMCP so call sites stay clean.
-    return cast("FastMCP", _LeanToolView(sub))
-
-
-async def confirm_or_raise(ctx: Context | None, prompt: str, *, enabled: bool) -> None:
     """
 
     def __init__(self, sub: FastMCP) -> None:
@@ -493,8 +456,7 @@ def min_insert_index(queue: object) -> int:
 def to_brief_queue(
     queue: Any, items: Sequence[Any] | None = None, *, items_offset: int = 0
 ) -> QueueBrief:
-    """
-    Convert a PlayerQueue-like object to ``QueueBrief``.
+    """Convert a PlayerQueue-like object to ``QueueBrief``.
 
     :param queue: queue-like object with ``queue_id``, ``current_index``, etc.
     :param items: optional iterable of queue items to include.

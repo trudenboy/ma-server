@@ -130,7 +130,7 @@ class SafeLogTail:
                     when = datetime.fromisoformat(parsed.timestamp)
                 except ValueError:
                     continue
-                if (now - when).total_seconds() > since_seconds:
+                if (current_time - when).total_seconds() > since_seconds:
                     continue
             out.append(parsed)
 
