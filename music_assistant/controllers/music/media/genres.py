@@ -8,6 +8,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from music_assistant_models.auth import Scope
 from music_assistant_models.background_task import BackgroundTask, TaskSchedule
 from music_assistant_models.enums import EventType, ImageType, MediaType, TaskStatus
 from music_assistant_models.errors import InvalidDataError
@@ -119,90 +120,100 @@ class GenreController(MediaControllerBase[Genre]):
 
         # register extra api handlers
         self.mass.register_api_command(
-            "music/genres/add_alias", self.add_alias, required_role="admin"
+            "music/genres/add_alias", self.add_alias, required_scope=Scope.LIBRARY_MANAGE
         )
         self.mass.register_api_command(
-            "music/genres/remove_alias", self.remove_alias, required_role="admin"
+            "music/genres/remove_alias", self.remove_alias, required_scope=Scope.LIBRARY_MANAGE
         )
         self.mass.register_api_command(
-            "music/genres/add_media_mapping", self.add_media_mapping, required_role="admin"
+            "music/genres/add_media_mapping",
+            self.add_media_mapping,
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/remove_media_mapping",
             self.remove_media_mapping,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/promote_alias",
             self.promote_alias_to_genre,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/restore_defaults",
             self.restore_default_genres,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/add",
             self.add_item_to_library,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/overview",
             self.get_overview,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/tracks",
             self.tracks,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/albums",
             self.albums,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/scan_mappings",
             self.scan_mappings,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/scanner_status",
             self.get_scanner_status,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/genres_for_media_item",
             self.get_genres_for_media_item,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/genre_exclusions_for_media_item",
             self.get_genre_exclusions_for_media_item,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/exclude_genre_from_media_item",
             self.exclude_genre_from_media_item,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/remove_genre_exclusion",
             self.remove_genre_exclusion,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/merge",
             self.merge_genres,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
         self.mass.register_api_command(
             "music/genres/media_counts",
             self.get_genre_media_counts,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/global_exclusions",
             self.get_global_genre_exclusions,
+            required_scope=Scope.LIBRARY_READ,
         )
         self.mass.register_api_command(
             "music/genres/remove_global_exclusion",
             self.remove_global_genre_exclusion,
-            required_role="admin",
+            required_scope=Scope.LIBRARY_MANAGE,
         )
 
         # Run genre mapping scanner after library sync completes
@@ -1140,23 +1151,35 @@ class GenreController(MediaControllerBase[Genre]):
         }
 
     @staticmethod
-    def _get_genre_icon_metadata(translation_key: str | None) -> MediaItemMetadata | None:
+    def _get_genre_icon_metadata(
+        translation_key: str | None, content_type: MediaType | None = None
+    ) -> MediaItemMetadata | None:
         """
-        Build metadata with genre icon image if an SVG exists for the translation key.
+        Build metadata with the genre icon image if an SVG exists for the translation key.
 
-        :param translation_key: The genre's translation key (matches SVG filename).
+        Spoken-word taxonomies keep their icons in a per-content_type subdir
+        (``genres/podcast/<key>.svg``); the flat ``genres/<key>.svg`` (music, or a
+        shared symbol) is used as a fallback.
+
+        :param translation_key: The genre's translation key (matches the SVG filename).
+        :param content_type: The genre's taxonomy (None = music/general).
         """
         if not translation_key:
             return None
-        icon_path = RESOURCES_DIR.joinpath(GENRE_ICONS_DIR_NAME, f"{translation_key}.svg")
-        if not icon_path.is_file():
-            return None
-        image = MediaItemImage(
-            type=ImageType.THUMB,
-            path=f"{GENRE_ICONS_DIR_NAME}/{translation_key}.svg",
-            provider="builtin",
-        )
-        return MediaItemMetadata(images=UniqueList([image]))
+        # taxonomy-specific icon first, then the flat/shared one
+        rel_candidates: list[str] = []
+        if content_type is not None:
+            rel_candidates.append(f"{content_type.value}/{translation_key}.svg")
+        rel_candidates.append(f"{translation_key}.svg")
+        for rel in rel_candidates:
+            if RESOURCES_DIR.joinpath(GENRE_ICONS_DIR_NAME, rel).is_file():
+                image = MediaItemImage(
+                    type=ImageType.THUMB,
+                    path=f"{GENRE_ICONS_DIR_NAME}/{rel}",
+                    provider="builtin",
+                )
+                return MediaItemMetadata(images=UniqueList([image]))
+        return None
 
     @staticmethod
     def _dedup_aliases(existing: list[str], new: list[str]) -> list[str]:
@@ -1731,22 +1754,34 @@ class GenreController(MediaControllerBase[Genre]):
                 continue
             name_value, sort_name, search_name, search_sort_name = normalized
             all_aliases = [name_value, *entry.get("aliases", [])]
+            translation_key = entry.get("translation_key")
+            icon_metadata = self._get_genre_icon_metadata(translation_key, content_type)
 
-            # Partial restore: ensure aliases are up to date on the existing genre (this taxonomy)
+            # Partial restore: top up aliases on the existing genre and refresh its icon
+            # (icons may have been added to the resources dir after it was first seeded).
             if search_name in existing:
                 rows = await self.mass.music.database.get_rows_from_query(
-                    f"SELECT item_id FROM {DB_TABLE_GENRES} "
+                    f"SELECT item_id, metadata FROM {DB_TABLE_GENRES} "
                     "WHERE search_name = :search_name AND content_type IS :content_type",
                     {"search_name": search_name, "content_type": content_type_value},
                     limit=1,
                 )
                 if rows:
-                    await self._ensure_aliases(int(rows[0]["item_id"]), all_aliases)
+                    genre_id = int(rows[0]["item_id"])
+                    await self._ensure_aliases(genre_id, all_aliases)
+                    if icon_metadata is not None:
+                        current_md = json.loads(rows[0]["metadata"]) if rows[0]["metadata"] else {}
+                        fresh_images = icon_metadata.to_dict().get("images")
+                        if current_md.get("images") != fresh_images:
+                            current_md["images"] = fresh_images
+                            await self.mass.music.database.update(
+                                DB_TABLE_GENRES,
+                                {"item_id": genre_id},
+                                {"metadata": serialize_to_json(current_md)},
+                            )
                 continue
 
             # Stage new genre insert without committing yet (batch all in one transaction)
-            translation_key = entry.get("translation_key")
-            icon_metadata = self._get_genre_icon_metadata(translation_key)
             cursor = await self.mass.music.database.execute(
                 f"INSERT INTO {DB_TABLE_GENRES}"
                 "(name, sort_name, translation_key, description, favorite, metadata, "

@@ -19,9 +19,11 @@ import uuid as _uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace as dc_replace
+from itertools import zip_longest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from music_assistant_models.auth import Scope
 from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import (
     AlbumType,
@@ -30,11 +32,7 @@ from music_assistant_models.enums import (
     MediaType,
     ProviderFeature,
 )
-from music_assistant_models.errors import (
-    InvalidDataError,
-    MediaNotFoundError,
-    MusicAssistantError,
-)
+from music_assistant_models.errors import InvalidDataError, MediaNotFoundError, MusicAssistantError
 from music_assistant_models.media_items import (
     BrowseFolder,
     ItemMapping,
@@ -47,9 +45,7 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.media_items.metadata import MediaItemImage, MediaItemMetadata
 
-from music_assistant.constants import (
-    DYNAMIC_PLAYLIST_SAMPLE_SIZE,
-)
+from music_assistant.constants import DYNAMIC_PLAYLIST_SAMPLE_SIZE
 from music_assistant.controllers.cache import use_cache
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers.security import is_safe_name
@@ -193,29 +189,49 @@ class SmartPlaylistProvider(PluginProvider):
     async def loaded_in_mass(self) -> None:
         """Register API commands after the provider is loaded."""
         self._unregister_handles.append(
-            self.mass.register_api_command("smart_playlists/create", self.create_smart_playlist)
-        )
-        self._unregister_handles.append(
-            self.mass.register_api_command("smart_playlists/generate", self.generate_playlist)
-        )
-        self._unregister_handles.append(
             self.mass.register_api_command(
-                "smart_playlists/get_rules", self.get_smart_playlist_rules
+                "smart_playlists/create",
+                self.create_smart_playlist,
+                required_scope=Scope.LIBRARY_WRITE,
             )
         )
         self._unregister_handles.append(
             self.mass.register_api_command(
-                "smart_playlists/update_rules", self.update_smart_playlist_rules
+                "smart_playlists/generate",
+                self.generate_playlist,
+                required_scope=Scope.LIBRARY_WRITE,
             )
         )
         self._unregister_handles.append(
-            self.mass.register_api_command("smart_playlists/list", self.list_smart_playlists)
+            self.mass.register_api_command(
+                "smart_playlists/get_rules",
+                self.get_smart_playlist_rules,
+                required_scope=Scope.LIBRARY_READ,
+            )
         )
         self._unregister_handles.append(
-            self.mass.register_api_command("smart_playlists/preview_tracks", self.preview_tracks)
+            self.mass.register_api_command(
+                "smart_playlists/update_rules",
+                self.update_smart_playlist_rules,
+                required_scope=Scope.LIBRARY_WRITE,
+            )
         )
         self._unregister_handles.append(
-            self.mass.register_api_command("smart_playlists/count_tracks", self.count_tracks)
+            self.mass.register_api_command(
+                "smart_playlists/list", self.list_smart_playlists, required_scope=Scope.LIBRARY_READ
+            )
+        )
+        self._unregister_handles.append(
+            self.mass.register_api_command(
+                "smart_playlists/preview_tracks",
+                self.preview_tracks,
+                required_scope=Scope.LIBRARY_READ,
+            )
+        )
+        self._unregister_handles.append(
+            self.mass.register_api_command(
+                "smart_playlists/count_tracks", self.count_tracks, required_scope=Scope.LIBRARY_READ
+            )
         )
         # Subscribe to library events to handle playlist deletion and renaming.
         self._unregister_handles.append(
@@ -1250,30 +1266,39 @@ class SmartPlaylistProvider(PluginProvider):
                 seeds.append(await ctrl.get(item_id, provider))
             except Exception as exc:
                 self.logger.warning("Could not resolve seed %s: %s", uri, exc)
-        # each seed contributes its own (base) tracks plus tracks similar to them; downstream
-        # post-filtering, dedup, shuffle and limit shape this pool into the final playlist
-        pool: list[Track] = []
+        if not seeds:
+            return []
+        # round-robin each seed's own pool so seeds contribute evenly; `seen` dedupes across them
+        pool_cap = target_size * 3
+        per_seed_cap = -(-pool_cap // len(seeds))  # ceil, so the pools can still fill the cap
         seen: set[Track] = set()
+        per_seed_pools: list[list[Track]] = []
         for seed in seeds:
-            if len(pool) >= target_size * 3:
-                break
+            seed_pool: list[Track] = []
             with suppress(MusicAssistantError):
-                for base in await self.mass.player_queues.get_tracks_for_playback(seed):
-                    if len(pool) >= target_size * 3:
+                seed_tracks = await self.mass.player_queues.get_tracks_for_playback(seed)
+                # shuffle so seeds are drawn from across the whole playlist, not just its top
+                random.shuffle(seed_tracks)
+                for base in seed_tracks:
+                    if len(seed_pool) >= per_seed_cap:
                         break
                     if base not in seen:
                         seen.add(base)
-                        pool.append(base)
+                        seed_pool.append(base)
                     with suppress(MusicAssistantError):
                         for track in await self.mass.music.tracks.similar_tracks(
                             base.item_id, base.provider
                         ):
-                            if len(pool) >= target_size * 3:
+                            if len(seed_pool) >= per_seed_cap:
                                 break
                             if track not in seen:
                                 seen.add(track)
-                                pool.append(track)
-        return pool
+                                seed_pool.append(track)
+            per_seed_pools.append(seed_pool)
+        pool: list[Track] = []
+        for round_tracks in zip_longest(*per_seed_pools):
+            pool.extend(track for track in round_tracks if track is not None)
+        return pool[:pool_cap]
 
     async def _update_playlist_description(
         self, library_item_id: int | str, description: str
