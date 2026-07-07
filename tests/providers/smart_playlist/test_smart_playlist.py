@@ -899,6 +899,79 @@ async def test_tracks_from_seeds_pools_base_and_similar() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tracks_from_seeds_samples_evenly_across_seeds() -> None:
+    """A large seed must not crowd the pool: each seed contributes evenly (round-robin)."""
+    mass = MagicMock()
+    manifest = MagicMock()
+    manifest.domain = "smart_playlist"
+    config = MagicMock()
+    config.get_value.return_value = "GLOBAL"
+    plugin = SmartPlaylistProvider(mass, manifest, config, set())
+
+    seed_a = _make_mock_track("seed_a", "library://track/seed_a")
+    seed_b = _make_mock_track("seed_b", "library://track/seed_b")
+    base_a = _make_mock_track("base_a", "library://track/base_a")
+    base_b = _make_mock_track("base_b", "library://track/base_b")
+    # Seed A yields far more similar tracks than seed B; the old sequential fill let A alone
+    # reach the pool cap so B never contributed a single track.
+    a_similar = [_make_mock_track(f"a_sim_{i}", f"library://track/a_sim_{i}") for i in range(30)]
+    b_similar = [_make_mock_track("b_sim_0", "library://track/b_sim_0")]
+
+    ctrl = MagicMock()
+    ctrl.get = AsyncMock(side_effect=[seed_a, seed_b])
+    mass.music.get_controller = MagicMock(return_value=ctrl)
+    mass.player_queues.get_tracks_for_playback = AsyncMock(
+        side_effect=lambda seed: {seed_a: [base_a], seed_b: [base_b]}[seed]
+    )
+    mass.music.tracks.similar_tracks = AsyncMock(
+        side_effect=lambda item_id, _provider: {"base_a": a_similar, "base_b": b_similar}[item_id]
+    )
+
+    result = await plugin._tracks_from_seeds(
+        ["library://track/seed_a", "library://track/seed_b"], target_size=4
+    )
+
+    ids = {track.item_id for track in result}
+    # seed B's tracks must survive even though seed A dwarfs it
+    assert "base_b" in ids
+    assert "b_sim_0" in ids
+    assert "base_a" in ids
+    # round-robin, not concatenation: A and B alternate at the head of the pool
+    head = [track.item_id for track in result[:2]]
+    assert head == ["base_a", "base_b"]
+
+
+@pytest.mark.asyncio
+async def test_tracks_from_seeds_shuffles_seed_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Base tracks are drawn from across the seed, not just its first few (stored-order) items."""
+    mass = MagicMock()
+    manifest = MagicMock()
+    manifest.domain = "smart_playlist"
+    config = MagicMock()
+    config.get_value.return_value = "GLOBAL"
+    plugin = SmartPlaylistProvider(mass, manifest, config, set())
+
+    # a large seed whose tracks resolve in stored order; without shuffling only t0.. would be used
+    seed_tracks = [_make_mock_track(f"t{i}", f"library://track/t{i}") for i in range(20)]
+
+    ctrl = MagicMock()
+    ctrl.get = AsyncMock(return_value=_make_mock_track("seed", "library://track/seed"))
+    mass.music.get_controller = MagicMock(return_value=ctrl)
+    mass.player_queues.get_tracks_for_playback = AsyncMock(return_value=seed_tracks)
+    mass.music.tracks.similar_tracks = AsyncMock(return_value=[])
+    # deterministic "shuffle": reverse in place, so tail tracks land at the head
+    monkeypatch.setattr(
+        "music_assistant.providers.smart_playlist.random.shuffle", lambda seq: seq.reverse()
+    )
+
+    result = await plugin._tracks_from_seeds(["library://track/seed"], target_size=2)
+
+    ids = {track.item_id for track in result}
+    assert "t19" in ids
+    assert "t0" not in ids
+
+
+@pytest.mark.asyncio
 async def test_exclusion_filters_out_excluded_artist() -> None:
     """Tracks from excluded artists are removed from the result."""
     mass = MagicMock()
@@ -1030,7 +1103,7 @@ async def test_get_playlist_tracks_dynamic_cold_evaluates_and_caches(tmp_path: A
     """On a fully-cold cache the sample is evaluated and a store task is scheduled."""
     mass = MagicMock()
     mass.storage_path = str(tmp_path)
-    mass.cache.get = AsyncMock(return_value=None)
+    mass.cache.get_with_freshness = AsyncMock(return_value=(None, False, False))
     mass.cache.set = AsyncMock()
     mass.create_task = MagicMock(side_effect=_swallow_task)
     manifest = MagicMock()
@@ -1061,7 +1134,7 @@ async def test_get_playlist_tracks_dynamic_returns_fresh_cache(tmp_path: Any) ->
     mass = MagicMock()
     mass.storage_path = str(tmp_path)
     cached = [_make_mock_track(str(i), f"library://track/cached-{i}") for i in range(3)]
-    mass.cache.get = AsyncMock(return_value=cached)
+    mass.cache.get_with_freshness = AsyncMock(return_value=(cached, True, True))
     mass.cache.set = AsyncMock()
     mass.create_task = MagicMock()
     manifest = MagicMock()
@@ -1078,8 +1151,8 @@ async def test_get_playlist_tracks_dynamic_returns_fresh_cache(tmp_path: Any) ->
     result = await plugin.get_playlist_tracks("abc")
     assert result == cached
     evaluate_mock.assert_not_awaited()
-    # Only the fresh lookup runs; no stale lookup, no scheduled refresh.
-    mass.cache.get.assert_awaited_once()
+    # A single freshness lookup runs; no scheduled refresh.
+    mass.cache.get_with_freshness.assert_awaited_once()
     mass.create_task.assert_not_called()
 
 
@@ -1089,8 +1162,8 @@ async def test_get_playlist_tracks_dynamic_serves_stale_and_refreshes(tmp_path: 
     mass = MagicMock()
     mass.storage_path = str(tmp_path)
     stale = [_make_mock_track(str(i), f"library://track/stale-{i}") for i in range(3)]
-    # First (fresh) lookup misses, second (stale-allowed) lookup returns the expired entry.
-    mass.cache.get = AsyncMock(side_effect=[None, stale])
+    # The single freshness lookup returns the expired entry (a stale hit).
+    mass.cache.get_with_freshness = AsyncMock(return_value=(stale, False, True))
     mass.cache.set = AsyncMock()
     mass.create_task = MagicMock(side_effect=_swallow_task)
     manifest = MagicMock()
