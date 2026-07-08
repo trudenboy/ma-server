@@ -60,9 +60,10 @@ class AlbumsController(MediaControllerBase[Album]):
     @property
     def base_query(self) -> tuple[str, dict[str, Any]]:
         """Return the base SELECT query for albums and its bound query params."""
-        query = """
+        query = f"""
         SELECT
             albums.*,
+            {self._external_ids_query()} AS external_ids,
             (SELECT JSON_GROUP_ARRAY(
                 json_object(
                 'item_id', album_pm.provider_item_id,
@@ -413,9 +414,15 @@ class AlbumsController(MediaControllerBase[Album]):
     ) -> list[Track]:
         """Return in-database album tracks for the given database album."""
         db_id = int(item_id)  # ensure integer
+        # pass the album id as preferred album so the track_album subquery in the
+        # base query returns this album's disc/track numbers for tracks that
+        # appear on multiple albums
         return await self.mass.music.tracks.get_library_items_by_query(
-            extra_query_parts=["WHERE album_tracks.album_id = :album_id"],
-            extra_query_params={"album_id": db_id},
+            extra_query_parts=[
+                f"tracks.item_id IN (SELECT track_id FROM {DB_TABLE_ALBUM_TRACKS} "
+                "WHERE album_id = :album_id)"
+            ],
+            extra_query_params={"album_id": db_id, "preferred_album_id": db_id},
         )
 
     async def add_item_mapping_as_album_to_library(self, item: ItemMapping) -> Album:
@@ -526,12 +533,13 @@ class AlbumsController(MediaControllerBase[Album]):
                 "album_type": item.album_type,
                 "year": item.year,
                 "metadata": serialize_to_json(item.metadata),
-                "external_ids": serialize_to_json(item.external_ids),
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
             },
         )
+        # update/set external id lookup table
+        await self.set_external_ids(db_id, item.external_ids)
         # update/set provider_mappings table
         await self.set_provider_mappings(db_id, item.provider_mappings)
         # set track artist(s)
@@ -563,15 +571,16 @@ class AlbumsController(MediaControllerBase[Album]):
                 "year": update.year if overwrite else cur_item.year or update.year,
                 "album_type": album_type.value,
                 "metadata": serialize_to_json(metadata),
-                "external_ids": serialize_to_json(
-                    update.external_ids if overwrite else cur_item.external_ids
-                ),
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
                 "timestamp_added": int(update.date_added.timestamp())
                 if update.date_added
                 else UNSET,
             },
+        )
+        # update/set external id lookup table
+        await self.set_external_ids(
+            db_id, update.external_ids if overwrite else cur_item.external_ids
         )
         # update/set provider_mappings table
         provider_mappings = (

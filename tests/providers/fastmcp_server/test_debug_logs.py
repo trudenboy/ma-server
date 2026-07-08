@@ -150,7 +150,8 @@ def test_symlink_escape_rejected(tmp_log_dir: Path) -> None:
 
 
 def test_scan_bytes_cap_marks_truncated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 10 MB scan cap fires when filters keep skipping records.
+    """
+    The 10 MB scan cap fires when filters keep skipping records.
 
     With filter-then-tail semantics the scan exits early once the page fills,
     so the cap is observable only when the filter never matches — the reader
@@ -436,7 +437,8 @@ async def test_e2e_debug_log_stats(mounted_debug: Any, tmp_log_dir: Path) -> Non
 
 
 def test_tail_offset_cursor_survives_same_timestamp_burst(log_root: Path) -> None:
-    """Paging via the hint's offset cursor never loses same-timestamp records.
+    """
+    Paging via the hint's offset cursor never loses same-timestamp records.
 
     A timestamp-only cursor drops tied records (ms resolution + error bursts);
     the hint must page by file offset so every record is reachable.
@@ -462,7 +464,8 @@ def test_tail_offset_cursor_survives_same_timestamp_burst(log_root: Path) -> Non
 
 
 def test_tail_oversized_record_truncated_by_bytes(log_root: Path) -> None:
-    """A single oversized record is cut against the byte budget, not characters.
+    """
+    A single oversized record is cut against the byte budget, not characters.
 
     Multi-byte UTF-8 (Cyrillic/CJK) must not blow the response budget when the
     character count is under it but the encoded size is several times larger.

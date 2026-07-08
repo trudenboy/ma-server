@@ -144,7 +144,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         extra_query_parts: list[str] = []
         if artist_type:
             extra_query_parts = [f"artist_type = '{artist_type}'"]
-        if album_artists_only and artist_type == ArtistType.SINGER:
+        if album_artists_only and artist_type in (None, ArtistType.SINGER):
             extra_query_parts.append(
                 f"artists.item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
                 f"from {DB_TABLE_ALBUM_ARTISTS})"
@@ -978,7 +978,6 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "name": item.name,
                 "sort_name": item.sort_name,
                 "favorite": item.favorite,
-                "external_ids": serialize_to_json(item.external_ids),
                 "metadata": serialize_to_json(item.metadata),
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
@@ -986,6 +985,8 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "artist_type": item.artist_type,
             },
         )
+        # update/set external id lookup table
+        await self.set_external_ids(db_id, item.external_ids)
         # update/set provider_mappings table
         await self.set_provider_mappings(db_id, item.provider_mappings)
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
@@ -1021,9 +1022,6 @@ class ArtistsController(MediaControllerBase[Artist]):
             {
                 "name": name,
                 "sort_name": sort_name,
-                "external_ids": serialize_to_json(
-                    update.external_ids if overwrite else cur_item.external_ids
-                ),
                 "metadata": serialize_to_json(metadata),
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
@@ -1034,6 +1032,10 @@ class ArtistsController(MediaControllerBase[Artist]):
             },
         )
         self.logger.debug("updated %s in database: %s", update.name, db_id)
+        # update/set external id lookup table
+        await self.set_external_ids(
+            db_id, update.external_ids if overwrite else cur_item.external_ids
+        )
         # update/set provider_mappings table
         provider_mappings = (
             update.provider_mappings

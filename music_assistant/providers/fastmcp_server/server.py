@@ -124,7 +124,8 @@ class MCPServerRuntime:
     async def apply_permission_change(
         self, new_config: ProviderConfig, changed_keys: set[str]
     ) -> None:
-        """Hot-swap the allowed-tag set, or restart when resources are involved.
+        """
+        Hot-swap the allowed-tag set, or restart when resources are involved.
 
         Resource toggles (``CONF_RES_*``) require a rebuild because resource
         registration is decided at :meth:`start` time; permission flags flip the
