@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import urllib.parse
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.auth import Scope
@@ -39,9 +40,11 @@ from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import serialize_to_json
 from music_assistant.models.music_provider import MusicProvider
 
-from .base import MediaControllerBase
+from .base import MediaControllerBase, TrackSyncDetails
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from music_assistant import MusicAssistant
     from music_assistant.models.metadata_provider import MetadataProvider
     from music_assistant.models.plugin import PluginProvider
@@ -77,9 +80,15 @@ class TracksController(MediaControllerBase[Track]):
     @property
     def base_query(self) -> tuple[str, dict[str, Any]]:
         """Return the base SELECT query for tracks and its bound query params."""
-        query = """
+        # NOTE: the track_album subquery is fully self-contained (correlated) so the
+        # outer query needs no join with album_tracks (which would fan out rows for
+        # tracks that appear on multiple albums and force a GROUP BY). For tracks on
+        # multiple albums it prefers :preferred_album_id (used for album track
+        # listings) and otherwise deterministically picks the lowest album id.
+        query = f"""
         SELECT
             tracks.*,
+            {self._external_ids_query()} AS external_ids,
             (SELECT JSON_GROUP_ARRAY(
                 json_object(
                 'item_id', track_pm.provider_item_id,
@@ -100,7 +109,7 @@ class TracksController(MediaControllerBase[Track]):
                     'name', artists.name,
                     'sort_name', artists.sort_name,
                     'media_type', 'artist',
-                    'external_ids', json(artists.external_ids)
+                    'external_ids', json({self._external_ids_query(MediaType.ARTIST, "artists")})
                 )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id) AS artists,
             (SELECT
                 json_object(
@@ -113,11 +122,14 @@ class TracksController(MediaControllerBase[Track]):
                     'disc_number', album_tracks.disc_number,
                     'track_number', album_tracks.track_number,
                     'images', json_extract(albums.metadata, '$.images')
-                ) FROM albums WHERE albums.item_id = album_tracks.album_id) AS track_album
+                ) FROM album_tracks
+                JOIN albums ON albums.item_id = album_tracks.album_id
+                WHERE album_tracks.track_id = tracks.item_id
+                ORDER BY (album_tracks.album_id IS :preferred_album_id) DESC, album_tracks.album_id
+                LIMIT 1) AS track_album
             FROM tracks
-            LEFT JOIN album_tracks on album_tracks.track_id = tracks.item_id
             """
-        return query, {}
+        return query, {"preferred_album_id": None}
 
     async def get(
         self,
@@ -132,6 +144,9 @@ class TracksController(MediaControllerBase[Track]):
             item_id,
             provider_instance_id_or_domain,
             allow_update_metadata=allow_update_metadata,
+        )
+        track.audio_metadata = await self.mass.streams.audio_analysis.get_track_audio_metadata(
+            track
         )
         if not recursive and album_uri is None:
             # return early if we do not want recursive full details and no album uri is provided
@@ -625,13 +640,14 @@ class TracksController(MediaControllerBase[Track]):
                 "version": item.version,
                 "duration": item.duration,
                 "favorite": item.favorite,
-                "external_ids": serialize_to_json(item.external_ids),
                 "metadata": serialize_to_json(item.metadata),
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
             },
         )
+        # update/set external id lookup table
+        await self.set_external_ids(db_id, item.external_ids)
         # update/set provider_mappings table
         await self.set_provider_mappings(db_id, item.provider_mappings)
         # set track artist(s)
@@ -666,15 +682,16 @@ class TracksController(MediaControllerBase[Track]):
                 "version": update.version if overwrite else cur_item.version or update.version,
                 "duration": update.duration if overwrite else cur_item.duration or update.duration,
                 "metadata": serialize_to_json(metadata),
-                "external_ids": serialize_to_json(
-                    update.external_ids if overwrite else cur_item.external_ids
-                ),
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
                 "timestamp_added": int(update.date_added.timestamp())
                 if update.date_added
                 else UNSET,
             },
+        )
+        # update/set external id lookup table
+        await self.set_external_ids(
+            db_id, update.external_ids if overwrite else cur_item.external_ids
         )
         # update/set provider_mappings table
         provider_mappings = (
@@ -793,3 +810,26 @@ class TracksController(MediaControllerBase[Track]):
             },
         )
         return ItemMapping.from_item(db_artist)
+
+    def _sync_details_query_parts(self) -> tuple[str, str, dict[str, Any]]:
+        """Return extra (columns, joins, params) for the tracks sync-details query."""
+        # the sync loop needs to know if the track has a (valid) album link
+        # to be able to backfill a missing album on existing library tracks
+        extra_columns = """
+            , EXISTS (
+                SELECT 1 FROM album_tracks
+                JOIN albums ON albums.item_id = album_tracks.album_id
+                WHERE album_tracks.track_id = tracks.item_id
+            ) AS has_album
+        """
+        return extra_columns, "", {}
+
+    def _parse_sync_details_row(self, db_row: Mapping[str, Any]) -> TrackSyncDetails:
+        """Parse a raw sync-details db row into a TrackSyncDetails object."""
+        return TrackSyncDetails(
+            item_id=db_row["item_id"],
+            favorite=bool(db_row["favorite"]),
+            date_added=datetime.fromtimestamp(db_row["timestamp_added"], tz=UTC),
+            provider_mappings=self._parse_sync_details_mappings(db_row),
+            has_album=bool(db_row["has_album"]),
+        )

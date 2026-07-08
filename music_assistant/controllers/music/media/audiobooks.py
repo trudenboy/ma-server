@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from json import loads as json_loads
 from typing import TYPE_CHECKING, Any
 
@@ -35,9 +36,11 @@ from music_assistant.helpers.json import serialize_to_json
 from music_assistant.helpers.util import parse_optional_bool
 from music_assistant.models.music_provider import MusicProvider
 
-from .base import MediaControllerBase
+from .base import AudiobookSyncDetails, MediaControllerBase
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from music_assistant_models.auth import User
 
     from music_assistant import MusicAssistant
@@ -71,9 +74,17 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
         resume_position_ms). When a session user is present the join is scoped to that
         user, so multi-user installs don't surface each other's resume state.
         """
-        query = """
+        params: dict[str, Any] = {}
+        # scope the playlog lookup to the session user (if any) and pick at most one
+        # row (the most recent) so the join can never fan out the result set
+        playlog_user_clause = ""
+        if session_user := get_current_user():
+            playlog_user_clause = "AND p2.userid = :playlog_userid "
+            params["playlog_userid"] = session_user.user_id
+        query = f"""
         SELECT
             audiobooks.*,
+            {self._external_ids_query()} AS external_ids,
             (SELECT JSON_GROUP_ARRAY(
                 json_object(
                 'item_id', audiobook_pm.provider_item_id,
@@ -100,12 +111,12 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
             playlog.seconds_played AS seconds_played,
             playlog.seconds_played * 1000 as resume_position_ms
             FROM audiobooks
-            LEFT JOIN playlog ON playlog.item_id = audiobooks.item_id AND playlog.media_type = 'audiobook'
+            LEFT JOIN playlog ON playlog.id = (
+                SELECT p2.id FROM playlog p2
+                WHERE p2.item_id = CAST(audiobooks.item_id AS TEXT)
+                AND p2.media_type = 'audiobook'
+                {playlog_user_clause}ORDER BY p2.timestamp DESC LIMIT 1)
             """
-        params: dict[str, Any] = {}
-        if session_user := get_current_user():
-            query += " AND playlog.userid = :playlog_userid"
-            params["playlog_userid"] = session_user.user_id
         return query, params
 
     async def library_items(
@@ -331,7 +342,6 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
                 "version": item.version,
                 "favorite": item.favorite,
                 "metadata": serialize_to_json(item.metadata),
-                "external_ids": serialize_to_json(item.external_ids),
                 "publisher": item.publisher,
                 "authors": serialize_to_json(_authors),
                 "narrators": serialize_to_json(_narrators),
@@ -341,6 +351,8 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
             },
         )
+        # update/set external id lookup table
+        await self.set_external_ids(db_id, item.external_ids)
         # update/set provider_mappings table
         await self.set_provider_mappings(db_id, item.provider_mappings)
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
@@ -444,9 +456,6 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
                 "sort_name": sort_name,
                 "version": update.version if overwrite else cur_item.version or update.version,
                 "metadata": serialize_to_json(metadata),
-                "external_ids": serialize_to_json(
-                    update.external_ids if overwrite else cur_item.external_ids
-                ),
                 "publisher": cur_item.publisher or update.publisher,
                 "authors": serialize_to_json(
                     _update_authors if overwrite else cur_item.authors or _update_authors
@@ -461,6 +470,10 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
                 if update.date_added
                 else UNSET,
             },
+        )
+        # update/set external id lookup table
+        await self.set_external_ids(
+            db_id, update.external_ids if overwrite else cur_item.external_ids
         )
         # update/set provider_mappings table
         provider_mappings = (
@@ -554,3 +567,59 @@ class AudiobooksController(MediaControllerBase[Audiobook]):
         for row in rows:
             result.update(json_loads(row[column]))
         return UniqueList(sorted(result))
+
+    def _sync_details_query_parts(self) -> tuple[str, str, dict[str, Any]]:
+        """Return extra (columns, joins, params) for the audiobooks sync-details query."""
+        # the sync loop needs the (str vs Artist) type of the stored authors/narrators
+        # plus the user-scoped resume state to detect changes on the provider side
+        params: dict[str, Any] = {}
+        # mirror base_query: scope the playlog lookup to the session user (if any) and
+        # pick at most one row (the most recent) so the join can never fan out
+        playlog_user_clause = ""
+        if session_user := get_current_user():
+            playlog_user_clause = "AND p2.userid = :playlog_userid "
+            params["playlog_userid"] = session_user.user_id
+        extra_columns = f"""
+            , EXISTS (
+                SELECT 1 FROM {DB_TABLE_AUDIOBOOK_ARTISTS}
+                JOIN artists ON artists.item_id = audiobook_artists.artist_id
+                WHERE audiobook_artists.audiobook_id = audiobooks.item_id
+                AND artists.artist_type = '{ArtistType.AUTHOR.value}'
+            ) AS has_author_artists
+            , EXISTS (
+                SELECT 1 FROM {DB_TABLE_AUDIOBOOK_ARTISTS}
+                JOIN artists ON artists.item_id = audiobook_artists.artist_id
+                WHERE audiobook_artists.audiobook_id = audiobooks.item_id
+                AND artists.artist_type = '{ArtistType.NARRATOR.value}'
+            ) AS has_narrator_artists
+            , json_type(audiobooks.authors, '$[0]') AS first_author_type
+            , json_type(audiobooks.narrators, '$[0]') AS first_narrator_type
+            , playlog.fully_played AS fully_played
+            , playlog.seconds_played * 1000 AS resume_position_ms
+        """
+        extra_joins = (
+            f"LEFT JOIN {DB_TABLE_PLAYLOG} ON playlog.id = ("
+            f"SELECT p2.id FROM {DB_TABLE_PLAYLOG} p2 "
+            "WHERE p2.item_id = CAST(audiobooks.item_id AS TEXT) "
+            "AND p2.media_type = 'audiobook' "
+            f"{playlog_user_clause}ORDER BY p2.timestamp DESC LIMIT 1)"
+        )
+        return extra_columns, extra_joins, params
+
+    def _parse_sync_details_row(self, db_row: Mapping[str, Any]) -> AudiobookSyncDetails:
+        """Parse a raw sync-details db row into an AudiobookSyncDetails object."""
+        # authors/narrators hydrate as str only when there are no linked Artist records
+        # and the stored JSON column holds plain strings (mirrors _parse_db_row)
+        resume_position_ms = db_row["resume_position_ms"]
+        return AudiobookSyncDetails(
+            item_id=db_row["item_id"],
+            favorite=bool(db_row["favorite"]),
+            date_added=datetime.fromtimestamp(db_row["timestamp_added"], tz=UTC),
+            provider_mappings=self._parse_sync_details_mappings(db_row),
+            author_is_str=not db_row["has_author_artists"]
+            and db_row["first_author_type"] == "text",
+            narrator_is_str=not db_row["has_narrator_artists"]
+            and db_row["first_narrator_type"] == "text",
+            fully_played=parse_optional_bool(db_row["fully_played"]),
+            resume_position_ms=int(resume_position_ms) if resume_position_ms is not None else None,
+        )
