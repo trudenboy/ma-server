@@ -27,7 +27,7 @@ def renderer() -> UPnPRenderer:
 @pytest.fixture
 async def client(
     renderer: UPnPRenderer,
-) -> AsyncGenerator[TestClient[Request, Application], None]:
+) -> AsyncGenerator[TestClient[Request, Application]]:
     """Create an aiohttp test client for the renderer."""
     server = TestServer(renderer._app)
     _client = TestClient(server)
