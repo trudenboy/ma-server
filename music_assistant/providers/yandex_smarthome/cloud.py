@@ -1,5 +1,4 @@
-"""
-Cloud connection manager for Yandex Smart Home via yaha-cloud.ru relay.
+"""Cloud connection manager for Yandex Smart Home via yaha-cloud.ru relay.
 
 Manages a persistent WebSocket connection to the yaha-cloud.ru relay service.
 Incoming Yandex Smart Home API requests are received over WS, processed by
@@ -161,8 +160,7 @@ async def register_cloud_instance(
     session: aiohttp.ClientSession,
     platform: str | None = None,
 ) -> dict[str, str]:
-    """
-    Register a new cloud instance on yaha-cloud.ru.
+    """Register a new cloud instance on yaha-cloud.ru.
 
     Returns dict with 'id', 'password', 'connection_token'.
     No authentication is required — the relay auto-generates credentials.
@@ -186,8 +184,7 @@ async def get_cloud_otp(
     instance_id: str,
     token: SecretStr,
 ) -> str:
-    """
-    Get a one-time password for linking the instance in the Yandex app.
+    """Get a one-time password for linking the instance in the Yandex app.
 
     User enters this OTP in the Yandex Smart Home app to link their account.
     The token parameter is the connection_token from registration.

@@ -1,5 +1,4 @@
-"""
-Dataclass models for the Yandex Smart Home API.
+"""Dataclass models for the Yandex Smart Home API.
 
 Covers device descriptions, capability states, action requests/results,
 callback payloads, and cloud WebSocket messages.
@@ -18,7 +17,7 @@ try:
     from enum import StrEnum
 except ImportError:
     # Python < 3.11 fallback (needed for local dev; upstream requires >=3.12)
-    class StrEnum(str, Enum):  # type: ignore[no-redef]  # noqa: UP042
+    class StrEnum(str, Enum):  # type: ignore[no-redef]
         """Backport of StrEnum for Python < 3.11."""
 
 
@@ -221,8 +220,7 @@ class ActionResult:
 
 @dataclass
 class CapabilityActionResultState:
-    """
-    State with action result for a single capability in an action response.
+    """State with action result for a single capability in an action response.
 
     Per Yandex Smart Home API, action_result goes inside 'state' alongside instance.
     """

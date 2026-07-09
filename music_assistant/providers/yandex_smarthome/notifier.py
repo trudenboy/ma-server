@@ -1,5 +1,4 @@
-"""
-State notifier — reports MA player state changes to Yandex Smart Home.
+"""State notifier — reports MA player state changes to Yandex Smart Home.
 
 Watches MA player events and pushes state updates to Yandex via the
 callback/state API endpoint (cloud or direct). Uses a 1-second debounce
@@ -175,8 +174,7 @@ class StateNotifier:
         )
 
     async def _flush_pending(self) -> None:
-        """
-        Send all pending state changes to Yandex.
+        """Send all pending state changes to Yandex.
 
         Reads the fresh player state at flush time (not at event time)
         so transient states during track transitions are not reported.

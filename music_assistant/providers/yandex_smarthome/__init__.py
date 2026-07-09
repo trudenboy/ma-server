@@ -143,8 +143,7 @@ def _resolve_direct_client_secret(
     instance_id: str | None,
     values: dict[str, ConfigValueType],
 ) -> str:
-    """
-    Return the direct-mode OAuth client secret for the current install.
+    """Return the direct-mode per-install OAuth client secret.
 
     The frontend does not echo SECURE_STRING fields back into ``values`` on
     re-open, so prefer the saved provider config; fall back to the in-flight
@@ -335,29 +334,9 @@ async def _handle_config_actions(
     return otp_code
 
 
-async def _run_auto_create_action(
-    mass: MusicAssistant,
-    values: dict[str, ConfigValueType],
-    connection_type: str,
-    instance_id: str | None,
-) -> None:
-    """
-    Execute the experimental auto-create-skill action.
-
-    Never re-raises: all errors are persisted into the artifacts blob so
-    the UI can show a FAILED state on the next render rather than
-    crashing the config form.
-    """
-    # MA's frontend supplies ``values["session_id"]`` when it triggers an
-    # action — AuthenticationHelper listens on that exact id to open
-    # and later close the popup. If we roll our own id nothing listens
-    # and the popup never appears. Fall back to a local uuid only if the
-    # frontend happened not to pass one (shouldn't happen in practice).
-    session_id = str(values.get("session_id") or uuid.uuid4().hex)
-    values[CONF_AUTO_CREATE_SESSION_ID] = session_id
-    artifacts_raw = values.get(CONF_AUTO_CREATE_ARTIFACTS)
-    artifacts = load_artifacts(str(artifacts_raw) if artifacts_raw else None)
-
+async def _list_player_options(mass: MusicAssistant) -> list[ConfigValueOption]:
+    """Build the player-picker options list."""
+    options: list[ConfigValueOption] = []
     try:
         for player in mass.players.all_players():
             state = player.state
@@ -401,34 +380,48 @@ async def get_config_entries(
     player_options = await _list_player_options(mass)
     playlist_options: list[ConfigValueOption] = []
     try:
-        for player in mass.players.all_players():
-            state = player.state
-            player_options.append(
-                ConfigValueOption(state.player_id, title=state.name or state.player_id)
-            )
-    except Exception:  # noqa: S110
-        pass
+        playlist_options = await fetch_playlist_options(mass)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _LOGGER.debug("could not enumerate playlists")
 
     entries: list[ConfigEntry] = [
         ConfigEntry(
             key=CONF_INSTANCE_NAME,
             type=ConfigEntryType.STRING,
+            label="Instance Name",
+            description=(
+                "Display name for this MA instance in Yandex Smart Home. "
+                "Alice will use this name for voice commands like "
+                '"Алиса, поставь паузу на [имя]".'
+            ),
             required=False,
             default_value="Music Assistant",
         ),
         ConfigEntry(
             key="label_connection_type_notice",
             type=ConfigEntryType.LABEL,
+            label=(
+                "💡 After changing Connection Type below, click Save and "
+                "reopen this settings page to see the fields for the new mode."
+            ),
         ),
         ConfigEntry(
             key=CONF_CONNECTION_TYPE,
             type=ConfigEntryType.STRING,
+            label="Connection Type",
+            description=(
+                '"cloud" — public Yaha Cloud skill (simple setup). '
+                '"cloud_plus" — private skill via cloud relay (for multi-platform setups). '
+                '"direct" — Yandex calls your MA server directly (requires public HTTPS URL).'
+            ),
             required=False,
             default_value=CONNECTION_TYPE_CLOUD,
             options=[
-                ConfigValueOption("cloud"),
-                ConfigValueOption("cloud_plus"),
-                ConfigValueOption("direct"),
+                ConfigValueOption(title="Cloud (public Yaha Cloud skill)", value="cloud"),
+                ConfigValueOption(title="Cloud Plus (private skill)", value="cloud_plus"),
+                ConfigValueOption(title="Direct (no relay, requires public URL)", value="direct"),
             ],
         ),
     ]
@@ -566,6 +559,12 @@ def _cloud_mode_entries(
         ConfigEntry(
             key="label_cloud_conflict_warning",
             type=ConfigEntryType.LABEL,
+            label=(
+                "⚠️ If this Yandex account already uses the Yaha Cloud skill "
+                "via Home Assistant or another Music Assistant install, "
+                "pick 'Cloud Plus' above instead — the public skill can "
+                "only be linked to one instance per account."
+            ),
             depends_on=CONF_CONNECTION_TYPE,
             depends_on_value=CONNECTION_TYPE_CLOUD,
         ),
@@ -579,6 +578,8 @@ def _cloud_mode_entries(
         ConfigEntry(
             key="otp_code",
             type=ConfigEntryType.STRING,
+            label="OTP Code",
+            description="Copy this code and enter it in the Yandex app.",
             required=False,
             value=otp_code,
             hidden=not otp_code,
@@ -588,13 +589,19 @@ def _cloud_mode_entries(
         ConfigEntry(
             key=CONF_ACTION_REGISTER,
             type=ConfigEntryType.ACTION,
+            label="Register cloud instance",
+            description="Register a new instance on yaha-cloud.ru relay service.",
             action=CONF_ACTION_REGISTER,
+            action_label="Register with cloud",
             hidden=is_registered,
         ),
         ConfigEntry(
             key=CONF_ACTION_GET_OTP,
             type=ConfigEntryType.ACTION,
+            label="Get OTP code",
+            description="Get a fresh one-time password to link with Yandex Smart Home app.",
             action=CONF_ACTION_GET_OTP,
+            action_label="Get OTP code",
             hidden=not is_registered,
         ),
     ]
@@ -818,6 +825,11 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_EXPOSED_PLAYERS,
             type=ConfigEntryType.STRING,
+            label="Exposed Players",
+            description=(
+                "Select which MA players to expose to Yandex Smart Home. "
+                "Leave empty to expose all players."
+            ),
             required=False,
             multi_value=True,
             default_value=[],
@@ -842,6 +854,7 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_CLOUD_INSTANCE_ID,
             type=ConfigEntryType.STRING,
+            label="Cloud Instance ID",
             hidden=True,
             required=False,
             value=cast("str", values.get(CONF_CLOUD_INSTANCE_ID)) if values else None,
@@ -849,6 +862,7 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_CLOUD_INSTANCE_PASSWORD,
             type=ConfigEntryType.SECURE_STRING,
+            label="Cloud Instance Password",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_CLOUD_INSTANCE_PASSWORD)) if values else None),
@@ -856,6 +870,7 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_CLOUD_CONNECTION_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
+            label="Cloud Connection Token",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_CLOUD_CONNECTION_TOKEN)) if values else None),
@@ -863,6 +878,7 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_DIRECT_ACCESS_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
+            label="Direct Access Token",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_DIRECT_ACCESS_TOKEN)) if values else None),

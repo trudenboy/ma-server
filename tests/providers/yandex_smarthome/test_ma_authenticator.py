@@ -7,17 +7,30 @@ is fast, deterministic, and unit-testable without stubbing those upstream
 packages:
 
 - session_id validation (the only synchronous gate inside ``make_authenticator``)
-- HTML activation page rendering (escaping, JS payload safety)
+- HTML activation page rendering (escaping, JS payload safety) — the page now
+  comes from ``ya_passport_auth.ma``; the escaping contract is re-asserted
+  here against this provider's page config so a library regression is caught
+  at the consumer.
 """
 
 from __future__ import annotations
 
 import pytest
+from ya_passport_auth.ma import DevicePageConfig, build_device_code_page
 
-from music_assistant.providers.yandex_smarthome.ma_authenticator import (
-    _build_device_code_page,
-    make_authenticator,
-)
+from music_assistant.providers.yandex_smarthome.ma_authenticator import make_authenticator
+
+_PAGE = DevicePageConfig(domain="yandex_smarthome")
+
+
+def _build_device_code_page(*, user_code: str, verification_url: str, status_url: str) -> str:
+    return build_device_code_page(
+        user_code=user_code,
+        verification_url=verification_url,
+        status_url=status_url,
+        expires_in=300,
+        strings=_PAGE.strings_for("en"),
+    )
 
 
 class TestSessionIdValidation:
