@@ -45,6 +45,7 @@ from music_assistant_models.media_items import (
     Radio,
     RecommendationFolder,
     SearchResults,
+    SoundEffect,
     Track,
 )
 
@@ -370,7 +371,9 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
                 for prov_mapping in cast("MediaItemType", item).provider_mappings
             }
             # include results from library + all (unique) music providers
-            results_per_provider += await asyncio.gather(
+            # one failing provider must not break the entire search,
+            # so exceptions are logged and excluded from the results
+            gather_results = await asyncio.gather(
                 *[
                     self._search_provider(
                         search_query,
@@ -381,7 +384,13 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
                     )
                     for provider_instance in search_providers
                 ],
+                return_exceptions=True,
             )
+            for res in gather_results:
+                if isinstance(res, SearchResults):
+                    results_per_provider.append(res)
+                else:
+                    self.logger.error("Search on provider failed", exc_info=res)
         # return result from all providers while keeping index
         # so the result is sorted as each provider delivered
         result = SearchResults(
@@ -798,6 +807,20 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         # so the result is sorted as each provider delivered
         return [item for sublist in zip_longest(*results_per_provider) for item in sublist if item]
 
+    @api_command("music/sound_effects", required_scope=Scope.LIBRARY_READ)
+    async def sound_effects(self) -> list[SoundEffect]:
+        """Return all sound effect items from providers supporting them."""
+        providers = self._apply_user_provider_filter(
+            self.mass.get_providers_supporting_feature(ProviderFeature.SOUND_EFFECTS)
+        )
+        results_per_provider: list[list[SoundEffect]] = await asyncio.gather(
+            *[
+                self._get_provider_sound_effects(cast("MusicProvider", provider))
+                for provider in providers
+            ]
+        )
+        return [item for sublist in results_per_provider for item in sublist]
+
     @api_command("music/item", required_scope=Scope.LIBRARY_READ)
     async def get_item(
         self,
@@ -836,6 +859,18 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
             raise MediaNotFoundError(
                 f"AudioSource {provider_instance_id_or_domain}/{item_id} not found"
             )
+        if media_type == MediaType.SOUND_EFFECT:
+            # Sound effects are not library-backed; resolve them live from the
+            # owning music provider. Returning the live MediaItem lets play_media
+            # create a queue item the standard way.
+            prov = self.mass.get_provider(provider_instance_id_or_domain)
+            if isinstance(prov, MusicProvider) and (
+                ProviderFeature.SOUND_EFFECTS in prov.supported_features
+            ):
+                return await prov.get_sound_effect(item_id)
+            raise MediaNotFoundError(
+                f"SoundEffect {provider_instance_id_or_domain}/{item_id} not found"
+            )
         ctrl = self.get_controller(media_type)
         return await ctrl.get(
             item_id=item_id,
@@ -871,15 +906,19 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
                 uri_media_type, _, _ = await parse_uri(item)
             except InvalidProviderURI, InvalidProviderID:
                 uri_media_type = None
-            if uri_media_type == MediaType.AUDIO_SOURCE:
-                raise UnsupportedFeaturedException("AudioSource items can not be favorites")
+            if uri_media_type in (MediaType.AUDIO_SOURCE, MediaType.SOUND_EFFECT):
+                raise UnsupportedFeaturedException(
+                    f"{uri_media_type.value} items can not be favorites"
+                )
             # a favorite URI always resolves to a media item, never a BrowseFolder
             item = cast("MediaItemType", await self.get_item_by_uri(item))
-        if item.media_type == MediaType.AUDIO_SOURCE:
-            # AudioSources are dynamic plugin surfaces (existence depends on a
-            # running plugin and its current device state) and have no stable
-            # library identity, so they can not be persisted as favorites.
-            raise UnsupportedFeaturedException("AudioSource items can not be favorites")
+        if item.media_type in (MediaType.AUDIO_SOURCE, MediaType.SOUND_EFFECT):
+            # AudioSources and SoundEffects are live provider content (existence
+            # depends on a loaded provider) and have no stable library identity,
+            # so they can not be persisted as favorites.
+            raise UnsupportedFeaturedException(
+                f"{item.media_type.value} items can not be favorites"
+            )
         # make sure we have a full library item
         # a favorite must always be in the library
         full_item = cast(
@@ -979,8 +1018,10 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
                 uri_media_type, _, _ = await parse_uri(item)
             except InvalidProviderURI, InvalidProviderID:
                 uri_media_type = None
-            if uri_media_type == MediaType.AUDIO_SOURCE:
-                raise UnsupportedFeaturedException("AudioSource items can not be library items")
+            if uri_media_type in (MediaType.AUDIO_SOURCE, MediaType.SOUND_EFFECT):
+                raise UnsupportedFeaturedException(
+                    f"{uri_media_type.value} items can not be library items"
+                )
             full_item = await self.get_item_by_uri(item)
         # For builtin provider (manual URLs), use the provided item directly
         # to preserve custom modifications (name, images, etc.)
@@ -994,11 +1035,13 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
                 item.provider,
             )
         full_item = cast("MediaItemType", full_item)
-        if full_item.media_type == MediaType.AUDIO_SOURCE:
-            # AudioSources are dynamic plugin surfaces (existence depends on a
-            # running plugin and its current device state) and have no stable
-            # library identity, so they can not be persisted as library items.
-            raise UnsupportedFeaturedException("AudioSource items can not be library items")
+        if full_item.media_type in (MediaType.AUDIO_SOURCE, MediaType.SOUND_EFFECT):
+            # AudioSources and SoundEffects are live provider content (existence
+            # depends on a loaded provider) and have no stable library identity,
+            # so they can not be persisted as library items.
+            raise UnsupportedFeaturedException(
+                f"{full_item.media_type.value} items can not be library items"
+            )
         # add to provider(s) library first
         for prov_mapping in full_item.provider_mappings:
             # we optimistically set in library to True to prevent items
@@ -2068,6 +2111,8 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
 
         # create safe search string
         search_query = search_query.replace("/", " ").replace("'", "")
+        # guard against a failing provider: return empty results instead of
+        # raising, so a global search can still succeed with the other providers
         try:
             prov_search_results = await prov.search(
                 search_query,
@@ -2075,8 +2120,11 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
                 limit,
             )
         except MusicAssistantError as err:
-            self.logger.warning("Search on provider %s failed: %s", prov.name, err)
-            raise MusicAssistantError(f"Search failed due to an error on {prov.name}") from err
+            self.logger.warning("Search on provider %s failed: %s", prov.name, str(err))
+            return SearchResults()
+        except Exception as err:
+            self.logger.error("Search on provider %s failed: %s", prov.name, str(err), exc_info=err)
+            return SearchResults()
         if skip_item_ids:
             # filter out items already in skip_item_ids
             prov_search_results.artists = [
@@ -2250,6 +2298,19 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         except Exception as err:
             self.logger.warning(
                 "Error while fetching recommendations from %s: %s",
+                provider.name,
+                str(err),
+                exc_info=err if self.logger.isEnabledFor(logging.DEBUG) else None,
+            )
+            return []
+
+    async def _get_provider_sound_effects(self, provider: MusicProvider) -> list[SoundEffect]:
+        """Return all sound effect items from a single provider."""
+        try:
+            return [item async for item in provider.get_sound_effects()]
+        except Exception as err:
+            self.logger.warning(
+                "Error while fetching sound effects from %s: %s",
                 provider.name,
                 str(err),
                 exc_info=err if self.logger.isEnabledFor(logging.DEBUG) else None,
