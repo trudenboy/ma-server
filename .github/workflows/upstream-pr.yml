@@ -179,6 +179,46 @@ jobs:
             cp provider-repo/VERSION "music_assistant/providers/${DOMAIN}/VERSION"
           fi
 
+          # Regenerate requirements_all.txt from the manifests so a
+          # requirements change in the synced manifest.json actually reaches
+          # upstream CI. Without this, the branch keeps the pre-sync pin and
+          # the upstream test env installs a stale version of the dependency
+          # (import errors at collection; mypy sees the module as untyped).
+          # The generator deduplicates first-pin-wins across ALL inlined
+          # manifests, so also verify this provider's own requirements
+          # survived: a sibling provider pinning a different version of the
+          # same package silently overrides ours and ships a broken branch —
+          # fail loudly with guidance instead.
+          if [ -f scripts/gen_requirements_all.py ]; then
+            python3 scripts/gen_requirements_all.py
+            python3 - "$DEST/manifest.json" << 'REQCHECK'
+          import json
+          import re
+          import sys
+
+          wanted = json.load(open(sys.argv[1])).get("requirements", [])
+          have = open("requirements_all.txt").read().splitlines()
+
+          def base(spec):
+              return re.split(r"[\[=<>~!]", spec, 1)[0].strip().lower()
+
+          missing = [req for req in wanted if req not in have]
+          if missing:
+              print(
+                  "::error::requirements_all.txt lost this provider's pin(s) "
+                  "to a conflicting sibling manifest (dedup is first-pin-wins):"
+              )
+              for req in missing:
+                  clashes = [line for line in have if base(line) == base(req)]
+                  print(
+                      f"::error::  manifest wants '{req}' but requirements_all.txt "
+                      f"carries {clashes or 'no entry'} — align the sibling "
+                      "providers' manifests on one version of the package"
+                  )
+              sys.exit(1)
+          REQCHECK
+          fi
+
           # Regenerate the Lokalise English source (translations/en.json) from the
           # synced strings.json so upstream's build_translations_source pre-commit
           # hook finds no diff. Without this, the provider's strings.json reaches
