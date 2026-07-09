@@ -2180,9 +2180,7 @@ class YandexMusicProvider(MusicProvider):
             raise MediaNotFoundError(f"Podcast {prov_podcast_id} not found")
         return parse_podcast(self, album)
 
-    async def get_podcast_episodes(
-        self, prov_podcast_id: str
-    ) -> AsyncGenerator[PodcastEpisode, None]:
+    async def get_podcast_episodes(self, prov_podcast_id: str) -> AsyncGenerator[PodcastEpisode]:
         """Iterate podcast episodes for a given podcast (album) ID."""
         album = await self.client.get_album_with_tracks(prov_podcast_id)
         if not album:
@@ -3171,7 +3169,7 @@ class YandexMusicProvider(MusicProvider):
 
     # Library methods
 
-    async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
+    async def get_library_artists(self) -> AsyncGenerator[Artist]:
         """Retrieve library artists from Yandex Music."""
         artists = await self.client.get_liked_artists()
         for artist in artists:
@@ -3215,7 +3213,7 @@ class YandexMusicProvider(MusicProvider):
             except InvalidDataError as err:
                 self.logger.debug("Error parsing library album: %s", err)
 
-    async def get_library_podcasts(self) -> AsyncGenerator[Podcast, None]:
+    async def get_library_podcasts(self) -> AsyncGenerator[Podcast]:
         """Retrieve library podcasts from Yandex Music (filtered liked albums)."""
         for album in await self._get_liked_albums_cached():
             if classify_album(album) != "podcast":
@@ -3225,7 +3223,7 @@ class YandexMusicProvider(MusicProvider):
             except InvalidDataError as err:
                 self.logger.debug("Error parsing library podcast: %s", err)
 
-    async def get_library_audiobooks(self) -> AsyncGenerator[Audiobook, None]:
+    async def get_library_audiobooks(self) -> AsyncGenerator[Audiobook]:
         """Retrieve library audiobooks from Yandex Music (filtered liked albums)."""
         for album in await self._get_liked_albums_cached():
             if classify_album(album) != "audiobook":
@@ -3235,7 +3233,7 @@ class YandexMusicProvider(MusicProvider):
             except InvalidDataError as err:
                 self.logger.debug("Error parsing library audiobook: %s", err)
 
-    async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
+    async def get_library_tracks(self) -> AsyncGenerator[Track]:
         """Retrieve library tracks from Yandex Music."""
         track_shorts = await self.client.get_liked_tracks()
         if not track_shorts:
