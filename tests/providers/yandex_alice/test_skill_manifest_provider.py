@@ -1,4 +1,4 @@
-# ruff: noqa: D101, D102, D103, PT018
+# ruff: noqa: D101, D102, D103, PT018, PLC0415
 # mypy: disable-error-code="union-attr"
 """Unit tests for ``provider.skill_manifest_provider``.
 
@@ -464,7 +464,7 @@ class TestResolvedCache:
         second = provider.manifest()
         assert first is second
         # Touch the file with a fresh mtime — cache must invalidate.
-        import os as _os  # noqa: PLC0415
+        import os as _os
 
         st = provider.override_path.stat()
         _os.utime(provider.override_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
@@ -522,11 +522,11 @@ class TestBundledResourceLookup:
 
     def test_no_hardcoded_package_string_literal(self) -> None:
         # Static guard: source must not contain the legacy literal.
-        from music_assistant.providers.yandex_alice import skill_manifest_provider as smp  # noqa: PLC0415
+        from music_assistant.providers.yandex_alice import skill_manifest_provider as smp
 
         source = Path(smp.__file__).read_text(encoding="utf-8")
         assert '"music_assistant.providers.yandex_alice.data"' not in source
-        assert "'provider.data'" not in source
+        assert "'music_assistant.providers.yandex_alice.data'" not in source
 
 
 class TestAtomicWrite:

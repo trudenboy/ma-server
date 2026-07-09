@@ -8,7 +8,7 @@
         "[AlexxIT/YandexDialogs](https://github.com/AlexxIT/YandexDialogs)"
     ],
     "requirements": [
-        "ya-passport-auth==1.4.1",
+        "ya-passport-auth[ma]==1.6.0",
         "ya-dialogs-api==2.4.0"
     ],
     "documentation": "https://github.com/trudenboy/ma-provider-yandex-alice",

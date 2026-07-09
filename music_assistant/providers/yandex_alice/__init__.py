@@ -181,7 +181,7 @@ def _build_diagnostics_entries(
     if plugin is None or not isinstance(plugin, YandexAlicePlugin):
         return ()
 
-    stats = plugin.get_diagnostics()
+    stats = plugin.diagnostics_snapshot()
     handler_active = bool(stats.get("handler_active"))
     if not handler_active:
         return (

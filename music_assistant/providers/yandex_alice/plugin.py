@@ -77,9 +77,8 @@ class YandexAlicePlugin(PluginProvider):
             self._dialogs_handler.unregister_routes()
             self._dialogs_handler = None
 
-    # MA may call into the provider for diagnostics; keep a noop attribute hook.
-    def get_diagnostics(self) -> dict[str, Any]:
-        """Expose a tiny status snapshot for MA diagnostics."""
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        """Expose a tiny status snapshot for the config UI (synchronous)."""
         handler = self._dialogs_handler
         webhook_calls_total = handler.webhook_call_count if handler else 0
         authenticated_calls_total = handler.authenticated_call_count if handler else 0
@@ -96,3 +95,7 @@ class YandexAlicePlugin(PluginProvider):
             "authenticated_calls_total": authenticated_calls_total,
             "last_webhook_ts": last_webhook_ts,
         }
+
+    async def get_diagnostics(self) -> dict[str, Any] | None:
+        """Return diagnostics info for MA diagnostics reports."""
+        return self.diagnostics_snapshot()
