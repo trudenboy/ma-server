@@ -53,6 +53,11 @@ CONF_ACTION_AUTO_CREATE_DIALOG = "auto_create_dialog_skill"
 # delete-skill into four explicit user-facing actions instead of
 # overloading one button.
 CONF_ACTION_SIGN_IN = "sign_in"
+
+# Yandex account source: instance_id of a linked yandex_music provider to
+# borrow the x_token from, or the shared "__own__" sentinel for this
+# plugin's own sign-in (key name matches the other yandex providers).
+CONF_YM_INSTANCE = "ym_instance"
 CONF_ACTION_CLEAR_AUTH = "clear_auth"
 CONF_ACTION_DELETE_SKILL = "delete_skill"
 # v1.2.0 — manual "Refresh status" trigger in Step 3. The dispatcher

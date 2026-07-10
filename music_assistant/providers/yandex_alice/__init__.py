@@ -32,6 +32,11 @@ from ya_dialogs_api import (
     dump_artifacts,
     load_artifacts,
 )
+from ya_passport_auth.ma import (
+    BORROW_SOURCE_OWN,
+    BorrowedCredentialSource,
+    list_yandex_music_instances,
+)
 
 from .auth_page import perform_device_auth
 from .auto_create import (
@@ -81,6 +86,7 @@ from .constants import (
     CONF_PENDING_DUPLICATE_SKILL_ID,
     CONF_PENDING_DUPLICATE_SKILL_NAME,
     CONF_USE_DIFFERENT_INSTANCE_NAME,
+    CONF_YM_INSTANCE,
     DIALOG_DEFAULT_NAME,
     DIALOG_VOICE_DEFAULT,
 )
@@ -344,6 +350,39 @@ async def get_config_entries(  # noqa: PLR0915
         _resolve_saved_value(values, CONF_DIALOG_AUTO_CREATE_ARTIFACTS) or None
     )
     cached_x_token = _resolve_secure_string_from(saved_provider, values, CONF_AUTH_X_TOKEN)
+
+    # ---- Yandex account source (borrow from a linked yandex_music) ----
+    # A stale selection (instance removed) normalizes back to own so the
+    # sign-in block reappears. While borrowing, the linked instance's
+    # x_token feeds the pipeline read-only: it is never written into this
+    # plugin's own auth_x_token storage and never rotated here.
+    ym_instances = list_yandex_music_instances(mass)
+    borrow_selected = str(values.get(CONF_YM_INSTANCE) or BORROW_SOURCE_OWN)
+    if borrow_selected != BORROW_SOURCE_OWN and borrow_selected not in {
+        inst_id for inst_id, _ in ym_instances
+    }:
+        borrow_selected = BORROW_SOURCE_OWN
+        values[CONF_YM_INSTANCE] = BORROW_SOURCE_OWN
+    borrowing = borrow_selected != BORROW_SOURCE_OWN
+    borrow_error: str | None = None
+    if borrowing:
+        cached_x_token = ""
+        try:
+            _, borrowed_x = BorrowedCredentialSource(mass, borrow_selected).read_tokens()
+        except Exception as exc:
+            borrow_error = str(exc)
+        else:
+            if borrowed_x is None:
+                borrow_error = (
+                    "The linked Yandex Music instance has no session token. "
+                    "Authenticate it (with Remember session enabled) first."
+                )
+            else:
+                cached_x_token = borrowed_x.get_secret()
+    borrow_options = [
+        *(ConfigValueOption(inst_id, f"Yandex Music: {name}") for inst_id, name in ym_instances),
+        ConfigValueOption(BORROW_SOURCE_OWN, "Use own credentials (default)"),
+    ]
     skill_token_value = _resolve_secure_string_from(saved_provider, values, CONF_DIALOG_SKILL_TOKEN)
     # Carried across renders unless a deploy-related action below
     # overrides it via a snapshot fetch (or DELETE_SKILL clears it).
@@ -371,6 +410,8 @@ async def get_config_entries(  # noqa: PLR0915
     manifest_provider = SkillManifestProvider(mass)
 
     # ---- Action dispatcher ----
+    if action == CONF_ACTION_SIGN_IN and borrowing:
+        action = None  # sign-in is managed by the linked Yandex Music instance
     if action == CONF_ACTION_SIGN_IN:
         # Authorization block: blocking Device Flow with popup.
         # session_id MUST come from values["session_id"] — that's the
@@ -706,7 +747,10 @@ async def get_config_entries(  # noqa: PLR0915
             values[CONF_PENDING_DUPLICATE_SKILL_NAME] = ""
 
     values[CONF_DIALOG_AUTO_CREATE_ARTIFACTS] = dump_artifacts(artifacts)
-    values[CONF_AUTH_X_TOKEN] = cached_x_token
+    # While borrowing, this plugin's own token storage stays empty — the
+    # borrowed x_token must never round-trip into config on Save.
+    own_x_token_value = "" if borrowing else cached_x_token
+    values[CONF_AUTH_X_TOKEN] = own_x_token_value
     if artifacts.state == SkillCreationState.DONE and artifacts.skill_id:
         values[CONF_DIALOG_SKILL_ID] = artifacts.skill_id
 
@@ -811,7 +855,7 @@ async def get_config_entries(  # noqa: PLR0915
             label="Yandex Passport x_token (cached)",
             description="Cached after first successful Device Flow.",
             required=False,
-            value=cached_x_token,
+            value=own_x_token_value,
             hidden=True,
         ),
         ConfigEntry(
@@ -906,6 +950,9 @@ async def get_config_entries(  # noqa: PLR0915
         publication_status=publication_status or None,
         diagnostics=diagnostics_entries,
         manifest_status=manifest_status,
+        borrow_options=borrow_options,
+        borrow_selected=borrow_selected,
+        borrow_error=borrow_error,
         manifest_paste=manifest_paste,
         manifest_message=manifest_message,
         hidden_state=hidden_state_entries,

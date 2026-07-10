@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType
 from ya_dialogs_api import SkillCreationArtifacts, SkillCreationState
+from ya_passport_auth.ma import BORROW_SOURCE_OWN
 
 from .auto_create import AutoCreateOutcome, LocalAutoCreateStage
 from .constants import (
@@ -76,6 +77,7 @@ from .constants import (
     CONF_EXTERNAL_BASE_URL,
     CONF_INSTANCE_NAME,
     CONF_USE_DIFFERENT_INSTANCE_NAME,
+    CONF_YM_INSTANCE,
     DIALOG_DEFAULT_NAME,
     DIALOG_VOICE_DEFAULT,
     DIALOG_VOICE_OPTIONS,
@@ -193,11 +195,53 @@ def _stamp(entries: Iterable[ConfigEntry], category: str) -> tuple[ConfigEntry, 
 
 
 def _authorization_block(
-    *, signed_in: bool, user_name: str, last_error: str | None
+    *,
+    signed_in: bool,
+    user_name: str,
+    last_error: str | None,
+    borrow_options: list[ConfigValueOption],
+    borrow_selected: str,
+    borrow_error: str | None,
 ) -> tuple[ConfigEntry, ...]:
-    """Sign-in CTA or signed-in banner + Sign out."""
+    """Account-source dropdown plus sign-in CTA / signed-in banner / borrow label."""
+    source_entry = ConfigEntry(
+        key=CONF_YM_INSTANCE,
+        type=ConfigEntryType.STRING,
+        label="Yandex account source",
+        description=(
+            "Borrow the Yandex account of a configured Yandex Music "
+            "provider (single sign-in for the whole household) or use "
+            "this plugin's own sign-in."
+        ),
+        options=borrow_options,
+        default_value=borrow_selected,
+        required=False,
+    )
+    if borrow_selected and borrow_selected != BORROW_SOURCE_OWN:
+        borrowed: list[ConfigEntry] = [source_entry]
+        if borrow_error:
+            borrowed.append(
+                ConfigEntry(
+                    key="label_auth_borrow_error",
+                    type=ConfigEntryType.ALERT,
+                    label=f"❌ {borrow_error}",
+                )
+            )
+        borrowed.append(
+            ConfigEntry(
+                key="label_auth_borrowed",
+                type=ConfigEntryType.LABEL,
+                label=(
+                    "Using the Yandex account of the linked Yandex Music "
+                    "provider. Sign-in is managed there; nothing is stored "
+                    "or rotated by this plugin."
+                ),
+            )
+        )
+        return tuple(borrowed)
     if signed_in:
         return (
+            source_entry,
             ConfigEntry(
                 key="label_auth_status",
                 type=ConfigEntryType.LABEL,
@@ -219,7 +263,7 @@ def _authorization_block(
             ),
         )
 
-    entries: list[ConfigEntry] = []
+    entries: list[ConfigEntry] = [source_entry]
     if last_error:
         entries.append(
             ConfigEntry(
@@ -1219,6 +1263,9 @@ def build_form_entries(  # noqa: PLR0913
     manifest_paste: str,
     manifest_message: str | None,
     hidden_state: tuple[ConfigEntry, ...],
+    borrow_options: list[ConfigValueOption],
+    borrow_selected: str,
+    borrow_error: str | None,
 ) -> tuple[ConfigEntry, ...]:
     """Compose Authorization + Skill + Settings + hidden state."""
     auth = _stamp(
@@ -1226,6 +1273,9 @@ def build_form_entries(  # noqa: PLR0913
             signed_in=cached_x_token_present,
             user_name=user_name,
             last_error=last_error,
+            borrow_options=borrow_options,
+            borrow_selected=borrow_selected,
+            borrow_error=borrow_error,
         ),
         CATEGORY_AUTHORIZATION,
     )
