@@ -38,6 +38,11 @@ from ya_dialogs_api import (
     load_artifacts,
     load_default_logo_bytes,
 )
+from ya_passport_auth.ma import (
+    BORROW_SOURCE_OWN,
+    BorrowedCredentialSource,
+    list_yandex_music_instances,
+)
 
 from ._smarthome_auto_create import derive_smart_home_urls, resolve_base_url
 from .cloud import get_cloud_otp, register_cloud_instance
@@ -60,6 +65,7 @@ from .constants import (
     CONF_INSTANCE_NAME,
     CONF_SKILL_ID,
     CONF_SKILL_TOKEN,
+    CONF_YM_INSTANCE,
     CONNECTION_TYPE_CLOUD,
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
@@ -238,13 +244,36 @@ async def _run_auto_create_action(
     async def _persist_artifacts(a: SkillCreationArtifacts) -> None:
         values[CONF_AUTO_CREATE_ARTIFACTS] = dump_artifacts(a)
 
-    cached = _resolve_cached_x_token(mass, instance_id, values) or None
-    authenticator = make_authenticator(
-        mass=mass,
-        session_id=session_id,
-        cached_x_token=cached,
-        on_token_obtained=_cache_x_token,
-    )
+    # Yandex account source: borrow the linked yandex_music instance's
+    # x_token read-only (no Device Flow fallback, no persistence into this
+    # provider's config), or run the own cached-token/Device Flow path.
+    ym_selected = str(values.get(CONF_YM_INSTANCE) or BORROW_SOURCE_OWN)
+    borrowing = ym_selected != BORROW_SOURCE_OWN
+    if borrowing:
+        try:
+            _, borrowed_x = BorrowedCredentialSource(mass, ym_selected).read_tokens()
+        except Exception as exc:
+            new_artifacts = dataclasses.replace(
+                artifacts, state=SkillCreationState.FAILED, last_error=str(exc)
+            )
+            values[CONF_AUTO_CREATE_ARTIFACTS] = dump_artifacts(new_artifacts)
+            _LOGGER.warning("auto-create borrow source unavailable: %s", exc)
+            return
+        authenticator = make_authenticator(
+            mass=mass,
+            session_id=session_id,
+            cached_x_token=borrowed_x.get_secret() if borrowed_x else None,
+            on_token_obtained=None,
+            allow_device_flow=False,
+        )
+    else:
+        cached = _resolve_cached_x_token(mass, instance_id, values) or None
+        authenticator = make_authenticator(
+            mass=mass,
+            session_id=session_id,
+            cached_x_token=cached,
+            on_token_obtained=_cache_x_token,
+        )
 
     try:
         new_artifacts = await auto_create_skill(
@@ -358,6 +387,16 @@ async def get_config_entries(
     if values is None:
         values = {}
 
+    # Yandex account source: normalize a stale selection back to own so
+    # the auto-create flow doesn't chase a removed instance.
+    ym_instances = list_yandex_music_instances(mass)
+    ym_selected = str(values.get(CONF_YM_INSTANCE) or BORROW_SOURCE_OWN)
+    if ym_selected != BORROW_SOURCE_OWN and ym_selected not in {
+        inst_id for inst_id, _ in ym_instances
+    }:
+        ym_selected = BORROW_SOURCE_OWN
+        values[CONF_YM_INSTANCE] = BORROW_SOURCE_OWN
+
     connection_type = str(values.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_CLOUD))
     is_cloud = connection_type == CONNECTION_TYPE_CLOUD
     is_cloud_plus = connection_type == CONNECTION_TYPE_CLOUD_PLUS
@@ -439,7 +478,7 @@ async def get_config_entries(
     elif is_direct:
         entries.extend(_direct_mode_entries(mass, instance_id, values, artifacts, skill_token_set))
 
-    entries.extend(_common_tail_entries(player_options, playlist_options, values))
+    entries.extend(_common_tail_entries(player_options, playlist_options, values, ym_instances))
     return tuple(entries)
 
 
@@ -819,6 +858,7 @@ def _common_tail_entries(
     player_options: list[ConfigValueOption],
     playlist_options: list[ConfigValueOption],
     values: dict[str, ConfigValueType],
+    ym_instances: list[tuple[str, str]],
 ) -> list[ConfigEntry]:
     """Player filter + hidden round-trip fields shared by every mode."""
     return [
@@ -901,6 +941,26 @@ def _common_tail_entries(
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_AUTO_CREATE_SESSION_ID)) if values else None),
+        ),
+        ConfigEntry(
+            key=CONF_YM_INSTANCE,
+            type=ConfigEntryType.STRING,
+            label="Yandex account source",
+            description=(
+                "Borrow the Yandex account of a configured Yandex Music "
+                "provider for skill auto-create (single sign-in, no Device "
+                "Flow popup) or use this provider's own sign-in. When "
+                "borrowing, nothing is stored or rotated by this provider."
+            ),
+            options=[
+                *(
+                    ConfigValueOption(inst_id, f"Yandex Music: {name}")
+                    for inst_id, name in ym_instances
+                ),
+                ConfigValueOption(BORROW_SOURCE_OWN, "Use own credentials (default)"),
+            ],
+            default_value=BORROW_SOURCE_OWN,
+            required=False,
         ),
         # Cached Yandex Passport x_token — populated after the first
         # successful auto-create Device Flow and reused on subsequent

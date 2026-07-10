@@ -36,6 +36,11 @@ CONF_ACTION_REGISTER = "register_cloud"
 CONF_ACTION_GET_OTP = "get_otp"
 CONF_ACTION_AUTO_CREATE = "auto_create_skill"
 
+# Yandex account source: instance_id of a linked yandex_music provider to
+# borrow the x_token from, or the shared "__own__" sentinel for this
+# provider's own Device Flow (key name matches the other yandex providers).
+CONF_YM_INSTANCE = "ym_instance"
+
 # ---------------------------------------------------------------------------
 # Connection types
 # ---------------------------------------------------------------------------

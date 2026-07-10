@@ -54,6 +54,7 @@ def make_authenticator(
     timeout: float = DEVICE_FLOW_TIMEOUT_SECONDS,
     cached_x_token: str | None = None,
     on_token_obtained: Callable[[str], None] | None = None,
+    allow_device_flow: bool = True,
 ) -> AuthenticatorCM:
     """Build an :data:`AuthenticatorCM` for ``ya_dialogs_api.auto_create_skill``.
 
@@ -83,6 +84,11 @@ def make_authenticator(
         ``x_token`` (plain ``str``, unwrapped from ``SecretStr``)
         after a successful Device Flow. Use to persist into MA config
         so the next run can use the cache.
+    :param allow_device_flow: When False (borrowed credentials from a
+        linked Yandex Music instance), a missing or rejected
+        ``cached_x_token`` raises ``LoginFailed`` with re-authentication
+        guidance instead of falling back to a Device Flow — a fallback
+        would create the second token family borrow mode exists to avoid.
     :raises ValueError: ``session_id`` doesn't match the safe
         character set.
     """
@@ -116,11 +122,28 @@ def make_authenticator(
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    if not allow_device_flow:
+                        from music_assistant_models.errors import LoginFailed  # noqa: PLC0415
+
+                        raise LoginFailed(
+                            "The linked Yandex Music account's session token was "
+                            "rejected by Yandex. Re-authenticate the Yandex Music "
+                            "provider and retry."
+                        ) from exc
                     _LOGGER.info(
                         "auto-skill: cached x_token rejected (%s) — "
                         "falling back to fresh Device Flow",
                         exc,
                     )
+
+            if not allow_device_flow:
+                from music_assistant_models.errors import LoginFailed  # noqa: PLC0415
+
+                raise LoginFailed(
+                    "The linked Yandex Music account has no session token. "
+                    "Authenticate the Yandex Music provider (with Remember "
+                    "session enabled) and retry."
+                )
 
             # Device Flow via the shared layer: it hosts the activation page
             # under /yandex_smarthome/device_code/<session_id>, opens the
