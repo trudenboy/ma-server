@@ -69,7 +69,6 @@ from .constants import (
     CONNECTION_TYPE_CLOUD,
     CONNECTION_TYPE_CLOUD_PLUS,
     CONNECTION_TYPE_DIRECT,
-    MAX_INPUT_SOURCES,
     YANDEX_OAUTH_URL,
 )
 from .ma_authenticator import make_authenticator
@@ -429,38 +428,22 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_INSTANCE_NAME,
             type=ConfigEntryType.STRING,
-            label="Instance Name",
-            description=(
-                "Display name for this MA instance in Yandex Smart Home. "
-                "Alice will use this name for voice commands like "
-                '"Алиса, поставь паузу на [имя]".'
-            ),
             required=False,
             default_value="Music Assistant",
         ),
         ConfigEntry(
             key="label_connection_type_notice",
             type=ConfigEntryType.LABEL,
-            label=(
-                "💡 After changing Connection Type below, click Save and "
-                "reopen this settings page to see the fields for the new mode."
-            ),
         ),
         ConfigEntry(
             key=CONF_CONNECTION_TYPE,
             type=ConfigEntryType.STRING,
-            label="Connection Type",
-            description=(
-                '"cloud" — public Yaha Cloud skill (simple setup). '
-                '"cloud_plus" — private skill via cloud relay (for multi-platform setups). '
-                '"direct" — Yandex calls your MA server directly (requires public HTTPS URL).'
-            ),
             required=False,
             default_value=CONNECTION_TYPE_CLOUD,
             options=[
-                ConfigValueOption(title="Cloud (public Yaha Cloud skill)", value="cloud"),
-                ConfigValueOption(title="Cloud Plus (private skill)", value="cloud_plus"),
-                ConfigValueOption(title="Direct (no relay, requires public URL)", value="direct"),
+                ConfigValueOption("cloud"),
+                ConfigValueOption("cloud_plus"),
+                ConfigValueOption("direct"),
             ],
         ),
     ]
@@ -576,14 +559,6 @@ def _auto_create_entries(
         ConfigEntry(
             key=CONF_ACTION_AUTO_CREATE,
             type=ConfigEntryType.ACTION,
-            label="Auto-create Smart Home skill",
-            description=(
-                "Sign in via Yandex Passport (Device Flow) and provision the "
-                "skill at dialogs.yandex.ru programmatically. The skill_id "
-                "field below populates on success. After creation you still "
-                "need to paste the skill OAuth token from the dev console "
-                "(see https://yandex.ru/dev/dialogs/smart-home/doc/en/concepts/oauth)."
-            ),
             action=CONF_ACTION_AUTO_CREATE,
             action_label=button_label,
         ),
@@ -598,12 +573,6 @@ def _cloud_mode_entries(
         ConfigEntry(
             key="label_cloud_conflict_warning",
             type=ConfigEntryType.LABEL,
-            label=(
-                "⚠️ If this Yandex account already uses the Yaha Cloud skill "
-                "via Home Assistant or another Music Assistant install, "
-                "pick 'Cloud Plus' above instead — the public skill can "
-                "only be linked to one instance per account."
-            ),
             depends_on=CONF_CONNECTION_TYPE,
             depends_on_value=CONNECTION_TYPE_CLOUD,
         ),
@@ -617,8 +586,6 @@ def _cloud_mode_entries(
         ConfigEntry(
             key="otp_code",
             type=ConfigEntryType.STRING,
-            label="OTP Code",
-            description="Copy this code and enter it in the Yandex app.",
             required=False,
             value=otp_code,
             hidden=not otp_code,
@@ -628,19 +595,13 @@ def _cloud_mode_entries(
         ConfigEntry(
             key=CONF_ACTION_REGISTER,
             type=ConfigEntryType.ACTION,
-            label="Register cloud instance",
-            description="Register a new instance on yaha-cloud.ru relay service.",
             action=CONF_ACTION_REGISTER,
-            action_label="Register with cloud",
             hidden=is_registered,
         ),
         ConfigEntry(
             key=CONF_ACTION_GET_OTP,
             type=ConfigEntryType.ACTION,
-            label="Get OTP code",
-            description="Get a fresh one-time password to link with Yandex Smart Home app.",
             action=CONF_ACTION_GET_OTP,
-            action_label="Get OTP code",
             hidden=not is_registered,
         ),
     ]
@@ -667,24 +628,12 @@ def _cloud_plus_mode_entries(
         ConfigEntry(
             key="label_cloud_plus_help",
             type=ConfigEntryType.LABEL,
-            label=(
-                "Cloud Plus uses a private skill in your Yandex developer "
-                "account. Steps: 1) Click 'Register with cloud' below to "
-                "provision a yaha-cloud relay slot. 2) Click 'Create Smart "
-                "Home skill' to provision the skill automatically (Device "
-                "Flow login, then automated skill creation), OR create one "
-                "manually at https://dialogs.yandex.ru/developer and paste "
-                "the skill ID + OAuth token below. 3) Click 'Get OTP code' "
-                "and enter it in the Yandex app to finish linking."
-            ),
             depends_on=CONF_CONNECTION_TYPE,
             depends_on_value=CONNECTION_TYPE_CLOUD_PLUS,
         ),
         ConfigEntry(
             key="otp_code_cp",
             type=ConfigEntryType.STRING,
-            label="OTP Code",
-            description="Copy this code and enter it in the Yandex app.",
             required=False,
             value=otp_code,
             hidden=not otp_code,
@@ -694,10 +643,7 @@ def _cloud_plus_mode_entries(
         ConfigEntry(
             key=CONF_ACTION_REGISTER,
             type=ConfigEntryType.ACTION,
-            label="Register cloud instance",
-            description="Provision a yaha-cloud relay slot for the private skill.",
             action=CONF_ACTION_REGISTER,
-            action_label="Register with cloud",
             hidden=is_registered,
         ),
         *_auto_create_entries(
@@ -709,13 +655,6 @@ def _cloud_plus_mode_entries(
         ConfigEntry(
             key=CONF_SKILL_ID,
             type=ConfigEntryType.STRING,
-            label="Skill ID",
-            description=(
-                "UUID from the dev console URL "
-                "(https://dialogs.yandex.ru/developer/skills/<this>). "
-                "Populated automatically after 'Create Smart Home skill' "
-                "succeeds; set manually if you created the skill yourself."
-            ),
             required=False,
             value=cast("str", values.get(CONF_SKILL_ID)) if values else None,
             depends_on=CONF_CONNECTION_TYPE,
@@ -724,15 +663,6 @@ def _cloud_plus_mode_entries(
         ConfigEntry(
             key=CONF_SKILL_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Skill OAuth token",
-            description=(
-                "Click the link icon next to this field to open the Yandex "
-                "OAuth page; approve access for 'Yandex.Dialogs', then copy "
-                "the access_token value from the resulting URL fragment "
-                "(after #access_token=) and paste it here. The token is "
-                "used to push state callbacks back to Yandex when MA "
-                "players change state."
-            ),
             help_link=YANDEX_OAUTH_URL,
             required=False,
             value=cast("str", values.get(CONF_SKILL_TOKEN)) if values else None,
@@ -742,10 +672,7 @@ def _cloud_plus_mode_entries(
         ConfigEntry(
             key=CONF_ACTION_GET_OTP,
             type=ConfigEntryType.ACTION,
-            label="Get OTP code",
-            description="Get a fresh one-time password to link with the Yandex Smart Home app.",
             action=CONF_ACTION_GET_OTP,
-            action_label="Get OTP code",
             hidden=not is_registered,
         ),
     ]
@@ -780,23 +707,12 @@ def _direct_mode_entries(
         ConfigEntry(
             key="label_direct_help",
             type=ConfigEntryType.LABEL,
-            label=(
-                "Direct mode points Yandex straight at this MA instance. "
-                "Steps: 1) Set the External Base URL below to a public HTTPS "
-                "URL (Yandex requires HTTPS). 2) Click 'Create Smart Home "
-                "skill' to provision the skill automatically (Device Flow "
-                "login, then automated skill creation), OR create one "
-                "manually at https://dialogs.yandex.ru/developer with the "
-                "Backend URL shown after first save. 3) Paste the OAuth "
-                "token from the dev console below."
-            ),
             depends_on=CONF_CONNECTION_TYPE,
             depends_on_value=CONNECTION_TYPE_DIRECT,
         ),
         ConfigEntry(
             key=CONF_EXTERNAL_BASE_URL,
             type=ConfigEntryType.STRING,
-            label="External Base URL (HTTPS, optional override)",
             description=external_url_description,
             required=False,
             default_value="",
@@ -813,12 +729,6 @@ def _direct_mode_entries(
         ConfigEntry(
             key=CONF_SKILL_ID,
             type=ConfigEntryType.STRING,
-            label="Skill ID",
-            description=(
-                "UUID from your skill's dev console URL. Populated "
-                "automatically after 'Create Smart Home skill' succeeds; "
-                "set manually if you created the skill yourself."
-            ),
             required=False,
             value=cast("str", values.get(CONF_SKILL_ID)) if values else None,
             depends_on=CONF_CONNECTION_TYPE,
@@ -827,15 +737,6 @@ def _direct_mode_entries(
         ConfigEntry(
             key=CONF_SKILL_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Skill OAuth token",
-            description=(
-                "Click the link icon next to this field to open the Yandex "
-                "OAuth page; approve access for 'Yandex.Dialogs', then copy "
-                "the access_token value from the resulting URL fragment "
-                "(after #access_token=) and paste it here. The token is "
-                "used to push state callbacks back to Yandex when MA "
-                "players change state."
-            ),
             help_link=YANDEX_OAUTH_URL,
             required=False,
             value=cast("str", values.get(CONF_SKILL_TOKEN)) if values else None,
@@ -846,7 +747,6 @@ def _direct_mode_entries(
         ConfigEntry(
             key=CONF_DIRECT_CLIENT_SECRET,
             type=ConfigEntryType.SECURE_STRING,
-            label="Direct client secret (internal)",
             hidden=True,
             required=False,
             value=direct_secret,
@@ -865,11 +765,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_EXPOSED_PLAYERS,
             type=ConfigEntryType.STRING,
-            label="Exposed Players",
-            description=(
-                "Select which MA players to expose to Yandex Smart Home. "
-                "Leave empty to expose all players."
-            ),
             required=False,
             multi_value=True,
             default_value=[],
@@ -878,14 +773,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_EXPOSED_PLAYLISTS,
             type=ConfigEntryType.STRING,
-            label=f"Exposed Playlists (max {MAX_INPUT_SOURCES})",
-            description=(
-                f"Pick up to {MAX_INPUT_SOURCES} playlists from your MA library — "
-                "they fill the input_source mode slots after each player's native "
-                'sources. Alice triggers slots by ordinal only ("switch source to five"); '
-                "remember the order you picked. If the list is empty, save the form "
-                "and reopen it once your music providers have finished loading their library."
-            ),
             required=False,
             multi_value=True,
             default_value=[],
@@ -894,7 +781,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_CLOUD_INSTANCE_ID,
             type=ConfigEntryType.STRING,
-            label="Cloud Instance ID",
             hidden=True,
             required=False,
             value=cast("str", values.get(CONF_CLOUD_INSTANCE_ID)) if values else None,
@@ -902,7 +788,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_CLOUD_INSTANCE_PASSWORD,
             type=ConfigEntryType.SECURE_STRING,
-            label="Cloud Instance Password",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_CLOUD_INSTANCE_PASSWORD)) if values else None),
@@ -910,7 +795,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_CLOUD_CONNECTION_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Cloud Connection Token",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_CLOUD_CONNECTION_TOKEN)) if values else None),
@@ -918,7 +802,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_DIRECT_ACCESS_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Direct Access Token",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_DIRECT_ACCESS_TOKEN)) if values else None),
@@ -929,7 +812,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_AUTO_CREATE_ARTIFACTS,
             type=ConfigEntryType.STRING,
-            label="Auto-create artifacts (internal)",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_AUTO_CREATE_ARTIFACTS)) if values else None),
@@ -937,7 +819,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_AUTO_CREATE_SESSION_ID,
             type=ConfigEntryType.STRING,
-            label="Auto-create session id (internal)",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_AUTO_CREATE_SESSION_ID)) if values else None),
@@ -945,13 +826,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_YM_INSTANCE,
             type=ConfigEntryType.STRING,
-            label="Yandex account source",
-            description=(
-                "Borrow the Yandex account of a configured Yandex Music "
-                "provider for skill auto-create (single sign-in, no Device "
-                "Flow popup) or use this provider's own sign-in. When "
-                "borrowing, nothing is stored or rotated by this provider."
-            ),
             options=[
                 *(
                     ConfigValueOption(inst_id, f"Yandex Music: {name}")
@@ -968,7 +842,6 @@ def _common_tail_entries(
         ConfigEntry(
             key=CONF_AUTH_X_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Yandex Passport x_token (cached)",
             hidden=True,
             required=False,
             value=(cast("str", values.get(CONF_AUTH_X_TOKEN)) if values else None),

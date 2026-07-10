@@ -15,10 +15,18 @@ packages:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 import pytest
 from ya_passport_auth.ma import DevicePageConfig, build_device_code_page
 
 from music_assistant.providers.yandex_smarthome.ma_authenticator import make_authenticator
+
+if TYPE_CHECKING:
+    from music_assistant.mass import MusicAssistant
+
+# The factory only validates its arguments here; no real MA instance is needed.
+_NO_MASS = cast("MusicAssistant", None)
 
 _PAGE = DevicePageConfig(domain="yandex_smarthome")
 
@@ -40,13 +48,13 @@ class TestSessionIdValidation:
         """Letters, digits, dashes, underscores, len <= 64 are allowed."""
         # Should not raise; we discard the returned factory.
         make_authenticator(
-            mass=None,
+            mass=_NO_MASS,
             session_id="abc-123_DEF",
         )
 
     def test_max_length_accepted(self) -> None:
         """64-character ids are at the inclusive upper bound."""
-        make_authenticator(mass=None, session_id="a" * 64)
+        make_authenticator(mass=_NO_MASS, session_id="a" * 64)
 
     @pytest.mark.parametrize(
         "bad",
@@ -66,7 +74,7 @@ class TestSessionIdValidation:
     def test_unsafe_ids_rejected(self, bad: str) -> None:
         """Anything with metacharacters or out-of-bounds length is rejected."""
         with pytest.raises(ValueError, match="invalid session_id"):
-            make_authenticator(mass=None, session_id=bad)
+            make_authenticator(mass=_NO_MASS, session_id=bad)
 
 
 class TestBuildDeviceCodePage:

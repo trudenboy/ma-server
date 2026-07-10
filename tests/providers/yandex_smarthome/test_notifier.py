@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -18,6 +18,9 @@ from music_assistant.providers.yandex_smarthome.notifier import (
     StateNotifier,
     _CallbackErrorAlreadyLogged,
 )
+
+if TYPE_CHECKING:
+    from music_assistant_models.event import MassEvent
 
 
 @dataclass
@@ -51,6 +54,11 @@ class MockEvent:
 
     event: str
     data: Any = None
+
+
+def _event(event: str, data: Any = None) -> MassEvent:
+    """Build a MockEvent viewed through the real MassEvent type."""
+    return cast("MassEvent", MockEvent(event=event, data=data))
 
 
 def _make_mass(players: list[MockPlayer] | None = None) -> MagicMock:
@@ -139,7 +147,7 @@ class TestStateNotifierLifecycle:
         notifier = _make_notifier(mass=mass)
 
         await notifier.start()
-        unsub = notifier._unsub
+        unsub = cast("MagicMock", notifier._unsub)
         await notifier.stop()
 
         unsub.assert_called_once()
@@ -163,7 +171,7 @@ class TestStateNotifierEvents:
         notifier = _make_notifier(mass=mass)
 
         player = MockPlayer(player_id="p1", playback_state=PlaybackState.PLAYING)
-        event = MockEvent(event=EventType.PLAYER_UPDATED, data=player)
+        event = _event(event=EventType.PLAYER_UPDATED, data=player)
 
         notifier._on_player_event(event)
 
@@ -175,7 +183,7 @@ class TestStateNotifierEvents:
         notifier = _make_notifier(mass=mass)
 
         player = MockPlayer(player_id="p1", available=False)
-        event = MockEvent(event=EventType.PLAYER_UPDATED, data=player)
+        event = _event(event=EventType.PLAYER_UPDATED, data=player)
 
         notifier._on_player_event(event)
 
@@ -186,7 +194,7 @@ class TestStateNotifierEvents:
         mass = _make_mass()
         notifier = _make_notifier(mass=mass)
 
-        event = MockEvent(event=EventType.PLAYER_ADDED, data=MockPlayer())
+        event = _event(event=EventType.PLAYER_ADDED, data=MockPlayer())
         notifier._on_player_event(event)
 
         # Discovery triggers create_task
@@ -197,7 +205,7 @@ class TestStateNotifierEvents:
         mass = _make_mass()
         notifier = _make_notifier(mass=mass)
 
-        event = MockEvent(event=EventType.PLAYER_REMOVED, data="p1")
+        event = _event(event=EventType.PLAYER_REMOVED, data="p1")
         notifier._on_player_event(event)
 
         mass.create_task.assert_called()
@@ -207,7 +215,7 @@ class TestStateNotifierEvents:
         mass = _make_mass()
         notifier = _make_notifier(mass=mass)
 
-        event = MockEvent(event=EventType.PLAYER_UPDATED, data=None)
+        event = _event(event=EventType.PLAYER_UPDATED, data=None)
         notifier._on_player_event(event)
 
         assert len(notifier._dirty_player_ids) == 0
@@ -219,7 +227,7 @@ class TestStateNotifierEvents:
         notifier._exposed_ids = {"p2", "p3"}
 
         player = MockPlayer(player_id="p1", playback_state=PlaybackState.PLAYING)
-        event = MockEvent(event=EventType.PLAYER_UPDATED, data=player)
+        event = _event(event=EventType.PLAYER_UPDATED, data=player)
         notifier._on_player_event(event)
 
         assert "p1" not in notifier._dirty_player_ids
@@ -231,7 +239,7 @@ class TestStateNotifierEvents:
         notifier._exposed_ids = {"p1", "p2"}
 
         player = MockPlayer(player_id="p1", playback_state=PlaybackState.PLAYING)
-        event = MockEvent(event=EventType.PLAYER_UPDATED, data=player)
+        event = _event(event=EventType.PLAYER_UPDATED, data=player)
         notifier._on_player_event(event)
 
         assert "p1" in notifier._dirty_player_ids
@@ -242,7 +250,7 @@ class TestStateNotifierEvents:
         notifier = _make_notifier(mass=mass)
 
         child = MockPlayer(player_id="child1", synced_to="grp1")
-        event = MockEvent(event=EventType.PLAYER_UPDATED, data=child)
+        event = _event(event=EventType.PLAYER_UPDATED, data=child)
         notifier._on_player_event(event)
 
         assert "grp1" in notifier._dirty_player_ids
@@ -309,7 +317,7 @@ class TestStateNotifierFlush:
         notifier = _make_notifier(mass=mass, session=session)
 
         # Simulate event with transient volume=0
-        event = MockEvent(event=EventType.PLAYER_UPDATED, data=player_event)
+        event = _event(event=EventType.PLAYER_UPDATED, data=player_event)
         notifier._on_player_event(event)
 
         # Flush should use live player state (volume=75)
