@@ -183,8 +183,7 @@ def _register_logs_tool(sub: FastMCP, mass: MusicAssistant) -> None:
         before: str | None = None,
         name: str = "musicassistant.log",
     ) -> LogTailResult:
-        """
-        Return the last N matching log records with optional filters.
+        """Return the last N matching log records with optional filters.
 
         Multi-line records (tracebacks) are returned whole, and ``lines``
         counts *matching records* — filters apply before the limit, so
@@ -233,8 +232,7 @@ def _register_logs_tool(sub: FastMCP, mass: MusicAssistant) -> None:
         since_seconds: int | None = None,
         name: str = "musicassistant.log",
     ) -> LogStatsResult:
-        """
-        Aggregate view of the log: record counts per level, top components, time range.
+        """Aggregate view of the log: record counts per level, top components, time range.
 
         Use this before ``debug_tail_log`` to scope a problem cheaply — the
         counts show whether (and where) errors exist without spending context

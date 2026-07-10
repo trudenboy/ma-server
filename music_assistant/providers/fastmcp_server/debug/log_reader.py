@@ -139,8 +139,7 @@ class SafeLogTail:
         before: str | None = None,
         name: str = "musicassistant.log",
     ) -> LogTailResult:
-        """
-        Return the last ``lines`` matching records from the named log file.
+        """Return the last ``lines`` matching records from the named log file.
 
         :param lines: Maximum number of matching records to return (clamped to 2000).
         :param level: Minimum severity threshold, case-insensitive (e.g. "warning").
@@ -245,8 +244,7 @@ class SafeLogTail:
         since_seconds: int | None = None,
         name: str = "musicassistant.log",
     ) -> LogStatsResult:
-        """
-        Aggregate the log window: per-level counts, top components, time range.
+        """Aggregate the log window: per-level counts, top components, time range.
 
         :param since_seconds: Restrict to records from the last N seconds.
         :param name: Log file name (must be in ALLOWED set).
@@ -300,8 +298,7 @@ class SafeLogTail:
         )
 
     def count_errors_last_5min(self, *, name: str = "musicassistant.log") -> int:
-        """
-        Count ERROR-and-above entries in the last 5 minutes (used by health_summary).
+        """Count ERROR-and-above entries in the last 5 minutes (used by health_summary).
 
         :param name: Log file name (must be in ALLOWED set).
         """
