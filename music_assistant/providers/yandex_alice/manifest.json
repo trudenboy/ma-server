@@ -12,7 +12,7 @@
         "ya-dialogs-api==2.4.0"
     ],
     "documentation": "https://github.com/trudenboy/ma-provider-yandex-alice",
-    "stage": "beta",
+    "stage": "experimental",
     "multi_instance": false,
     "builtin": false
 }

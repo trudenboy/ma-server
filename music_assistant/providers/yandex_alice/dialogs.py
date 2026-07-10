@@ -327,6 +327,29 @@ class DialogsWebhookHandler:
         """Wall-clock timestamp of the most recent webhook (or None)."""
         return self._last_webhook_ts
 
+    def register_routes(self) -> None:
+        """Register the webhook route on mass.webserver."""
+        path = f"{DIALOG_WEBHOOK_BASE_PATH}/{self._webhook_secret}"
+        redacted = f"{DIALOG_WEBHOOK_BASE_PATH}/...{self._webhook_secret[-4:]}"
+        try:
+            unregister = self._mass.webserver.register_dynamic_route(
+                path, self._handle_webhook, "POST"
+            )
+        except RuntimeError:
+            self._logger.exception("Failed to register Dialogs webhook route %s", redacted)
+            raise
+        self._unregister_callbacks.append(unregister)
+        self._logger.info("Dialogs webhook registered at %s", redacted)
+
+    def unregister_routes(self) -> None:
+        """Unregister the webhook route."""
+        for cb in self._unregister_callbacks:
+            try:
+                cb()
+            except Exception:
+                self._logger.debug("Error unregistering dialog route", exc_info=True)
+        self._unregister_callbacks.clear()
+
     def _cache_key(self, session: dict[str, Any]) -> str | None:
         """Pick the most stable identifier for the in-process state cache.
 
@@ -381,29 +404,6 @@ class DialogsWebhookHandler:
         self._state_cache.move_to_end(key)
         while len(self._state_cache) > _STATE_CACHE_MAX:
             self._state_cache.popitem(last=False)
-
-    def register_routes(self) -> None:
-        """Register the webhook route on mass.webserver."""
-        path = f"{DIALOG_WEBHOOK_BASE_PATH}/{self._webhook_secret}"
-        redacted = f"{DIALOG_WEBHOOK_BASE_PATH}/...{self._webhook_secret[-4:]}"
-        try:
-            unregister = self._mass.webserver.register_dynamic_route(
-                path, self._handle_webhook, "POST"
-            )
-        except RuntimeError:
-            self._logger.exception("Failed to register Dialogs webhook route %s", redacted)
-            raise
-        self._unregister_callbacks.append(unregister)
-        self._logger.info("Dialogs webhook registered at %s", redacted)
-
-    def unregister_routes(self) -> None:
-        """Unregister the webhook route."""
-        for cb in self._unregister_callbacks:
-            try:
-                cb()
-            except Exception:
-                self._logger.debug("Error unregistering dialog route", exc_info=True)
-        self._unregister_callbacks.clear()
 
     # -------------------------------------------------------------------
     # Webhook entry point

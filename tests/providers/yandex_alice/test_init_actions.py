@@ -38,6 +38,8 @@ from music_assistant.providers.yandex_alice.constants import (
     CONF_INSTANCE_NAME,
 )
 
+from .localization import entry_text
+
 
 def _make_mass() -> MagicMock:
     """Build a MagicMock MA with empty player + playlist enumeration.
@@ -453,7 +455,8 @@ class TestDeriveStageRespectsCachedToken:
         entries = await get_config_entries(_make_mass(), values=values)
         keys = _entries_by_key(entries)
         assert CONF_ACTION_SIGN_IN in keys
-        assert keys[CONF_ACTION_SIGN_IN].action_label == "Sign in to Yandex Passport"
+        assert keys[CONF_ACTION_SIGN_IN].action == CONF_ACTION_SIGN_IN
+        assert entry_text(CONF_ACTION_SIGN_IN, "action_label") == "Sign in to Yandex Passport"
 
     @pytest.mark.asyncio
     async def test_intermediate_state_with_token_renders_resume_label(self) -> None:
@@ -469,7 +472,8 @@ class TestDeriveStageRespectsCachedToken:
         entries = await get_config_entries(_make_mass(), values=values)
         keys = _entries_by_key(entries)
         # v1.2.0 #19: PIPELINE_RUNNING button = "Continue setup"
-        assert keys[CONF_ACTION_AUTO_CREATE_DIALOG].action_label == "Continue setup"
+        assert keys[CONF_ACTION_AUTO_CREATE_DIALOG].translation_key == "auto_create_continue"
+        assert entry_text("auto_create_continue", "action_label") == "Continue setup"
 
 
 # v1.2.0 Phase C refactor: the self-resuming Device Flow is gone.

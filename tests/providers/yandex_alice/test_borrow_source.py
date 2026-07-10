@@ -16,6 +16,8 @@ from ya_passport_auth.ma import BORROW_SOURCE_OWN
 from music_assistant.providers.yandex_alice import get_config_entries
 from music_assistant.providers.yandex_alice.constants import CONF_AUTH_X_TOKEN, CONF_YM_INSTANCE
 
+from .localization import entry_text
+
 
 def _make_mass(
     instances: dict[str, str] | None = None,
@@ -57,8 +59,8 @@ async def test_borrowing_hides_sign_in_and_out() -> None:
     by_key = _by_key(entries)
     assert "sign_in" not in by_key
     assert "clear_auth" not in by_key
-    labels = " ".join(str(e.label) for e in entries if e.key.startswith("label_") and e.label)
-    assert "Yandex Music" in labels
+    assert "label_auth_borrowed" in by_key
+    assert "Yandex Music" in entry_text("label_auth_borrowed")
 
 
 async def test_borrowed_token_feeds_actions_and_is_not_persisted() -> None:
@@ -80,8 +82,12 @@ async def test_borrow_source_error_is_rendered_not_raised() -> None:
     mass = _make_mass({"ym-a": "Main"})
     mass.get_provider.return_value = None  # instance not loaded
     entries = await get_config_entries(mass, values={CONF_YM_INSTANCE: "ym-a"})
-    alerts = " ".join(str(e.label) for e in entries if e.type.value == "alert" and e.label)
-    assert "not loaded" in alerts or "Yandex Music" in alerts
+    alerts = [e for e in entries if e.type.value == "alert"]
+    assert alerts
+    # The alert text is a strings.json template; the raw error message
+    # travels through translation_params.
+    params = " ".join(p for e in alerts for p in (getattr(e, "translation_params", None) or []))
+    assert "not loaded" in params or "Yandex Music" in params
 
 
 async def test_stale_selection_normalizes_to_own() -> None:

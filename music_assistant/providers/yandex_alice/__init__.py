@@ -194,12 +194,6 @@ def _build_diagnostics_entries(
             ConfigEntry(
                 key="label_diagnostics_inactive",
                 type=ConfigEntryType.LABEL,
-                label=(
-                    "Diagnostics: webhook handler not active — "
-                    "skill_id or webhook_secret missing in saved config. "
-                    "Run Create skill to register a new skill, or paste an "
-                    "existing skill_id + secret in Advanced."
-                ),
                 advanced=True,
             ),
         )
@@ -379,9 +373,12 @@ async def get_config_entries(  # noqa: PLR0915
                 )
             else:
                 cached_x_token = borrowed_x.get_secret()
+    # The static "own credentials" option title is authored in strings.json
+    # (config_entries.ym_instance.options.__own__); instance titles are
+    # data-driven and stay code-composed.
     borrow_options = [
         *(ConfigValueOption(inst_id, f"Yandex Music: {name}") for inst_id, name in ym_instances),
-        ConfigValueOption(BORROW_SOURCE_OWN, "Use own credentials (default)"),
+        ConfigValueOption(BORROW_SOURCE_OWN),
     ]
     skill_token_value = _resolve_secure_string_from(saved_provider, values, CONF_DIALOG_SKILL_TOKEN)
     # Carried across renders unless a deploy-related action below
@@ -847,13 +844,13 @@ async def get_config_entries(  # noqa: PLR0915
 
     # ---- Hidden state-carrier entries (round-trip persistence) ----
     # Use ``value=`` (not ``default_value=``) so MA frontend round-trips
-    # the actual current state on form Save.
+    # the actual current state on form Save. hidden=True entries never
+    # render, so they carry no label/description (what each key holds is
+    # documented on its CONF_* constant).
     hidden_state_entries = (
         ConfigEntry(
             key=CONF_AUTH_X_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Yandex Passport x_token (cached)",
-            description="Cached after first successful Device Flow.",
             required=False,
             value=own_x_token_value,
             hidden=True,
@@ -861,8 +858,6 @@ async def get_config_entries(  # noqa: PLR0915
         ConfigEntry(
             key=CONF_AUTH_USER_NAME,
             type=ConfigEntryType.STRING,
-            label="Yandex display login (cached)",
-            description="Surfaced as 'Authorized as <login>' banner.",
             required=False,
             value=user_name,
             hidden=True,
@@ -870,8 +865,6 @@ async def get_config_entries(  # noqa: PLR0915
         ConfigEntry(
             key=CONF_DIALOG_AUTO_CREATE_ARTIFACTS,
             type=ConfigEntryType.STRING,
-            label="Auto-create artifacts (JSON)",
-            description="State machine snapshot — persisted between clicks.",
             required=False,
             value=dump_artifacts(artifacts),
             hidden=True,
@@ -879,8 +872,6 @@ async def get_config_entries(  # noqa: PLR0915
         ConfigEntry(
             key=CONF_PENDING_DUPLICATE_SKILL_ID,
             type=ConfigEntryType.STRING,
-            label="Pending duplicate skill_id",
-            description="Persisted when duplicate-name pre-check finds a match.",
             required=False,
             value=duplicate_skill_id,
             hidden=True,
@@ -888,8 +879,6 @@ async def get_config_entries(  # noqa: PLR0915
         ConfigEntry(
             key=CONF_PENDING_DUPLICATE_SKILL_NAME,
             type=ConfigEntryType.STRING,
-            label="Pending duplicate skill name",
-            description="Display name of the duplicate skill (Yandex spelling).",
             required=False,
             value=duplicate_skill_name,
             hidden=True,
@@ -897,8 +886,6 @@ async def get_config_entries(  # noqa: PLR0915
         ConfigEntry(
             key=CONF_EDIT_MODE,
             type=ConfigEntryType.BOOLEAN,
-            label="Edit mode",
-            description="Reveals editable activation phrases / voice fields.",
             required=False,
             value=edit_mode,
             hidden=True,
@@ -906,11 +893,6 @@ async def get_config_entries(  # noqa: PLR0915
         ConfigEntry(
             key=CONF_DIALOG_PUBLICATION_STATUS,
             type=ConfigEntryType.STRING,
-            label="Yandex skill publication status (cached)",
-            description=(
-                "Last known on_air / in_moderation / draft / rejected /"
-                " unknown classification fetched from Yandex snapshot."
-            ),
             required=False,
             value=publication_status,
             hidden=True,
