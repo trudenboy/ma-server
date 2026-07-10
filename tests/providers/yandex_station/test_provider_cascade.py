@@ -63,8 +63,14 @@ class _StubCoreConfig:
         self.updates: list[tuple[str, str, Any, bool]] = []
 
     def set_raw_provider_config_value(
-        self, instance_id: str, key: str, value: Any, encrypted: bool
+        self,
+        instance_id: str,
+        key: str,
+        value: Any,
+        encrypted: bool,
+        immediate: bool = False,
     ) -> None:
+        _ = immediate  # accepted for signature parity with MA core
         self.updates.append((instance_id, key, value, encrypted))
 
 
@@ -97,6 +103,7 @@ def _make_provider(config_values: dict[str, Any]) -> YandexStationProvider:
     provider._discovery_done = False
     provider._init_lock = asyncio.Lock()
     provider._cascade = provider._build_cascade()
+    provider._borrow_source = provider._build_borrow_source()
     return provider
 
 
