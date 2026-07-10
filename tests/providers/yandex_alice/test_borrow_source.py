@@ -19,7 +19,7 @@ from music_assistant.providers.yandex_alice.constants import CONF_AUTH_X_TOKEN, 
 
 def _make_mass(
     instances: dict[str, str] | None = None,
-    owner_x_token: str | None = "test-x-ym",
+    owner_x_token: str | None = "test-x-ym",  # noqa: S107 — test stub, not a secret
 ) -> mock.MagicMock:
     """Mass stub: raw provider list + a loadable yandex_music owner."""
     mass = mock.MagicMock()
@@ -40,6 +40,7 @@ def _by_key(entries: tuple[Any, ...]) -> dict[str, Any]:
 
 
 async def test_dropdown_lists_instances_and_own() -> None:
+    """The account-source dropdown offers every Yandex Music instance plus own credentials."""
     mass = _make_mass({"ym-a": "Main", "ym-b": "Second"})
     entries = await get_config_entries(mass, values={})
     source = _by_key(entries)[CONF_YM_INSTANCE]
@@ -50,6 +51,7 @@ async def test_dropdown_lists_instances_and_own() -> None:
 
 
 async def test_borrowing_hides_sign_in_and_out() -> None:
+    """Borrow mode removes the Sign-in/Sign-out actions and names the source instance."""
     mass = _make_mass({"ym-a": "Main"})
     entries = await get_config_entries(mass, values={CONF_YM_INSTANCE: "ym-a"})
     by_key = _by_key(entries)
@@ -60,6 +62,7 @@ async def test_borrowing_hides_sign_in_and_out() -> None:
 
 
 async def test_borrowed_token_feeds_actions_and_is_not_persisted() -> None:
+    """A borrowed token authorizes the skill block without being stored in own config."""
     mass = _make_mass({"ym-a": "Main"}, owner_x_token="test-x-ym")
     values: dict[str, Any] = {CONF_YM_INSTANCE: "ym-a"}
     entries = await get_config_entries(mass, values=values)
@@ -73,6 +76,7 @@ async def test_borrowed_token_feeds_actions_and_is_not_persisted() -> None:
 
 
 async def test_borrow_source_error_is_rendered_not_raised() -> None:
+    """An unavailable source instance renders an alert instead of raising."""
     mass = _make_mass({"ym-a": "Main"})
     mass.get_provider.return_value = None  # instance not loaded
     entries = await get_config_entries(mass, values={CONF_YM_INSTANCE: "ym-a"})
@@ -81,6 +85,7 @@ async def test_borrow_source_error_is_rendered_not_raised() -> None:
 
 
 async def test_stale_selection_normalizes_to_own() -> None:
+    """A selection pointing at a removed instance falls back to own credentials."""
     mass = _make_mass({"ym-a": "Main"})
     values: dict[str, Any] = {CONF_YM_INSTANCE: "removed-instance"}
     entries = await get_config_entries(mass, values=values)
