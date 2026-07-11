@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import html
 import importlib
 import logging
 import os
@@ -30,6 +31,7 @@ from urllib.parse import urlparse
 
 import chardet
 import ifaddr
+from markdownify import markdownify
 from music_assistant_models.enums import AlbumType, IdentifierType
 from music_assistant_models.errors import SetupFailedError
 from zeroconf import InterfaceChoice, IPVersion
@@ -55,8 +57,6 @@ if TYPE_CHECKING:
 from dataclasses import fields, is_dataclass
 
 LOGGER = logging.getLogger(__name__)
-
-HA_WHEELS = "https://wheels.home-assistant.io/musllinux/"
 
 T = TypeVar("T")
 CALLBACK_TYPE = Callable[[], None]
@@ -459,6 +459,27 @@ german_von_pattern = re.compile(r'^"(?P<title>[^"]+)"\s+von\s+(?P<artist>.+)$', 
 multi_space_pattern = re.compile(r"\s{2,}")
 end_junk_pattern = re.compile(r"(.+?)(\s\W+)$")
 
+# HTML tags worth preserving as markdown; any other tag is stripped (text kept)
+MARKDOWN_SAFE_TAGS = [
+    "a",
+    "b",
+    "blockquote",
+    "br",
+    "em",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "i",
+    "li",
+    "ol",
+    "p",
+    "strong",
+    "ul",
+]
+
 VERSION_PARTS = (
     # list of common version strings
     "version",
@@ -745,6 +766,18 @@ def strip_multi_space(line: str) -> str:
     return multi_space_pattern.sub(" ", line)
 
 
+def html_to_markdown(line: str) -> str:
+    """Convert the safe subset of HTML in a string to markdown, stripping other tags."""
+    # unescape first so entity-encoded markup (e.g. "&lt;p&gt;") is handled too
+    return markdownify(
+        html.unescape(line),
+        convert=MARKDOWN_SAFE_TAGS,
+        escape_asterisks=False,
+        escape_underscores=False,
+        escape_misc=False,
+    ).strip()
+
+
 def multi_strip(line: str) -> str:
     """Strip assorted junk from line."""
     return strip_multi_space(
@@ -849,6 +882,24 @@ async def get_ip_addresses(include_ipv6: bool = False) -> tuple[str, ...]:
         return tuple(ip[1] for ip in result)
 
     return await asyncio.to_thread(call)
+
+
+def interface_name_for_ip(ip: str) -> str | None:
+    """
+    Return the name of the network interface that holds the given IP, or None.
+
+    Used to map a bind/publish IP to its interface name for components that select
+    their mDNS/zeroconf advertisement interface by name (e.g. shairport-sync and
+    go-librespot), so the advertisement stays on the intended network.
+
+    :param ip: The IPv4/IPv6 address to look up.
+    """
+    for adapter in ifaddr.get_adapters():
+        for ip_config in adapter.ips:
+            addr = ip_config.ip if isinstance(ip_config.ip, str) else ip_config.ip[0]
+            if addr == ip:
+                return adapter.name
+    return None
 
 
 async def get_primary_ip_address() -> str | None:
@@ -1019,7 +1070,7 @@ def empty_queue[T](q: asyncio.Queue[T]) -> None:
 async def install_package(package: str) -> None:
     """Install package with pip, raise when install failed."""
     LOGGER.debug("Installing python package %s", package)
-    args = ["uv", "pip", "install", "--no-cache", "--find-links", HA_WHEELS, package]
+    args = ["uv", "pip", "install", "--no-cache", package]
     return_code, output = await check_output(*args)
     if return_code != 0:
         msg = f"Failed to install package {package}\n{output.decode()}"

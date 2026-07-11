@@ -113,6 +113,13 @@ class StreamsController(CoreController):
         """Return whether a queue stream (single item or flow) is actively serving a player."""
         return self._active_output_streams > 0
 
+    async def get_diagnostics(self) -> dict[str, Any]:
+        """Return diagnostics info for this controller to include in diagnostics reports."""
+        return {
+            "active_output_streams": self._active_output_streams,
+            "active_announcements": len(self.announcements),
+        }
+
     @property
     def base_url(self) -> str:
         """Return the base_url for the streamserver."""
