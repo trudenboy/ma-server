@@ -15,7 +15,7 @@ from music_assistant.providers.msx_bridge.player import MSXPlayer
 from music_assistant.providers.msx_bridge.provider import MSXBridgeProvider
 
 
-async def _empty_async_gen() -> AsyncGenerator[Any, None]:
+async def _empty_async_gen() -> AsyncGenerator[Any]:
     """Empty async generator for mocking AsyncGenerator return types."""
     return
     yield  # type: ignore[unreachable]  # pragma: no cover — makes it a generator
@@ -84,6 +84,9 @@ def mass_mock(player_config_mock: Mock) -> Mock:
     # Image URLs
     mass.metadata.get_image_url = Mock(return_value=None)
 
+    # Other providers (e.g. the Party plugin) are absent by default
+    mass.get_provider = Mock(return_value=None)
+
     return mass
 
 
@@ -135,7 +138,7 @@ def player(provider: MSXBridgeProvider) -> MSXPlayer:
 @pytest.fixture
 async def http_client(
     provider: MSXBridgeProvider,
-) -> AsyncGenerator[TestClient[Any, Any], None]:
+) -> AsyncGenerator[TestClient[Any, Any]]:
     """Return an aiohttp TestClient for the MSX HTTP server."""
     server = MSXHTTPServer(provider, 0)
     client = TestClient(TestServer(server.app))
