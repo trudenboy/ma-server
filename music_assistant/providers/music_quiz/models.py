@@ -10,6 +10,8 @@ from mashumaro import DataClassDictMixin, field_options
 from mashumaro.config import BaseConfig
 from mashumaro.types import Discriminator
 
+DEFAULT_TRIVIA_LANGUAGE = "en"
+
 
 class MusicQuizPhase(StrEnum):
     """Music Quiz game phases."""
@@ -59,9 +61,11 @@ class MusicQuizConfig(DataClassDictMixin):
     answer_duration: int = 30
     source_uris: list[str] = field(default_factory=list)
     name: str | None = None
-    # guess-the-song specific; other quiz types ignore these
+    # difficulty is guess-the-song specific; AI distractors also apply to timeline bonuses
     difficulty: str = MusicQuizDifficulty.NORMAL.value
     use_ai_distractors: bool = False
+    # trivia specific; other quiz types ignore this
+    language: str = DEFAULT_TRIVIA_LANGUAGE
     # timeline specific; other answer types ignore these
     artist_bonus_mode: TimelineBonusMode = TimelineBonusMode.OFF
     title_bonus_mode: TimelineBonusMode = TimelineBonusMode.OFF
@@ -354,6 +358,7 @@ class MusicQuizRound(DataClassDictMixin):
     duration: float | None = None
     started_at: float | None = None
     ended_at: float | None = None
+    auto_advance_at: float | None = None
 
     class Config(BaseConfig):
         """Mashumaro configuration."""
@@ -370,6 +375,7 @@ class MusicQuizGame(DataClassDictMixin):
     answer_type: MusicQuizAnswerType
     phase: MusicQuizPhase = MusicQuizPhase.LOBBY
     created_at: float = 0
+    auto_start_at: float | None = None
     players: dict[str, MusicQuizPlayer] = field(default_factory=dict)
     rounds: list[MusicQuizRound] = field(default_factory=list)
     sources: list[MusicQuizSource] = field(default_factory=list)
