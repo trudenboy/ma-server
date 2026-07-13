@@ -6,13 +6,17 @@ import asyncio
 import logging
 import random
 import re
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from music_assistant_models.enums import ProviderFeature
+from music_assistant_models.enums import AlbumType, ProviderFeature
 from music_assistant_models.errors import InvalidDataError
+from music_assistant_models.media_items import Album
 
+from music_assistant.constants import VARIOUS_ARTISTS_MBID, VARIOUS_ARTISTS_NAME
+from music_assistant.helpers.compare import compare_strings
 from music_assistant.helpers.json import (
     JSON_DECODE_EXCEPTIONS,
     SerializableType,
@@ -35,8 +39,8 @@ from music_assistant.providers.music_quiz.quiz_types.base import (
 )
 from music_assistant.providers.music_quiz.suggestions import (
     SuggestionCandidate,
-    answer_labels_are_too_close,
     build_suggestions,
+    filter_suggestion_candidates,
     normalize_answer_label,
 )
 
@@ -56,6 +60,7 @@ MAX_METADATA_VALUE_LENGTH = 500
 MAX_ANSWER_LENGTH = 200
 MAX_QUESTION_LENGTH = 300
 MAX_TRIVIA_LANGUAGE_TAG_LENGTH = 16
+TRIVIA_REVEAL_AUTO_ADVANCE_SECONDS = 15.0
 SYSTEM_RANDOM = random.SystemRandom()
 _LANGUAGE_TAG_PATTERN = re.compile(
     r"(?P<language>[A-Za-z]{2,3})"
@@ -106,7 +111,7 @@ class TriviaQuizType(QuizType):
     """Quiz type with AI-worded questions grounded in selected track metadata."""
 
     answer_type = MusicQuizAnswerType.MULTIPLE_CHOICE
-    uses_audio = False
+    reveal_auto_advance_delay = TRIVIA_REVEAL_AUTO_ADVANCE_SECONDS
 
     def __init__(self, mass: MusicAssistant, config: MusicQuizConfig) -> None:
         """
@@ -117,6 +122,16 @@ class TriviaQuizType(QuizType):
         """
         super().__init__(mass, config)
         self._eligible_tracks: dict[str, TriviaTrackFacts] | None = None
+
+    @property
+    def plays_track_before_answering(self) -> bool:
+        """Return whether Trivia starts a track while players answer."""
+        return False
+
+    @property
+    def plays_track_on_reveal(self) -> bool:
+        """Return whether Trivia plays its grounded track after revealing the answer."""
+        return self.config.play_reveal_audio
 
     @classmethod
     def is_available(cls, mass: MusicAssistant) -> bool:
@@ -185,7 +200,11 @@ class TriviaQuizType(QuizType):
 
         :param game: Game whose configuration should be serialized.
         """
-        return {"language": _normalize_trivia_language(game.config.language)}
+        return {
+            **super().serialize_game_config(game),
+            "language": _normalize_trivia_language(game.config.language),
+            "play_reveal_audio": game.config.play_reveal_audio,
+        }
 
     async def initialize(self) -> None:
         """Validate AI availability and enough grounded content for the complete game."""
@@ -208,7 +227,7 @@ class TriviaQuizType(QuizType):
         :param round_index: Index of the round to prepare.
         :param previous_rounds: Rounds already prepared in earlier iterations.
         :raises InvalidDataError: If round history, source metadata or AI output is unusable.
-        :return: The prepared non-audio Trivia round.
+        :return: The prepared Trivia round.
         """
         if round_index < 0 or round_index >= self.config.round_count:
             raise InvalidDataError("Trivia round index is outside the configured game")
@@ -248,6 +267,7 @@ class TriviaQuizType(QuizType):
             question=generation.question,
             answer_label=fact.correct_answer,
             answer_state=MultipleChoiceRoundState(suggestions=suggestions),
+            track_uri=track_facts.source_uri if self.plays_track_on_reveal else None,
         )
 
     async def _get_eligible_tracks(self) -> dict[str, TriviaTrackFacts]:
@@ -266,6 +286,7 @@ class TriviaQuizType(QuizType):
         prompt = self._build_prompt(fact)
         if len(prompt.encode("utf-8")) > MAX_AI_PROMPT_BYTES:
             raise self._generation_error()
+        grounded_tracks = self._eligible_tracks.values() if self._eligible_tracks else ()
         for provider in self._require_ai_providers():
             for _attempt in range(AI_ATTEMPTS_PER_PROVIDER):
                 try:
@@ -279,7 +300,7 @@ class TriviaQuizType(QuizType):
                     )
                     continue
                 try:
-                    return self._parse_generation(response, fact)
+                    return self._parse_generation(response, fact, grounded_tracks)
                 except (TypeError, ValueError) as err:
                     LOGGER.debug(
                         "Trivia provider %s returned an invalid response: %s",
@@ -350,7 +371,12 @@ class TriviaQuizType(QuizType):
             "END_UNTRUSTED_MUSIC_METADATA_JSON"
         )
 
-    def _parse_generation(self, response: object, fact: TriviaFact) -> TriviaGeneration:
+    def _parse_generation(
+        self,
+        response: object,
+        fact: TriviaFact,
+        grounded_tracks: Collection[TriviaTrackFacts] = (),
+    ) -> TriviaGeneration:
         """Parse and validate one strict AI Trivia response."""
         if not isinstance(response, str):
             raise TypeError("response must be a string")
@@ -391,13 +417,11 @@ class TriviaQuizType(QuizType):
                 raise ValueError("wrong answer exceeds the length limit")
             if "\n" in answer or "\r" in answer:
                 raise ValueError("wrong answers must be single-line strings")
-            if any(
-                answer_labels_are_too_close(answer, existing_answer)
-                for existing_answer in (fact.correct_answer, *parsed_answers)
-            ):
-                raise ValueError("wrong answers must be distinct from every answer")
             parsed_answers.append(answer)
-        return TriviaGeneration(question=question, wrong_answers=tuple(parsed_answers))
+        return TriviaGeneration(
+            question=question,
+            wrong_answers=self._repair_wrong_answers(parsed_answers, fact, grounded_tracks),
+        )
 
     def _select_fact(self, track: TriviaTrackFacts, round_index: int) -> TriviaFact:
         """Select a supported factual target deterministically for a round."""
@@ -405,18 +429,69 @@ class TriviaQuizType(QuizType):
         if not targets:
             raise InvalidDataError("Trivia track has no supported factual targets")
         target = targets[round_index % len(targets)]
+        correct_answer = self._target_value(track, target)
+        assert correct_answer is not None
+        return TriviaFact(target=target, correct_answer=correct_answer, track=track)
+
+    @classmethod
+    def _repair_wrong_answers(
+        cls,
+        wrong_answers: Sequence[str],
+        fact: TriviaFact,
+        grounded_tracks: Collection[TriviaTrackFacts],
+    ) -> tuple[str, ...]:
+        """Return distinct wrong answers completed with same-target grounded facts."""
+        expected_count = len(wrong_answers)
+        correct = SuggestionCandidate(label=fact.correct_answer)
+        candidates = filter_suggestion_candidates(
+            correct,
+            (SuggestionCandidate(label=answer) for answer in wrong_answers),
+            limit=expected_count,
+        )
+        if len(candidates) == expected_count:
+            return tuple(candidate.label for candidate in candidates)
+
+        grounded_values: list[str] = []
+        seen_values: set[str] = set()
+        for track in grounded_tracks:
+            if (value := cls._target_value(track, fact.target)) is None:
+                continue
+            normalized_value = normalize_answer_label(value)
+            if not normalized_value or normalized_value in seen_values:
+                continue
+            seen_values.add(normalized_value)
+            grounded_values.append(value)
+        SYSTEM_RANDOM.shuffle(grounded_values)
+
+        def iter_candidates() -> Iterator[SuggestionCandidate]:
+            yield from candidates
+            for value in grounded_values:
+                yield SuggestionCandidate(label=value)
+
+        candidates = filter_suggestion_candidates(
+            correct,
+            iter_candidates(),
+            limit=expected_count,
+        )
+        if len(candidates) != expected_count:
+            raise ValueError("wrong answers could not be completed from grounded metadata")
+        return tuple(candidate.label for candidate in candidates)
+
+    @staticmethod
+    def _target_value(track: TriviaTrackFacts, target: TriviaTarget) -> str | None:
+        """Return the available value for one Trivia target."""
+        if target not in TriviaQuizType._available_targets(track):
+            return None
         if target == TriviaTarget.ARTIST:
             assert track.artist is not None
-            correct_answer = track.artist
-        elif target == TriviaTarget.TITLE:
-            correct_answer = track.title
-        elif target == TriviaTarget.ALBUM:
+            return track.artist
+        if target == TriviaTarget.TITLE:
+            return track.title
+        if target == TriviaTarget.ALBUM:
             assert track.album is not None
-            correct_answer = track.album
-        else:
-            assert track.release_year is not None
-            correct_answer = str(track.release_year)
-        return TriviaFact(target=target, correct_answer=correct_answer, track=track)
+            return track.album
+        assert track.release_year is not None
+        return str(track.release_year)
 
     def _used_source_uris(self, previous_rounds: list[MusicQuizRound]) -> set[str]:
         """Return source URIs persisted in validated Trivia round history."""
@@ -424,7 +499,6 @@ class TriviaQuizType(QuizType):
         for expected_index, previous_round in enumerate(previous_rounds):
             if (
                 previous_round.round_index != expected_index
-                or previous_round.track_uri is not None
                 or previous_round.duration is not None
                 or previous_round.image_url is not None
                 or not previous_round.question
@@ -448,6 +522,11 @@ class TriviaQuizType(QuizType):
             ):
                 raise InvalidDataError("Trivia round history contains invalid source metadata")
             source_uri = correct_suggestions[0].uri
+            expected_track_uri = source_uri if self.plays_track_on_reveal else None
+            if previous_round.track_uri != expected_track_uri:
+                raise InvalidDataError(
+                    "Trivia round history contains incompatible playback metadata"
+                )
             if source_uri in used_source_uris:
                 raise InvalidDataError("Trivia round history contains duplicate source tracks")
             used_source_uris.add(source_uri)
@@ -459,13 +538,18 @@ class TriviaQuizType(QuizType):
         if not track.uri or not (title := _bounded_metadata_value(track.name)):
             return None
         artist = _bounded_metadata_value(track.artist_str or None)
-        album = _bounded_metadata_value(track.album.name if track.album else None)
+        album = track.album
+        untrusted_compilation = isinstance(album, Album) and _is_untrusted_compilation_album(album)
         facts = TriviaTrackFacts(
             source_uri=track.uri,
             title=title,
             artist=artist,
-            album=album,
-            release_year=get_track_release_year(track),
+            album=(
+                None
+                if untrusted_compilation
+                else _bounded_metadata_value(album.name if album else None)
+            ),
+            release_year=None if untrusted_compilation else get_track_release_year(track),
         )
         return facts if TriviaQuizType._available_targets(facts) else None
 
@@ -507,6 +591,21 @@ def _bounded_metadata_value(value: str | None) -> str | None:
     if not value or not (cleaned := value.strip()):
         return None
     return cleaned if len(cleaned) <= MAX_METADATA_VALUE_LENGTH else None
+
+
+def _is_untrusted_compilation_album(album: Album) -> bool:
+    """
+    Return whether Trivia must omit release facts supplied with an album.
+
+    :param album: Full album metadata attached to a selected Trivia track.
+    """
+    if album.album_type == AlbumType.COMPILATION:
+        return True
+    return any(
+        artist.mbid == VARIOUS_ARTISTS_MBID
+        or compare_strings(artist.name, VARIOUS_ARTISTS_NAME, strict=False)
+        for artist in album.artists
+    )
 
 
 def _normalize_trivia_language(language: str) -> str:

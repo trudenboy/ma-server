@@ -38,7 +38,11 @@ from music_assistant.providers.music_quiz.models import (
     TimelineMultipleChoiceBonusDefinition,
     TimelineRoundState,
 )
-from music_assistant.providers.music_quiz.quiz_types.base import QuizType, get_track_release_year
+from music_assistant.providers.music_quiz.quiz_types.base import (
+    PLAYBACK_REPLACEMENT_RESERVE,
+    QuizType,
+    get_track_release_year,
+)
 from music_assistant.providers.music_quiz.suggestions import (
     SuggestionCandidate,
     answer_labels_are_too_close,
@@ -58,7 +62,6 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_BONUS_OPTION_COUNT = 4
 COMPLETED_REVEAL_AUTO_ADVANCE_SECONDS = 30.0
 TRACK_ENRICHMENT_CONCURRENCY = 10
-PLAYBACK_REPLACEMENT_RESERVE = 4
 BONUS_CANDIDATE_LIMIT = 24
 
 
@@ -93,6 +96,7 @@ class MusicTimelineQuizType(QuizType):
             suggestion_count=DEFAULT_BONUS_OPTION_COUNT,
             difficulty=MusicQuizDifficulty.NORMAL.value,
             language=DEFAULT_TRIVIA_LANGUAGE,
+            play_reveal_audio=True,
         )
 
     @classmethod
