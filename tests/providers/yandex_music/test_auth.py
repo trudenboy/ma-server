@@ -49,8 +49,7 @@ def skip_grace_sleep() -> Generator[mock.AsyncMock]:
 async def drain_teardown_tasks(
     skip_grace_sleep: mock.AsyncMock,  # noqa: ARG001 — orders teardown before the patch exits
 ) -> AsyncGenerator[None]:
-    """
-    Settle deferred route-teardown tasks before the grace-sleep patch exits.
+    """Settle deferred route-teardown tasks before the grace-sleep patch exits.
 
     Cancels leftovers instead of awaiting them so a test that failed before
     releasing a hung grace sleep cannot deadlock the whole run.
@@ -289,8 +288,7 @@ async def test_perform_device_auth_status_endpoint_reports_done_after_success() 
 async def test_perform_device_auth_returns_without_grace_delay(
     skip_grace_sleep: mock.AsyncMock,
 ) -> None:
-    """
-    The flow returns as soon as auth completes — the grace period must not block it.
+    """The flow returns as soon as auth completes — the grace period must not block it.
 
     The grace sleep is made to hang forever: the caller must still get its
     tokens immediately, while the routes stay registered until the deferred
@@ -329,8 +327,7 @@ async def test_perform_device_auth_returns_without_grace_delay(
 async def test_perform_device_auth_immediate_retry_reuses_session_path(
     skip_grace_sleep: mock.AsyncMock,
 ) -> None:
-    """
-    A retry with the same session id must succeed while teardown is still pending.
+    """A retry with the same session id must succeed while teardown is still pending.
 
     The MA frontend can reuse the config-flow session id for a rapid second
     login attempt; the previous attempt's routes (awaiting their grace-period
@@ -365,8 +362,7 @@ async def test_perform_device_auth_immediate_retry_reuses_session_path(
 
 
 async def test_route_teardown_attempts_every_path_despite_errors() -> None:
-    """
-    A failing unregister for one route must not skip the remaining routes.
+    """A failing unregister for one route must not skip the remaining routes.
 
     Teardown runs in a detached task (e.g. during MA shutdown the webserver
     may already be gone) — one failure must not leak the other route or
@@ -392,8 +388,7 @@ async def test_route_teardown_attempts_every_path_despite_errors() -> None:
 
 
 async def test_device_code_page_countdown_reflects_elapsed_time() -> None:
-    """
-    The countdown shows the time actually left, not the full code lifetime.
+    """The countdown shows the time actually left, not the full code lifetime.
 
     The popup can open (or be reloaded) long after the code was issued; the
     page must be rendered with the remaining seconds at request time.
@@ -418,8 +413,7 @@ async def test_device_code_page_countdown_reflects_elapsed_time() -> None:
 async def test_perform_device_auth_status_reports_failure_reason(
     exc: Exception, expected_reason: str, expected_match: str
 ) -> None:
-    """
-    When poll fails, the status endpoint reports failed plus a machine-readable reason.
+    """When poll fails, the status endpoint reports failed plus a machine-readable reason.
 
     The page uses the reason to tell the user what to do next — an expired
     code and a rejected login require different actions.
@@ -459,8 +453,7 @@ async def test_perform_device_auth_status_reports_failure_reason(
 
 
 async def test_perform_device_auth_does_not_mark_cancellation_as_failure() -> None:
-    """
-    CancelledError must propagate without marking state as 'failed'.
+    """CancelledError must propagate without marking state as 'failed'.
 
     Routes must still be torn down eventually so a cancelled login doesn't
     leak webserver routes.
@@ -618,8 +611,7 @@ def _make_page_mass(locale: object = None) -> mock.MagicMock:
 
 
 async def test_device_code_page_copy_targets_code_block() -> None:
-    """
-    The code block itself is the copy target; no standalone copy button.
+    """The code block itself is the copy target; no standalone copy button.
 
     ``document.execCommand`` must be present as the fallback because the
     Clipboard API is unavailable on plain-HTTP MA deployments.
