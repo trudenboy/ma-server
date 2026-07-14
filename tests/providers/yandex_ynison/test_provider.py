@@ -18,13 +18,14 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import (
     LoginFailed,
     PlayerCommandFailed,
+    ResourceTemporarilyUnavailable,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioFormat, AudioSource
 from ya_passport_auth import SecretStr
+from ya_passport_auth.ma import BorrowedCredentialSource, list_yandex_music_instances
 
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
-from music_assistant.providers.yandex_ynison.config_helpers import list_yandex_music_instances
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -53,8 +54,7 @@ from music_assistant.providers.yandex_ynison.ynison_client import YnisonSendErro
 
 
 def _arm_play_media_recorder(provider: YandexYnisonProvider) -> list[tuple[str, str]]:
-    """
-    Replace `play_media` with a recorder and run `create_task` coros inline.
+    """Replace `play_media` with a recorder and run `create_task` coros inline.
 
     Returns the list of (target_id, uri) tuples captured during the test.
     The inline create_task lets the scheduled `play_media` coroutine
@@ -935,16 +935,14 @@ class TestYnisonStateHandling:
             )
             provider._track_changed_event.set()
 
-        task = asyncio.create_task(simulate_echo_then_change())
+        asyncio.create_task(simulate_echo_then_change())
         result = await provider._wait_for_track_change("old_track", timeout=5.0)
         assert result is True
-        await task
 
     async def test_wait_for_track_change_returns_immediately_if_already_advanced(
         self,
     ) -> None:
-        """
-        If Ynison already advanced before the call, return True without waiting.
+        """If Ynison already advanced before the call, return True without waiting.
 
         Regression: _wait_for_track_change used to clear _track_changed_event
         before checking state, so a state update that arrived between
@@ -1289,8 +1287,7 @@ class TestPCMNormalization:
     async def test_stream_track_provider_unloaded_mid_stream_aborts_cleanly(
         self,
     ) -> None:
-        """
-        Unloaded linked provider mid-stream aborts cleanly (no AttributeError).
+        """Unloaded linked provider mid-stream aborts cleanly (no AttributeError).
 
         Regression: the path between `await _get_stream_details_with_retry`
         and the ffmpeg stream builder used to dereference
@@ -1458,6 +1455,7 @@ class TestResolveTokenBorrowMode:
         """Returns the music token from the linked YM instance config."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="ym-music-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
@@ -1469,11 +1467,12 @@ class TestResolveTokenBorrowMode:
         """Falls back to in-memory refresh via x_token; does not write config."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token=None, x_token="ym-x-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
         with patch(
-            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
+            "ya_passport_auth.ma.borrow.refresh_music_token",
             new_callable=AsyncMock,
             return_value=SecretStr("fresh-token"),
         ) as mock_refresh:
@@ -1486,6 +1485,7 @@ class TestResolveTokenBorrowMode:
         """Raises LoginFailed when YM instance config has neither token nor x_token."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token=None, x_token=None)
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
@@ -1493,18 +1493,20 @@ class TestResolveTokenBorrowMode:
             await provider._resolve_token()
 
     async def test_raises_when_ym_instance_unavailable(self) -> None:
-        """Raises LoginFailed with a distinct 'not loaded' message when YM is missing."""
+        """A missing YM instance is a startup-ordering condition — transient error."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=None))
 
-        with pytest.raises(LoginFailed, match="not loaded"):
+        with pytest.raises(ResourceTemporarilyUnavailable, match="not loaded"):
             await provider._resolve_token()
 
     async def test_raises_when_linked_provider_is_not_yandex_music(self) -> None:
         """Stale/edited instance id pointing at a non-YM provider yields a clear error."""
         provider = _make_provider()
         provider._ym_instance_id = "some-other-id"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "some-other-id")
         wrong = _make_ym_provider_stub()
         wrong.domain = "spotify"  # not yandex_music
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=wrong))
@@ -1555,6 +1557,7 @@ class TestRefreshYnisonToken:
         """Reads x_token from linked YM and refreshes in-memory only."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="stale", x_token="ym-x-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
         # Ensure config writes are not invoked
@@ -1562,7 +1565,7 @@ class TestRefreshYnisonToken:
         _stub_attr(provider, "_update_config_value", mock_update_config)
 
         with patch(
-            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
+            "ya_passport_auth.ma.borrow.refresh_music_token",
             new_callable=AsyncMock,
             return_value=SecretStr("fresh-token"),
         ) as mock_refresh:
@@ -1576,6 +1579,7 @@ class TestRefreshYnisonToken:
         """Raises LoginFailed when YM has no x_token for refresh."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="only-token", x_token=None)
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
@@ -1583,12 +1587,13 @@ class TestRefreshYnisonToken:
             await provider._refresh_ynison_token()
 
     async def test_borrow_mode_raises_when_ym_not_loaded(self) -> None:
-        """Raises LoginFailed with a distinct 'not loaded' message on reactive refresh."""
+        """A missing YM instance is transient on reactive refresh too."""
         provider = _make_provider()
         provider._ym_instance_id = "ym-inst"
+        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=None))
 
-        with pytest.raises(LoginFailed, match="not loaded"):
+        with pytest.raises(ResourceTemporarilyUnavailable, match="not loaded"):
             await provider._refresh_ynison_token()
 
 
@@ -1978,8 +1983,7 @@ class TestPausePlayback:
         provider.mass.players.cmd_stop.assert_awaited_once_with("player1")
 
     async def test_rewrites_active_player_id_after_successful_cmd_stop(self) -> None:
-        """
-        On a successful cmd_stop, `_active_player_id` demotes to the queue id.
+        """On a successful cmd_stop, `_active_player_id` demotes to the queue id.
 
         Queues live on the bare ALSA UUID; bridge wrappers (`spb_*`) do
         not own one. Resume's `play_media(_active_player_id, ...)`
@@ -2010,8 +2014,7 @@ class TestPausePlayback:
         assert provider._externally_paused is True
 
     async def test_cmd_stop_failure_keeps_bridge_id_intact(self) -> None:
-        """
-        A cmd_stop failure must not demote `_active_player_id`.
+        """A cmd_stop failure must not demote `_active_player_id`.
 
         If we demoted to the queue id but cmd_stop never reached MA,
         the next `_activate_playback` would try `play_media(bare_uuid)`
@@ -2288,8 +2291,7 @@ class TestGetStreamDetailsWithRetry:
     async def test_unloaded_provider_raises_login_failed_not_attribute_error(
         self,
     ) -> None:
-        """
-        Linked yandex_music unloaded → LoginFailed, not AttributeError.
+        """Linked yandex_music unloaded → LoginFailed, not AttributeError.
 
         Regression: _yandex_provider can be set to None by the background
         _check_yandex_provider_match task between awaits in this function.
@@ -2428,8 +2430,7 @@ class TestActivatePlayback:
         provider.mass.create_task.assert_called()  # type: ignore[unreachable]
 
     async def test_unpause_after_external_pause_fires_play_media(self) -> None:
-        """
-        Resume after pause schedules play_media for the (queue-id) player.
+        """Resume after pause schedules play_media for the (queue-id) player.
 
         Simulates the post-`_pause_playback` state: `_stream_stop_event`
         set, `_active_player_id` already demoted to the queue id (the
@@ -2854,8 +2855,7 @@ class TestPrefetchOrdering:
 
 
 class TestPrefetchFlowsThroughToStreamDetails:
-    """
-    `get_stream_details` returns the *prefetched* AudioFormat.
+    """`get_stream_details` returns the *prefetched* AudioFormat.
 
     Pins the contract that MA's upstream passthrough path (#3969,
     `_select_audio_source_pcm_format`) honors: MA reads
@@ -2913,8 +2913,7 @@ class TestPrefetchFlowsThroughToStreamDetails:
         assert sd.audio_format.channels == 2
 
     async def test_streamdetails_audio_format_is_fresh_copy_per_call(self) -> None:
-        """
-        Each `get_stream_details` returns a fresh AudioFormat instance.
+        """Each `get_stream_details` returns a fresh AudioFormat instance.
 
         `AudioFormat` is mutable (MA's outer ffmpeg sets `codec_type` in
         place). A shared instance across `get_stream_details` calls
@@ -2960,8 +2959,7 @@ class TestAudioStreamPausedReturn:
 
 
 class TestNaturalEndDifferentiation:
-    """
-    `_signal_track_completion` fires only on clean iterator exhaustion.
+    """`_signal_track_completion` fires only on clean iterator exhaustion.
 
     These tests exercise the post-inner-loop branch via
     ``_wait_for_track_change`` as the outer-loop gate. The previous
@@ -2998,8 +2996,7 @@ class TestNaturalEndDifferentiation:
 
     @staticmethod
     def _gate_outer_loop_after_signal(provider: YandexYnisonProvider) -> None:
-        """
-        `_wait_for_track_change` returns False → outer loop exits.
+        """`_wait_for_track_change` returns False → outer loop exits.
 
         ``natural_end`` calls `_wait_for_track_change`; we use its
         return as the gate so the test terminates AFTER natural_end
@@ -3047,8 +3044,7 @@ class TestNaturalEndDifferentiation:
         assert calls == [1]
 
     async def test_track_change_during_chunk_loop_suppresses_signal(self) -> None:
-        """
-        `_track_changed_event` set mid-stream → natural_end False → no signal.
+        """`_track_changed_event` set mid-stream → natural_end False → no signal.
 
         Uses a two-invocation stub: first call arms `_track_changed_event`
         (the natural_end check we want to verify), second call sets
@@ -3084,8 +3080,7 @@ class TestNaturalEndDifferentiation:
         assert invocation_count == 2  # natural_end must have evaluated on pass 1
 
     async def test_session_change_during_chunk_loop_suppresses_signal(self) -> None:
-        """
-        Session-id rotation mid-stream → `broke_for_session_change` → no signal.
+        """Session-id rotation mid-stream → `broke_for_session_change` → no signal.
 
         The session-mismatch breaks both the inner chunk loop's break
         guard AND the outer-loop's session check, so the generator
@@ -3481,8 +3476,7 @@ class TestStrictModeDeliverySignal:
         assert any("Queue-advance dropped" in r.message for r in caplog.records)
 
     async def test_sync_progress_uses_non_strict_send(self) -> None:
-        """
-        `_sync_progress` heartbeat must call into the non-strict send path.
+        """`_sync_progress` heartbeat must call into the non-strict send path.
 
         Regression guard: heartbeats stay fire-and-forget so a single bad
         send tick does not crash the streaming generator. We verify the

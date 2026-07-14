@@ -35,8 +35,7 @@ from .constants import (
 
 
 class YnisonSendError(ConnectionError):
-    """
-    Raised by `YnisonClient._send(strict=True)` when a send cannot reach Ynison.
+    """Raised by `YnisonClient._send(strict=True)` when a send cannot reach Ynison.
 
     Indicates a transport-level failure (WebSocket not connected, write raised
     ``ConnectionError`` / ``aiohttp.ClientError`` / ``RuntimeError`` / ``OSError``).
@@ -50,8 +49,7 @@ class YnisonSendError(ConnectionError):
 
 
 def make_version_block(device_id: str) -> dict[str, Any]:
-    """
-    Build a version sub-object authored by the given device.
+    """Build a version sub-object authored by the given device.
 
     Ynison expects string types for version and timestamp fields;
     passing integers triggers 500 responses that terminate the WebSocket.
@@ -74,8 +72,7 @@ def _stringify_version(version: Any) -> None:
 
 
 def normalize_player_state_timestamps(player_state: dict[str, Any]) -> None:
-    """
-    Coerce Ynison timestamp fields to strings in-place.
+    """Coerce Ynison timestamp fields to strings in-place.
 
     Ynison rejects integer `status.progress_ms`/`duration_ms`/`version.*`
     (HTTP 500 + WS teardown), so we normalize inbound state at the ingestion
@@ -156,8 +153,7 @@ AuthRefreshCallback = Callable[[], Awaitable["SecretStr"]]
 
 
 class YnisonClient:
-    """
-    WebSocket client for the Yandex Ynison protocol.
+    """WebSocket client for the Yandex Ynison protocol.
 
     Manages the two-step connection (redirector → state service) and
     provides methods to send state updates back to Ynison.
@@ -172,8 +168,7 @@ class YnisonClient:
         http_session: aiohttp.ClientSession | None = None,
         on_auth_failure: AuthRefreshCallback | None = None,
     ) -> None:
-        """
-        Initialize Ynison client.
+        """Initialize Ynison client.
 
         :param token: Yandex Music OAuth token (wrapped in SecretStr).
         :param device_info: Device identification for Ynison.
@@ -216,8 +211,7 @@ class YnisonClient:
 
     @property
     def in_post_reconnect_settle(self) -> bool:
-        """
-        True iff we're inside the 2 s post-reconnect settle window.
+        """True iff we're inside the 2 s post-reconnect settle window.
 
         Provider handlers consult this to skip the first inbound state right
         after a reconnect — that state can be a stale broadcast of our own
@@ -232,8 +226,7 @@ class YnisonClient:
         return self._device_info.device_id
 
     async def connect(self) -> None:
-        """
-        Connect to Ynison (redirector → state service).
+        """Connect to Ynison (redirector → state service).
 
         Raises on auth failure; auto-reconnects on transient errors.
         """
@@ -297,19 +290,6 @@ class YnisonClient:
     # Send methods
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _message_meta() -> dict[str, Any]:
-        """
-        Return common envelope fields for state-mutating messages.
-
-        Ynison expects string-typed timestamps; integers cause 500 responses.
-        """
-        return {
-            "rid": str(uuid.uuid4()),
-            "player_action_timestamp_ms": str(int(time.time() * 1000)),
-            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
-        }
-
     async def update_playing_status(
         self,
         progress_ms: int,
@@ -318,8 +298,7 @@ class YnisonClient:
         *,
         strict: bool = False,
     ) -> None:
-        """
-        Send playback status update to Ynison.
+        """Send playback status update to Ynison.
 
         :param progress_ms: Current playback position in milliseconds.
         :param duration_ms: Current track duration in milliseconds.
@@ -357,8 +336,7 @@ class YnisonClient:
         await self._send(msg)
 
     async def update_session_params(self, mute_events_if_passive: bool = True) -> None:
-        """
-        Configure session params on the Ynison server.
+        """Configure session params on the Ynison server.
 
         `mute_events_if_passive=True` tells Ynison not to forward peer
         state updates while we're not the active device. Reduces inbound
@@ -377,8 +355,7 @@ class YnisonClient:
         await self._send(msg)
 
     async def sync_state_from_eov(self, actual_queue_id: str = "") -> None:
-        """
-        Request queue sync from the EOV (Unified Playback Queue) backend.
+        """Request queue sync from the EOV (Unified Playback Queue) backend.
 
         Asks the Ynison server to refresh the queue from the central EOV service.
         Only works when this device is the active player. If the EOV queue
@@ -401,8 +378,7 @@ class YnisonClient:
         *,
         strict: bool = False,
     ) -> None:
-        """
-        Send player state update (queue changes, track skip).
+        """Send player state update (queue changes, track skip).
 
         Unlike send_full_state, this does NOT reset active device status.
         Use this for track advances, queue modifications, repeat/shuffle changes.
@@ -446,9 +422,20 @@ class YnisonClient:
         self._logger.debug("Sending full state: %s", json.dumps(msg)[:500])
         await self._send(msg)
 
-    def _classify_state_as_echo(self, incoming_ps: dict[str, Any]) -> bool:
+    @staticmethod
+    def _message_meta() -> dict[str, Any]:
+        """Return common envelope fields for state-mutating messages.
+
+        Ynison expects string-typed timestamps; integers cause 500 responses.
         """
-        Return True iff `incoming_ps` is our own broadcast round-tripping.
+        return {
+            "rid": str(uuid.uuid4()),
+            "player_action_timestamp_ms": str(int(time.time() * 1000)),
+            "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
+        }
+
+    def _classify_state_as_echo(self, incoming_ps: dict[str, Any]) -> bool:
+        """Return True iff `incoming_ps` is our own broadcast round-tripping.
 
         Uses author check on BOTH queue.version.device_id and
         status.version.device_id — only an update where every block was
@@ -539,8 +526,7 @@ class YnisonClient:
         }
 
     async def _get_redirect_ticket(self) -> tuple[str, str, int]:
-        """
-        Connect to redirector and obtain redirect ticket.
+        """Connect to redirector and obtain redirect ticket.
 
         :return: (host, redirect_ticket, session_id)
         :raises LoginFailed: If authentication fails.
@@ -772,8 +758,7 @@ class YnisonClient:
             )
 
     async def _reconnect(self) -> None:
-        """
-        Reconnect with exponential backoff, retrying indefinitely.
+        """Reconnect with exponential backoff, retrying indefinitely.
 
         On authentication failure (LoginFailed), attempts to refresh the token
         via the on_auth_failure callback before the next retry. The loop only
@@ -828,8 +813,7 @@ class YnisonClient:
                 self._logger.warning("Ynison reconnect attempt %d failed", attempt, exc_info=True)
 
     async def _send(self, msg: dict[str, Any], *, strict: bool = False) -> None:
-        """
-        Send a JSON message to the state service (thread-safe).
+        """Send a JSON message to the state service (thread-safe).
 
         :param msg: JSON-serialisable Ynison envelope.
         :param strict: When ``True``, transport failures (disconnected socket
@@ -853,8 +837,7 @@ class YnisonClient:
                     raise YnisonSendError("Ynison send failed") from exc
 
     def _schedule_reconnect(self) -> None:
-        """
-        Schedule a background reconnect attempt if none is already in flight.
+        """Schedule a background reconnect attempt if none is already in flight.
 
         Idempotent: a single reconnect task is in flight at any time. Becomes
         a no-op once :meth:`disconnect` has set ``_stop_event``.

@@ -48,7 +48,7 @@ async def test_refresh_music_token_auth_error_raises_login_failed() -> None:
         mock_create.return_value.__aenter__ = mock.AsyncMock(return_value=mock_client)
         mock_create.return_value.__aexit__ = mock.AsyncMock(return_value=False)
 
-        with pytest.raises(LoginFailed, match="Failed to refresh"):
+        with pytest.raises(LoginFailed, match="Music token refresh was rejected"):
             await refresh_music_token(SecretStr("bad_x_token"))
 
 
@@ -80,8 +80,7 @@ def _patched_passport(client: mock.AsyncMock) -> mock._patch[mock.MagicMock]:
 
 
 def _patched_auth_helper() -> tuple[mock._patch[mock.MagicMock], mock.MagicMock]:
-    """
-    Patch music_assistant.helpers.auth.AuthenticationHelper at its source.
+    """Patch music_assistant.helpers.auth.AuthenticationHelper at its source.
 
     perform_qr_auth lazy-imports this symbol inside the function body, so the
     patch target is the original module path — not ``provider.auth.``.
@@ -160,7 +159,7 @@ async def test_perform_qr_auth_passport_error_maps_to_login_failed() -> None:
     p1 = _patched_passport(client)
     p2, _helper = _patched_auth_helper()
     try:
-        with pytest.raises(LoginFailed, match="Yandex auth error"):
+        with pytest.raises(LoginFailed, match="QR authentication failed"):
             await perform_qr_auth(mock.MagicMock(), "session-1")
     finally:
         p1.stop()

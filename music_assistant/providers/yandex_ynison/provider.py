@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from music_assistant_models.enums import (
     ContentType,
@@ -30,6 +30,7 @@ from music_assistant_models.errors import (
 from music_assistant_models.media_items import AudioSource, ProviderMapping
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
+from ya_passport_auth.ma import BorrowedCredentialSource
 
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, ThrottlerManager
@@ -50,8 +51,6 @@ from .constants import (
     OUTPUT_AUTO,
     PLAYER_ID_AUTO,
     YANDEX_MUSIC_CONF_QUALITY,
-    YANDEX_MUSIC_CONF_TOKEN,
-    YANDEX_MUSIC_CONF_X_TOKEN,
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
     YM_INSTANCE_OWN,
 )
@@ -111,8 +110,9 @@ _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
 # the borrow-mode-with-only-x_token + 401-storm path described in spec 0004.
 _MUSIC_TOKEN_TTL_S = 50 * 60
 
-# Maximum number of distinct x_token entries kept in the music-token cache.
-# 4 covers borrow + own simultaneously with one rotation in flight.
+# Maximum number of distinct x_token entries kept in the own-mode music-token
+# cache (borrow mode caches inside BorrowedCredentialSource). 4 keeps headroom
+# for an x_token rotation with one refresh in flight.
 _MUSIC_TOKEN_CACHE_MAX = 4
 
 # Accepted non-auto values for output format overrides; mirrors the options
@@ -124,8 +124,7 @@ _VALID_BIT_DEPTHS: frozenset[str] = frozenset({"16", "24"})
 
 @dataclass(frozen=True)
 class _CachedToken:
-    """
-    Music token entry in the in-memory cache.
+    """Music token entry in the in-memory cache.
 
     `expires_monotonic` is compared against the provider's `_now()` seam.
     """
@@ -135,8 +134,7 @@ class _CachedToken:
 
 
 def _hash_x_token(x_token: str) -> str:
-    """
-    Return the SHA-256 hex digest of an x_token, used as cache key.
+    """Return the SHA-256 hex digest of an x_token, used as cache key.
 
     The raw x_token is never stored in dict keys (defence-in-depth against
     accidental log / dump leakage of the cache structure).
@@ -193,6 +191,16 @@ class YandexYnisonProvider(PluginProvider):
         self._ym_instance_id: str | None = (
             ym_instance_value
             if ym_instance_value and ym_instance_value != YM_INSTANCE_OWN
+            else None
+        )
+        # Borrow mode: read-only credential source over the linked
+        # yandex_music instance (shared auth layer). The owner stays the
+        # single writer/rotator of persisted credentials; minted music
+        # tokens are cached in-memory inside the source (TTL + LRU +
+        # coalesced refreshes per its spec).
+        self._borrow_source: BorrowedCredentialSource | None = (
+            BorrowedCredentialSource(self.mass, self._ym_instance_id)
+            if self._ym_instance_id is not None
             else None
         )
 
@@ -347,8 +355,7 @@ class YandexYnisonProvider(PluginProvider):
         return [self._audio_source]
 
     async def get_stream_details(self, source_id: str, queue_id: str) -> StreamDetails:
-        """
-        Return StreamDetails for streaming the Yandex Music Connect audio.
+        """Return StreamDetails for streaming the Yandex Music Connect audio.
 
         Side-effect-free: ownership is claimed in on_source_selected (which the
         streams controller fires before this method on the actual stream
@@ -393,8 +400,7 @@ class YandexYnisonProvider(PluginProvider):
     async def get_audio_stream(  # noqa: PLR0915
         self, streamdetails: StreamDetails, seek_position: int = 0
     ) -> AsyncGenerator[bytes]:
-        """
-        Return continuous audio stream following Ynison track changes.
+        """Return continuous audio stream following Ynison track changes.
 
         Streams the current track, then waits for track changes and streams
         the next track automatically. Runs until the source is deselected.
@@ -546,9 +552,90 @@ class YandexYnisonProvider(PluginProvider):
                 self._in_use_by_queue = None
             self._current_streaming_track_id = None
 
+    async def on_source_selected(
+        self,
+        source_id: str,
+        player_id: str,
+        queue_id: str,
+        stream_session_id: str,
+    ) -> None:
+        """Handle callback when this AudioSource has been selected/started on a player."""
+        if source_id != AUDIO_SOURCE_ID or not player_id:
+            return
+
+        # Check if manual player switching is allowed
+        if not self._allow_player_switch:
+            current_target = self._get_target_player_id()
+            if player_id != current_target and current_target:
+                # Redirect to the configured target, but only once per
+                # idempotency window. The target may be a sendspin bridge /
+                # sync-group whose stream is consumed under a player id that
+                # never equals `current_target`, so each redirect re-triggers
+                # selection here. Re-issuing `play_media` on every rejection
+                # turns that into an unbounded AudioError storm; the raise
+                # below still aborts every wrong-player stream regardless.
+                if self._idempotent("source_redirect", current_target):
+                    self.logger.debug(
+                        "Player switching disabled, redirecting selection from %s to %s",
+                        player_id,
+                        current_target,
+                    )
+                    await self.mass.player_queues.play_media(
+                        current_target, str(self._audio_source.uri)
+                    )
+                msg = f"Player switching is disabled; source must remain on {current_target}"
+                raise RuntimeError(msg)
+
+        # Stop previous player if switching. The lock claim a few lines below
+        # replaces the previous queue's claim; the previous stream loop notices
+        # the queue change and exits cleanly.
+        if self._active_player_id and self._active_player_id != player_id:
+            prev_player_id = self._active_player_id
+            self.logger.info(
+                "Source selected on %s, stopping %s",
+                player_id,
+                prev_player_id,
+            )
+            try:
+                await self.mass.players.cmd_stop(prev_player_id)
+            except Exception as err:
+                self.logger.debug(
+                    "Failed to stop previous player %s: %s",
+                    prev_player_id,
+                    err,
+                )
+
+        # Claim ownership for this queue. The lock lives here (not in
+        # get_stream_details) so preload paths can fetch streamdetails without
+        # accidentally blocking a subsequent cross-queue handoff at the actual
+        # stream request.
+        self._in_use_by_queue = queue_id
+        # Record this request's session id so a later on_source_unselected can
+        # tell whether it is the live teardown or a stale callback from a
+        # superseded same-queue request.
+        self._active_session_id = stream_session_id
+        self._active_player_id = player_id
+        self.logger.debug("Active player set to: %s", player_id)
+
+    async def on_source_unselected(
+        self, source_id: str, queue_id: str, stream_session_id: str
+    ) -> None:
+        """Release the queue-scoped exclusive claim when MA tears down the stream."""
+        if source_id != AUDIO_SOURCE_ID:
+            return
+        # Reject stale callbacks: only release if this is still the active
+        # session. A queue_id check alone is not sufficient — same-queue
+        # reconnects (player drops + reopens the same stream URL before the
+        # original request's finally fires) would otherwise let the old
+        # request's late callback clear the live claim of the new stream.
+        if self._active_session_id != stream_session_id:
+            return
+        self._active_session_id = None
+        if self._in_use_by_queue == queue_id:
+            self._in_use_by_queue = None
+
     async def _wait_for_track_change(self, old_track_id: str, timeout: float = 30.0) -> bool:
-        """
-        Wait for Ynison to report a different track, ignoring echoes.
+        """Wait for Ynison to report a different track, ignoring echoes.
 
         After _signal_track_completion sends update_playing_status, Ynison
         echoes back the same track with updated progress.  Only return True
@@ -583,8 +670,7 @@ class YandexYnisonProvider(PluginProvider):
         seek_ms: int = 0,
         session_params: dict[str, Any] | None = None,
     ) -> AsyncGenerator[bytes]:
-        """
-        Stream a single track, normalizing to fixed PCM via per-track ffmpeg.
+        """Stream a single track, normalizing to fixed PCM via per-track ffmpeg.
 
         Every track is decoded through its own ffmpeg process to produce a
         fixed PCM output (s16le or s24le based on YM quality setting). This
@@ -736,38 +822,8 @@ class YandexYnisonProvider(PluginProvider):
     # Token handling
     # ------------------------------------------------------------------
 
-    def _read_ym_tokens(self) -> tuple[str | None, str | None]:
-        """
-        Read token/x_token from the linked yandex_music provider's config.
-
-        Borrow-mode only — callers must check ``self._ym_instance_id is not None``
-        before calling. Raises LoginFailed with a distinct message when the
-        linked YM provider is not currently loaded — separate from the
-        "loaded but unauthenticated" case so operators can tell the two apart.
-        """
-        assert self._ym_instance_id is not None, "Caller must check borrow mode before calling"
-        ym_provider = self.mass.get_provider(self._ym_instance_id)
-        if ym_provider is None:
-            raise LoginFailed(
-                f"Linked Yandex Music instance '{self._ym_instance_id}' is not loaded. "
-                "Check that the Yandex Music provider is enabled and configured."
-            )
-        # Guard against a stale/manually-edited instance id pointing at a non-YM
-        # provider — otherwise reading unrelated config keys yields a misleading
-        # "no credentials" error further down.
-        if ym_provider.domain != "yandex_music" or ym_provider.type != ProviderType.MUSIC:
-            raise LoginFailed(
-                f"Linked provider instance '{self._ym_instance_id}' is not a Yandex Music "
-                f"music provider (domain={ym_provider.domain!r}, type={ym_provider.type!r}). "
-                "Re-select the Yandex Music source in this plugin's configuration."
-            )
-        token = cast("str | None", ym_provider.config.get_value(YANDEX_MUSIC_CONF_TOKEN))
-        x_token = cast("str | None", ym_provider.config.get_value(YANDEX_MUSIC_CONF_X_TOKEN))
-        return (token, x_token)
-
     async def _refresh_via_x_token(self, x_token: str) -> SecretStr:
-        """
-        Refresh the music token from an x_token, caching the result.
+        """Refresh the music token from an x_token, caching the result.
 
         Within :data:`_MUSIC_TOKEN_TTL_S` of a successful refresh, subsequent
         calls for the same x_token return the cached :class:`SecretStr`
@@ -778,8 +834,11 @@ class YandexYnisonProvider(PluginProvider):
             token. Hashed before use as a cache key; the raw value is
             never stored in dict keys or logs.
         :returns: Fresh or cached music-scoped :class:`SecretStr`.
-        :raises LoginFailed: When the underlying refresh fails (propagated
-            from :func:`provider.auth.refresh_music_token`).
+        :raises LoginFailed: When Yandex explicitly rejects the x_token
+            (propagated from :func:`provider.auth.refresh_music_token`).
+        :raises ResourceTemporarilyUnavailable: On transient Passport
+            failures (network, rate limit) — retry later, credentials
+            are still good.
         """
         cache_key = _hash_x_token(x_token)
         cached = self._token_cache.get(cache_key)
@@ -801,8 +860,7 @@ class YandexYnisonProvider(PluginProvider):
             return token
 
     def _store_cached_token(self, cache_key: str, token: SecretStr) -> None:
-        """
-        Insert a cache entry, enforcing the LRU bound.
+        """Insert a cache entry, enforcing the LRU bound.
 
         Refreshing an existing key bumps its position to most-recent. When
         a new key would push the cache over :data:`_MUSIC_TOKEN_CACHE_MAX`,
@@ -824,8 +882,7 @@ class YandexYnisonProvider(PluginProvider):
         self._token_cache.pop(_hash_x_token(x_token), None)
 
     async def _resolve_token(self) -> SecretStr:
-        """
-        Resolve the Yandex Music OAuth token for the Ynison connection.
+        """Resolve the Yandex Music OAuth token for the Ynison connection.
 
         In borrow mode: read from the linked yandex_music provider's config.
         If only x_token is present (YM hasn't refreshed yet), do a cached
@@ -834,14 +891,8 @@ class YandexYnisonProvider(PluginProvider):
         In own mode: return CONF_TOKEN if set; otherwise, when CONF_X_TOKEN
         is present (QR-with-Remember-session path), cached in-memory refresh.
         """
-        if self._ym_instance_id is not None:
-            token, x_token = self._read_ym_tokens()
-            if token:
-                return SecretStr(token)
-            if x_token:
-                self.logger.debug("YM token not yet refreshed — refreshing in-memory")
-                return await self._refresh_via_x_token(x_token)
-            raise LoginFailed(f"Yandex Music instance '{self._ym_instance_id}' has no credentials")
+        if self._borrow_source is not None:
+            return await self._borrow_source.resolve_music_token()
 
         token = cast("str | None", self.config.get_value(CONF_TOKEN))
         if token:
@@ -853,8 +904,7 @@ class YandexYnisonProvider(PluginProvider):
         raise LoginFailed("No Yandex Music token configured")
 
     async def _refresh_ynison_token(self) -> SecretStr:
-        """
-        Refresh the OAuth token for Ynison reconnection.
+        """Refresh the OAuth token for Ynison reconnection.
 
         Called by YnisonClient on auth failure (401/403) during reconnect.
 
@@ -869,13 +919,18 @@ class YandexYnisonProvider(PluginProvider):
         front — this method is reached only on a server-rejected token, so
         the cached value is provably stale.
         """
-        if self._ym_instance_id is not None:
-            _, x_token = self._read_ym_tokens()
-            if not x_token:
+        if self._borrow_source is not None:
+            ym_music_token, ym_x_token = self._borrow_source.read_tokens()
+            if ym_x_token is None:
                 raise LoginFailed("Cannot refresh: linked Yandex Music instance has no x_token")
-            self._invalidate_cached_token(x_token)
+            # Both the minted entry AND the owner's persisted token may be the
+            # value the server just rejected — invalidate both so the source
+            # can't re-serve either; it will mint fresh from x_token.
+            if ym_music_token is not None:
+                self._borrow_source.invalidate(ym_music_token)
+            self._borrow_source.invalidate(ym_x_token)
             self.logger.info("Refreshing Yandex Music token for Ynison reconnect (borrow mode)")
-            return await self._refresh_via_x_token(x_token)
+            return await self._borrow_source.resolve_music_token()
 
         x_token = cast("str | None", self.config.get_value(CONF_X_TOKEN))
         if x_token:
@@ -1122,8 +1177,7 @@ class YandexYnisonProvider(PluginProvider):
         *,
         strict: bool = False,
     ) -> None:
-        """
-        Send progress to Ynison.
+        """Send progress to Ynison.
 
         Progress is clamped to duration because Ynison rejects updates where
         progress > duration (error 400030001) and disconnects the WebSocket.
@@ -1186,8 +1240,7 @@ class YandexYnisonProvider(PluginProvider):
         )
 
     async def _pause_playback(self) -> None:
-        """
-        Release the active player on external pause.
+        """Release the active player on external pause.
 
         ``cmd_stop`` is the only mechanism that flips ``PlaybackState``
         to IDLE for an AudioSource queue item; ``cmd_pause`` and
@@ -1261,91 +1314,8 @@ class YandexYnisonProvider(PluginProvider):
         )
         return None
 
-    async def on_source_selected(
-        self,
-        source_id: str,
-        player_id: str,
-        queue_id: str,
-        stream_session_id: str,
-    ) -> None:
-        """Handle callback when this AudioSource has been selected/started on a player."""
-        if source_id != AUDIO_SOURCE_ID or not player_id:
-            return
-
-        # Check if manual player switching is allowed
-        if not self._allow_player_switch:
-            current_target = self._get_target_player_id()
-            if player_id != current_target and current_target:
-                # Redirect to the configured target, but only once per
-                # idempotency window. The target may be a sendspin bridge /
-                # sync-group whose stream is consumed under a player id that
-                # never equals `current_target`, so each redirect re-triggers
-                # selection here. Re-issuing `play_media` on every rejection
-                # turns that into an unbounded AudioError storm; the raise
-                # below still aborts every wrong-player stream regardless.
-                if self._idempotent("source_redirect", current_target):
-                    self.logger.debug(
-                        "Player switching disabled, redirecting selection from %s to %s",
-                        player_id,
-                        current_target,
-                    )
-                    await self.mass.player_queues.play_media(
-                        current_target, str(self._audio_source.uri)
-                    )
-                msg = f"Player switching is disabled; source must remain on {current_target}"
-                raise RuntimeError(msg)
-
-        # Stop previous player if switching. The lock claim a few lines below
-        # replaces the previous queue's claim; the previous stream loop notices
-        # the queue change and exits cleanly.
-        if self._active_player_id and self._active_player_id != player_id:
-            prev_player_id = self._active_player_id
-            self.logger.info(
-                "Source selected on %s, stopping %s",
-                player_id,
-                prev_player_id,
-            )
-            try:
-                await self.mass.players.cmd_stop(prev_player_id)
-            except Exception as err:
-                self.logger.debug(
-                    "Failed to stop previous player %s: %s",
-                    prev_player_id,
-                    err,
-                )
-
-        # Claim ownership for this queue. The lock lives here (not in
-        # get_stream_details) so preload paths can fetch streamdetails without
-        # accidentally blocking a subsequent cross-queue handoff at the actual
-        # stream request.
-        self._in_use_by_queue = queue_id
-        # Record this request's session id so a later on_source_unselected can
-        # tell whether it is the live teardown or a stale callback from a
-        # superseded same-queue request.
-        self._active_session_id = stream_session_id
-        self._active_player_id = player_id
-        self.logger.debug("Active player set to: %s", player_id)
-
-    async def on_source_unselected(
-        self, source_id: str, queue_id: str, stream_session_id: str
-    ) -> None:
-        """Release the queue-scoped exclusive claim when MA tears down the stream."""
-        if source_id != AUDIO_SOURCE_ID:
-            return
-        # Reject stale callbacks: only release if this is still the active
-        # session. A queue_id check alone is not sufficient — same-queue
-        # reconnects (player drops + reopens the same stream URL before the
-        # original request's finally fires) would otherwise let the old
-        # request's late callback clear the live claim of the new stream.
-        if self._active_session_id != stream_session_id:
-            return
-        self._active_session_id = None
-        if self._in_use_by_queue == queue_id:
-            self._in_use_by_queue = None
-
     def _session_lost(self, player_id: str, session_id: str | None) -> bool:
-        """
-        Return ``True`` when our claim no longer matches the live session.
+        """Return ``True`` when our claim no longer matches the live session.
 
         :param player_id: Queue id captured at generator entry.
         :param session_id: ``_active_session_id`` captured at generator entry.
@@ -1353,8 +1323,7 @@ class YandexYnisonProvider(PluginProvider):
         return self._in_use_by_queue != player_id or self._active_session_id != session_id
 
     def _idempotent(self, action: str, key: str | None) -> bool:
-        """
-        Return ``True`` if ``(action, key)`` was not seen within the TTL window.
+        """Return ``True`` if ``(action, key)`` was not seen within the TTL window.
 
         :param action: A short string identifying the command kind.
         :param key: Sub-key inside the action namespace, or ``None``.
@@ -1377,8 +1346,7 @@ class YandexYnisonProvider(PluginProvider):
         our_ms: int,
         threshold_ms: int = 3000,
     ) -> Literal["ignore", "queue_rebuild", "seek"]:
-        """
-        Classify drift between Ynison-reported and our local position.
+        """Classify drift between Ynison-reported and our local position.
 
         Returns one of:
 
@@ -1401,8 +1369,7 @@ class YandexYnisonProvider(PluginProvider):
         return "seek"
 
     async def _prefetch_format_for_track(self, track_id: str) -> None:
-        """
-        Pre-fetch stream details for *track_id* and adapt PCM format.
+        """Pre-fetch stream details for *track_id* and adapt PCM format.
 
         Best-effort: bounded by ``_PREFETCH_FORMAT_TIMEOUT`` so a slow Yandex
         API does not stall ``_activate_playback``. On timeout / error the
@@ -1482,8 +1449,7 @@ class YandexYnisonProvider(PluginProvider):
         self.mass.create_task(self._check_yandex_provider_match())
 
     async def _check_yandex_provider_match(self) -> None:
-        """
-        Check if a Yandex Music provider is available for audio streaming.
+        """Check if a Yandex Music provider is available for audio streaming.
 
         In borrow mode (self._ym_instance_id set), match strictly by instance_id
         so that audio and credentials come from the same account. In own mode,
@@ -1540,8 +1506,7 @@ class YandexYnisonProvider(PluginProvider):
             return rate
 
     def _update_normalized_format(self, hint: AudioFormat | None = None) -> None:
-        """
-        Set PCM normalization profile based on config and YM quality.
+        """Set PCM normalization profile based on config and YM quality.
 
         Priority: explicit config values > hint from real stream_details >
         auto-detection from YM quality. The hint is fed by
@@ -1723,8 +1688,7 @@ class YandexYnisonProvider(PluginProvider):
         return 0
 
     def _require_connected_ynison(self) -> YnisonClient:
-        """
-        Return the live Ynison client or raise an MA player-control error.
+        """Return the live Ynison client or raise an MA player-control error.
 
         :raises UnsupportedFeaturedException: When the provider's Ynison
             client has not been initialised yet (pre-`handle_async_init`
@@ -1776,7 +1740,7 @@ class YandexYnisonProvider(PluginProvider):
     # Currently only RADIO (personal wave, genre stations).
     # Add "WAVE" here if/when Yandex supports it via the same
     # rotor_station_tracks API.
-    _RADIO_ENTITY_TYPES: ClassVar[set[str]] = {"RADIO"}
+    _RADIO_ENTITY_TYPES = {"RADIO"}
 
     def _maybe_prefetch(
         self,
@@ -1817,8 +1781,7 @@ class YandexYnisonProvider(PluginProvider):
         self._prefetch_task = self.mass.create_task(_do_prefetch())
 
     async def _signal_track_completion(self) -> None:
-        """
-        Signal that the current track finished playing.
+        """Signal that the current track finished playing.
 
         Ynison is a state-sync protocol — the active device must advance
         current_playable_index itself.
@@ -1921,8 +1884,7 @@ class YandexYnisonProvider(PluginProvider):
         entity_type: str,
         playable_list: list[dict[str, Any]],
     ) -> list[dict[str, Any]] | None:
-        """
-        Fetch more tracks from Yandex Music API and return expanded playable_list.
+        """Fetch more tracks from Yandex Music API and return expanded playable_list.
 
         The active device is responsible for replenishing RADIO/wave queues.
         Ynison only syncs state — it does NOT generate new tracks.
@@ -1995,8 +1957,7 @@ class YandexYnisonProvider(PluginProvider):
         *,
         expanded_list: list[dict[str, Any]] | None = None,
     ) -> None:
-        """
-        Send update_player_state to advance the queue to next_index.
+        """Send update_player_state to advance the queue to next_index.
 
         If expanded_list is provided, it replaces the playable_list
         (used after radio queue replenishment).
@@ -2042,8 +2003,7 @@ class YandexYnisonProvider(PluginProvider):
             )
 
     async def _update_queue_list(self, expanded_list: list[dict[str, Any]]) -> None:
-        """
-        Push an expanded playable_list to Ynison without changing index or progress.
+        """Push an expanded playable_list to Ynison without changing index or progress.
 
         Called right after prefetch completes so the YM app sees upcoming
         tracks and enables the "next" button.
@@ -2074,8 +2034,7 @@ class YandexYnisonProvider(PluginProvider):
             await self._advance_queue_index(current_index - 1)
 
     async def _on_seek(self, position: int) -> None:
-        """
-        Handle seek command — send position update to Ynison.
+        """Handle seek command — send position update to Ynison.
 
         :param position: Position in seconds from Music Assistant.
         """
