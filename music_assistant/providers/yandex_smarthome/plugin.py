@@ -142,6 +142,32 @@ class YandexSmartHomePlugin(PluginProvider):
         else:
             self.logger.error("Unknown connection type: %s", self._connection_type)
 
+    async def unload(self, is_removed: bool = False) -> None:
+        """Handle unload/close of the provider.
+
+        Called when provider is deregistered (e.g. MA exiting or config reloading).
+        is_removed will be set to True when the provider is removed from the configuration.
+        """
+        self.logger.info("Yandex Smart Home plugin unloading (removed=%s)", is_removed)
+
+        if self._state_notifier:
+            await self._state_notifier.stop()
+            self._state_notifier = None
+
+        if self._direct_handler:
+            self._direct_handler.unregister_routes()
+            self._direct_handler = None
+
+        if self._cloud_manager:
+            await self._cloud_manager.disconnect()
+            self._cloud_manager = None
+
+        if self._cloud_task:
+            cloud_task = self._cloud_task
+            self._cloud_task = None
+            if not cloud_task.done():
+                cloud_task.cancel()
+
     async def _start_cloud_mode(self) -> None:
         """Initialize and start cloud relay connection + state notifier."""
         if not self._connection_token or not self._connection_token.get_secret():
@@ -340,29 +366,3 @@ class YandexSmartHomePlugin(PluginProvider):
         except Exception:
             self.logger.exception("Error handling cloud request: %s", action)
             return build_response(request_id, {})
-
-    async def unload(self, is_removed: bool = False) -> None:
-        """Handle unload/close of the provider.
-
-        Called when provider is deregistered (e.g. MA exiting or config reloading).
-        is_removed will be set to True when the provider is removed from the configuration.
-        """
-        self.logger.info("Yandex Smart Home plugin unloading (removed=%s)", is_removed)
-
-        if self._state_notifier:
-            await self._state_notifier.stop()
-            self._state_notifier = None
-
-        if self._direct_handler:
-            self._direct_handler.unregister_routes()
-            self._direct_handler = None
-
-        if self._cloud_manager:
-            await self._cloud_manager.disconnect()
-            self._cloud_manager = None
-
-        if self._cloud_task:
-            cloud_task = self._cloud_task
-            self._cloud_task = None
-            if not cloud_task.done():
-                cloud_task.cancel()
