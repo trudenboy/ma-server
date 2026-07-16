@@ -12,8 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 from music_assistant_models.errors import LoginFailed
-from ya_passport_auth import SecretStr
-
 from music_assistant.providers.yandex_ynison.constants import (
     DEFAULT_APP_NAME,
     DEVICE_TYPE_WEB,
@@ -27,6 +25,7 @@ from music_assistant.providers.yandex_ynison.ynison_client import (
     generate_device_id,
     make_version_block,
 )
+from ya_passport_auth import SecretStr
 
 
 @pytest.fixture
@@ -284,7 +283,8 @@ class TestYnisonClientParseState:
         assert client.state.last_update_is_echo is True
 
     def test_echo_flag_false_when_only_queue_is_ours(self, client: YnisonClient) -> None:
-        """Status authored by peer → NOT echo, even if queue.version is ours.
+        """
+        Status authored by peer → NOT echo, even if queue.version is ours.
 
         Regression for the OR-logic bug: a peer toggling pause produced
         status.version=peer + our stale queue.version=ours, which the old
@@ -318,7 +318,8 @@ class TestYnisonClientParseState:
         assert client.state.last_update_is_echo is False
 
     def test_echo_flag_false_when_only_status_is_ours(self, client: YnisonClient) -> None:
-        """Queue authored by peer → NOT echo, even if status.version is ours.
+        """
+        Queue authored by peer → NOT echo, even if status.version is ours.
 
         The mirror case: our heartbeat just stamped status.version=ours, but
         the peer changed the queue. Under AND-logic the peer change is not
@@ -371,7 +372,8 @@ class TestYnisonClientParseState:
         assert client.state.last_update_is_echo is False
 
     def test_echo_flag_false_when_version_missing(self, client: YnisonClient) -> None:
-        """No version block at all → not an echo (safe default).
+        """
+        No version block at all → not an echo (safe default).
 
         AND-logic treats missing version-block as "not ours" — matches the
         previous safe default. Without a version-block we can't claim
@@ -393,7 +395,8 @@ class TestYnisonClientParseState:
         assert client.state.last_update_is_echo is False
 
     def test_parse_state_coerces_int_timestamps_to_strings(self, client: YnisonClient) -> None:
-        """Inbound int timestamps are stringified so outbound echoes stay safe.
+        """
+        Inbound int timestamps are stringified so outbound echoes stay safe.
 
         Guards the reconnect path (send_full_state echoes self.state.player_state)
         and queue-mutating update_player_state calls that shallow-copy status.
@@ -946,7 +949,8 @@ class TestConnectState:
             await client._message_task
 
     async def test_reconnect_sends_fresh_state_no_stale_replay(self, client: YnisonClient) -> None:
-        """v2.0: reconnect sends a fresh initial state — no stale replay.
+        """
+        v2.0: reconnect sends a fresh initial state — no stale replay.
 
         Replaying the last known state (which after a heartbeat could carry
         `paused=True`) caused the server to broadcast it back and trigger

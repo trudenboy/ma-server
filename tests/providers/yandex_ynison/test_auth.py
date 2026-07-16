@@ -6,14 +6,13 @@ from unittest import mock
 
 import pytest
 from music_assistant_models.errors import LoginFailed
+from music_assistant.providers.yandex_ynison.auth import perform_qr_auth, refresh_music_token
 from ya_passport_auth import SecretStr
 from ya_passport_auth.exceptions import (
     InvalidCredentialsError,
     QRTimeoutError,
     YaPassportError,
 )
-
-from music_assistant.providers.yandex_ynison.auth import perform_qr_auth, refresh_music_token
 
 # ---------------------------------------------------------------
 # refresh_music_token
@@ -80,7 +79,8 @@ def _patched_passport(client: mock.AsyncMock) -> mock._patch[mock.MagicMock]:
 
 
 def _patched_auth_helper() -> tuple[mock._patch[mock.MagicMock], mock.MagicMock]:
-    """Patch music_assistant.helpers.auth.AuthenticationHelper at its source.
+    """
+    Patch music_assistant.helpers.auth.AuthenticationHelper at its source.
 
     perform_qr_auth lazy-imports this symbol inside the function body, so the
     patch target is the original module path — not ``provider.auth.``.

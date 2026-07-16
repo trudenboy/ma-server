@@ -1,4 +1,5 @@
-"""Yandex Passport authentication helpers.
+"""
+Yandex Passport authentication helpers.
 
 Thin wrappers over the shared Music Assistant auth layer in
 ``ya_passport_auth.ma``. Two helpers are exposed to the rest of the plugin:
@@ -30,7 +31,8 @@ if TYPE_CHECKING:
 
 
 async def perform_qr_auth(mass: MusicAssistant, session_id: str) -> tuple[str, str, str | None]:
-    """Run a QR login flow and return ``(x_token, music_token, display_login)``.
+    """
+    Run a QR login flow and return ``(x_token, music_token, display_login)``.
 
     Opens the QR popup in the MA frontend, polls the Yandex Passport
     endpoint until the user confirms the scan in the Yandex app, then
@@ -47,7 +49,8 @@ async def perform_qr_auth(mass: MusicAssistant, session_id: str) -> tuple[str, s
 
 
 async def refresh_music_token(x_token: SecretStr) -> SecretStr:
-    """Exchange an x_token for a fresh music-scoped OAuth token.
+    """
+    Exchange an x_token for a fresh music-scoped OAuth token.
 
     Transient Passport failures (network, rate limiting) raise
     ``ResourceTemporarilyUnavailable`` so callers retry later instead of

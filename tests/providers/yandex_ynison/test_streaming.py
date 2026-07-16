@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from music_assistant_models.enums import ContentType
 from music_assistant_models.media_items import AudioFormat
-
 from music_assistant.providers.yandex_ynison.streaming import (
     PCM_LOSSLESS_PARAMS,
     PCM_LOSSY_PARAMS,
@@ -20,7 +19,8 @@ class TestMakePcmFormat:
     """Tests for the AudioFormat factory."""
 
     def test_lossless_format(self) -> None:
-        """Lossless params produce s24le/44.1kHz/24bit/stereo.
+        """
+        Lossless params produce s24le/44.1kHz/24bit/stereo.
 
         The no-hint floor is 44.1 kHz (spec 0006): the bulk of the Yandex
         lossless catalogue is CD-rate FLAC, so a missing format hint must
