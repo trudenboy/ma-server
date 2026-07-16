@@ -59,7 +59,8 @@ from .schema import CloudRequest
 
 
 class YandexSmartHomePlugin(PluginProvider):
-    """Plugin provider that exposes MA players to Yandex Alice via Smart Home API.
+    """
+    Plugin provider that exposes MA players to Yandex Alice via Smart Home API.
 
     Follows the same pattern as the HASS plugin provider: subscribes to MA events,
     maintains a mapping of MA players to Yandex Smart Home devices, and handles
@@ -129,7 +130,8 @@ class YandexSmartHomePlugin(PluginProvider):
         )
 
     async def loaded_in_mass(self) -> None:
-        """Call after the provider has been loaded.
+        """
+        Call after the provider has been loaded.
 
         Starts cloud WebSocket connection and state notifier.
         """
@@ -143,7 +145,8 @@ class YandexSmartHomePlugin(PluginProvider):
             self.logger.error("Unknown connection type: %s", self._connection_type)
 
     async def unload(self, is_removed: bool = False) -> None:
-        """Handle unload/close of the provider.
+        """
+        Handle unload/close of the provider.
 
         Called when provider is deregistered (e.g. MA exiting or config reloading).
         is_removed will be set to True when the provider is removed from the configuration.
@@ -233,7 +236,8 @@ class YandexSmartHomePlugin(PluginProvider):
         await self._state_notifier.start()
 
     async def _start_direct_mode(self) -> None:
-        """Initialize direct connection mode — HTTP endpoints + state notifier.
+        """
+        Initialize direct connection mode — HTTP endpoints + state notifier.
 
         Two-stage: HTTP routes are registered as soon as ``direct_client_secret``
         is available (auto-generated when the user opens the config form), so

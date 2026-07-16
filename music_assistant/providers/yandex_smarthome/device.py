@@ -1,4 +1,5 @@
-"""MA Player ↔ Yandex Smart Home device mapper.
+"""
+MA Player ↔ Yandex Smart Home device mapper.
 
 Maps Music Assistant Player state to Yandex Smart Home device descriptions,
 capability states, and action execution.
@@ -108,7 +109,8 @@ def _resolve_combined_slot(
     source_list: list[PlayerSource],
     playlist_uris: tuple[str, ...] | list[str],
 ) -> tuple[str, str] | None:
-    """Resolve a 0-based slot index to ("native"|"playlist", value).
+    """
+    Resolve a 0-based slot index to ("native"|"playlist", value).
 
     Returns None if the slot is out of range. The native source slots come
     first; playlist URIs fill the remainder up to MAX_INPUT_SOURCES.
@@ -171,7 +173,8 @@ _RE_MULTI_SPACE = re.compile(r" {2,}")
 
 
 def normalize_device_name(name: str) -> str:
-    """Normalize player name for Yandex Smart Home.
+    """
+    Normalize player name for Yandex Smart Home.
 
     Rules: only Russian/English letters, digits, and spaces;
     mandatory space between letters and digits.
@@ -438,7 +441,8 @@ async def execute_capability_action(  # noqa: PLR0915
     *,
     playlist_uris: tuple[str, ...] | list[str] = (),
 ) -> CapabilityActionResult:
-    """Execute a Yandex capability action by calling the corresponding MA player command.
+    """
+    Execute a Yandex capability action by calling the corresponding MA player command.
 
     Returns a CapabilityActionResult with success or error status.
     """
@@ -540,7 +544,7 @@ async def execute_capability_action(  # noqa: PLR0915
                 ),
             )
 
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return CapabilityActionResult(
             type=action.type,
             state=CapabilityActionResultState(

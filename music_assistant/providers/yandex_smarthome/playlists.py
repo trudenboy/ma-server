@@ -1,4 +1,5 @@
-"""Helpers for exposing MA library playlists as Yandex input_source modes.
+"""
+Helpers for exposing MA library playlists as Yandex input_source modes.
 
 Wraps the few MA APIs used by the playlist-source feature so the rest of
 the provider stays decoupled from `mass.music`/`player_queues` internals
@@ -21,7 +22,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def fetch_playlist_options(mass: MusicAssistant) -> list[ConfigValueOption]:
-    """Build ConfigValueOption list of all library playlists for the config form.
+    """
+    Build ConfigValueOption list of all library playlists for the config form.
 
     Pages through `iter_library_items` so the dropdown is not silently
     truncated for users with very large libraries (the underlying
@@ -49,7 +51,8 @@ async def fetch_playlist_options(mass: MusicAssistant) -> list[ConfigValueOption
 
 
 async def play_playlist(mass: MusicAssistant, player_id: str, uri: str) -> None:
-    """Start playback of a playlist URI on the given player's queue.
+    """
+    Start playback of a playlist URI on the given player's queue.
 
     `play_media` accepts a URI string directly and resolves the playlist's
     tracks into the queue. queue_id == player_id for the player's own queue.

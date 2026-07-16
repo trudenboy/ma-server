@@ -127,7 +127,8 @@ def _is_skill_token_set(
     instance_id: str | None,
     values: dict[str, ConfigValueType],
 ) -> bool:
-    """Return True if a non-empty Skill OAuth token is persisted or in-flight.
+    """
+    Return True if a non-empty Skill OAuth token is persisted or in-flight.
 
     The token is a SECURE_STRING — the frontend doesn't echo it back into
     ``values`` on re-open. Prefer the persisted provider-config value; fall
@@ -148,7 +149,8 @@ def _resolve_direct_client_secret(
     instance_id: str | None,
     values: dict[str, ConfigValueType],
 ) -> str:
-    """Return the direct-mode per-install OAuth client secret.
+    """
+    Return the direct-mode per-install OAuth client secret.
 
     The frontend does not echo SECURE_STRING fields back into ``values`` on
     re-open, so prefer the saved provider config; fall back to the in-flight
@@ -168,7 +170,8 @@ def _resolve_cached_x_token(
     instance_id: str | None,
     values: dict[str, ConfigValueType],
 ) -> str:
-    """Return the cached Yandex Passport x_token, or empty string if absent.
+    """
+    Return the cached Yandex Passport x_token, or empty string if absent.
 
     Like the other secret resolvers, prefers the persisted SECURE_STRING
     from saved config since the frontend does not echo secrets back into
@@ -189,7 +192,8 @@ async def _run_auto_create_action(
     connection_type: str,
     instance_id: str | None,
 ) -> None:
-    """Run the smart-home auto-create skill pipeline.
+    """
+    Run the smart-home auto-create skill pipeline.
 
     Never re-raises: failures are persisted in artifacts.last_error so the
     UI can render the message on the next form open.
@@ -471,7 +475,8 @@ def _build_auto_create_status(
     *,
     skill_token_set: bool = True,
 ) -> tuple[str, str]:
-    """Return (status_label, action_button_label) based on artifacts state.
+    """
+    Return (status_label, action_button_label) based on artifacts state.
 
     The action button label flips based on what makes sense to do next:
     fresh attempt → 'Create…', resumable failure → 'Retry…',

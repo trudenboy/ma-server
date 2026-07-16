@@ -1,4 +1,5 @@
-"""Tests for provider/ma_authenticator.py.
+"""
+Tests for provider/ma_authenticator.py.
 
 Scope is intentionally narrow — the inline-imported PassportClient +
 AuthenticationHelper integration is verified end-to-end against a real
@@ -115,7 +116,8 @@ class TestBuildDeviceCodePage:
         assert "&quot;" in html or "&#34;" in html
 
     def test_status_url_with_closing_script_tag_escaped(self) -> None:
-        """Defensive escape of </script> sequence inside the JS string literal.
+        """
+        Defensive escape of </script> sequence inside the JS string literal.
 
         Without the replace, a malicious status_url containing ``</script>`` would
         prematurely close the surrounding ``<script>`` block and inject HTML.

@@ -1,4 +1,5 @@
-"""Borrow mode: skill auto-create uses a linked Yandex Music account.
+"""
+Borrow mode: skill auto-create uses a linked Yandex Music account.
 
 Covers spec 0001 — account-source dropdown, no-Device-Flow semantics for a
 borrowed token, read-only use, and actionable failure reporting.

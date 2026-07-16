@@ -1,4 +1,5 @@
-"""State notifier — reports MA player state changes to Yandex Smart Home.
+"""
+State notifier — reports MA player state changes to Yandex Smart Home.
 
 Watches MA player events and pushes state updates to Yandex via the
 callback/state API endpoint (cloud or direct). Uses a 1-second debounce
@@ -38,7 +39,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class _CallbackErrorAlreadyLogged(RuntimeError):
-    """Sentinel for state-callback errors that have already been logged.
+    """
+    Sentinel for state-callback errors that have already been logged.
 
     Raised by ``_send_state_callback`` after dedupe-aware logging so the
     outer exception handler can re-queue (via ``_flush_pending``) without
@@ -174,7 +176,8 @@ class StateNotifier:
         )
 
     async def _flush_pending(self) -> None:
-        """Send all pending state changes to Yandex.
+        """
+        Send all pending state changes to Yandex.
 
         Reads the fresh player state at flush time (not at event time)
         so transient states during track transitions are not reported.
@@ -214,7 +217,8 @@ class StateNotifier:
     # -----------------------------------------------------------------------
 
     def _emit_callback_error(self, fingerprint: str, warn_message: str) -> None:
-        """Log a state-callback error once per fingerprint, then DEBUG.
+        """
+        Log a state-callback error once per fingerprint, then DEBUG.
 
         Different fingerprint classes (UNKNOWN_USER, HTTP 5xx, transport
         failures) each emit a single WARNING the first time they occur,
@@ -228,7 +232,8 @@ class StateNotifier:
         self._logger.warning("%s", warn_message)
 
     async def _send_state_callback(self, devices: list[DeviceState]) -> None:
-        """POST state callback to Yandex.
+        """
+        POST state callback to Yandex.
 
         Yandex's callback endpoint can fail three ways: HTTP 5xx while
         the skill propagates through their CDN, HTTP 400 + UNKNOWN_USER

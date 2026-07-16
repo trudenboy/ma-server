@@ -1,4 +1,5 @@
-"""Music-Assistant Device-Flow authenticator for ya-dialogs-api.
+"""
+Music-Assistant Device-Flow authenticator for ya-dialogs-api.
 
 Adapter that wraps the shared ``ya_passport_auth.ma`` Device Flow behind
 the :data:`ya_dialogs_api.AuthenticatorCM` Protocol — a no-arg
@@ -56,7 +57,8 @@ def make_authenticator(
     on_token_obtained: Callable[[str], None] | None = None,
     allow_device_flow: bool = True,
 ) -> AuthenticatorCM:
-    """Build an :data:`AuthenticatorCM` for ``ya_dialogs_api.auto_create_skill``.
+    """
+    Build an :data:`AuthenticatorCM` for ``ya_dialogs_api.auto_create_skill``.
 
     The returned no-arg callable produces an ``aiohttp.ClientSession``
     context manager. On ``__aenter__`` it either:

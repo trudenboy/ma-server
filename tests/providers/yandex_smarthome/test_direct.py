@@ -802,7 +802,8 @@ async def test_start_direct_mode_registers_routes(mock_mass: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_start_direct_mode_missing_skill_id(mock_mass: MagicMock) -> None:
-    """Direct mode still registers HTTP routes when skill_id is missing.
+    """
+    Direct mode still registers HTTP routes when skill_id is missing.
 
     HTTP routes need to be live so Yandex's backend validation during
     auto-create can succeed; the state notifier is skipped because

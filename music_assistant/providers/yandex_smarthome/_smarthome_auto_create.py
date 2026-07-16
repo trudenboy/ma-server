@@ -1,4 +1,5 @@
-"""Smart-home auto-create-skill helpers — URL derivation + preconditions.
+"""
+Smart-home auto-create-skill helpers — URL derivation + preconditions.
 
 Equivalent of the deleted ``derive_backend_uri`` / ``derive_auth_urls`` /
 ``derive_client_id`` / ``_resolve_base_url`` / ``check_preconditions``
@@ -37,7 +38,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class SmartHomeUrls:
-    """The five pre-computed values ya_dialogs_api.auto_create_skill needs.
+    """
+    The five pre-computed values ya_dialogs_api.auto_create_skill needs.
 
     Pass these straight into ``auto_create_skill`` — they correspond to its
     ``backend_uri`` / ``oauth_authorize_url`` / ``oauth_token_url`` /
@@ -52,7 +54,8 @@ class SmartHomeUrls:
 
 
 def resolve_base_url(mass: MusicAssistant, override: str | None) -> str:
-    """Pick override over ``mass.webserver.base_url``; strip trailing slashes.
+    """
+    Pick override over ``mass.webserver.base_url``; strip trailing slashes.
 
     ``override`` is the user-set ``CONF_EXTERNAL_BASE_URL``. Lets users keep
     MA's global Base URL pointing at the local address (so HA Ingress / local
@@ -74,7 +77,8 @@ def derive_smart_home_urls(
     cloud_instance_id: str,
     direct_client_secret: str,
 ) -> SmartHomeUrls:
-    """Compute the five pre-computed values for ``auto_create_skill``.
+    """
+    Compute the five pre-computed values for ``auto_create_skill``.
 
     cloud_plus
         Backend uses :data:`CLOUD_SKILL_WEBHOOK_TEMPLATE` (the yaha-cloud
