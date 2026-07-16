@@ -1,4 +1,5 @@
-"""Yandex Passport session helpers for the auto-create / auto-update flows.
+"""
+Yandex Passport session helpers for the auto-create / auto-update flows.
 
 Two pieces of plumbing:
 
@@ -29,7 +30,8 @@ AuthenticatorCM = Callable[[], AbstractAsyncContextManager[aiohttp.ClientSession
 
 @asynccontextmanager
 async def passport_client_session() -> AsyncIterator[PassportClient]:
-    """Yield a :class:`PassportClient` that owns its session and cleans it up.
+    """
+    Yield a :class:`PassportClient` that owns its session and cleans it up.
 
     Single entry point so tests can monkeypatch
     ``provider.auth_session.passport_client_session`` instead of patching
@@ -41,7 +43,8 @@ async def passport_client_session() -> AsyncIterator[PassportClient]:
 
 @asynccontextmanager
 async def cached_authenticated_session(x_token: str) -> AsyncIterator[aiohttp.ClientSession]:
-    """Yield an aiohttp session pre-populated with Yandex Passport cookies.
+    """
+    Yield an aiohttp session pre-populated with Yandex Passport cookies.
 
     Owns the session — closes it on exit. Any
     :class:`ya_passport_auth.InvalidCredentialsError` from
@@ -63,7 +66,8 @@ async def cached_authenticated_session(x_token: str) -> AsyncIterator[aiohttp.Cl
 
 
 def make_cached_authenticator(x_token: str) -> AuthenticatorCM:
-    """Return an ``AuthenticatorCM`` matching the ya-dialogs-api contract.
+    """
+    Return an ``AuthenticatorCM`` matching the ya-dialogs-api contract.
 
     Each invocation of the returned factory opens a fresh
     :func:`cached_authenticated_session` — short-lived, scoped to a single

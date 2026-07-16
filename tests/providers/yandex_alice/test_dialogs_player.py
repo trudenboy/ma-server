@@ -74,7 +74,8 @@ class TestResolveQuery:
         assert result is playlist
 
     async def test_search_kind_prefers_artist(self) -> None:
-        """kind=search prefers artist over playlist/track for unqualified queries.
+        """
+        kind=search prefers artist over playlist/track for unqualified queries.
 
         Users typically say a band/artist name without a "плейлист" /
         "альбом" qualifier ("включи Iron Maiden"). Picking the artist

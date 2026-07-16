@@ -1,4 +1,5 @@
-"""Yandex Passport Device Flow sign-in for the skill pipeline.
+"""
+Yandex Passport Device Flow sign-in for the skill pipeline.
 
 Thin wrapper over the shared Music Assistant auth layer in
 ``ya_passport_auth.ma``. The form-side click on *Sign in to Yandex
@@ -59,7 +60,8 @@ async def perform_device_auth(
     *,
     skill_name: str = "Music Assistant",
 ) -> tuple[str, str]:
-    """Run a complete Yandex Passport Device Flow.
+    """
+    Run a complete Yandex Passport Device Flow.
 
     Returns ``(x_token, display_login)`` — the long-lived auth token
     plus the user-visible Yandex login (used in the "Authorized as

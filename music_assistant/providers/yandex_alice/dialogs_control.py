@@ -1,5 +1,6 @@
 # ruff: noqa: RUF001
-"""Playback-control NLU + executor for the Yandex Dialogs custom skill.
+"""
+Playback-control NLU + executor for the Yandex Dialogs custom skill.
 
 As of v1.4.0 most of the control surface is recognised by Yandex itself
 through declarative custom intents (see ``provider.dialogs_grammar``);
@@ -88,7 +89,8 @@ def parse_control(
     text: str,
     entities: list[Any] | None = None,  # noqa: ARG001  -- kept for backwards-compatible signature
 ) -> ParsedControl | None:
-    """Classify a voice utterance as a regex-handled control command, or None.
+    """
+    Classify a voice utterance as a regex-handled control command, or None.
 
     Recognises only ``transfer`` ("переведи на X") in v1.4.0+. Every
     other control command is recognised by Yandex itself through
@@ -122,7 +124,8 @@ def parse_control(
 
 
 def _plural_ru(n: int, forms: tuple[str, str, str]) -> str:
-    """Pick the correct Russian quantitative form for `n`.
+    """
+    Pick the correct Russian quantitative form for `n`.
 
     :param n: The number.
     :param forms: ``(form_for_1, form_for_2_to_4, form_for_5_plus)``.
@@ -153,7 +156,8 @@ def format_list_players(players: list[Any]) -> str:
 
 
 def control_confirmation(control: ParsedControl) -> str:  # noqa: PLR0911
-    """User-facing confirmation text for a control action.
+    """
+    User-facing confirmation text for a control action.
 
     Caveat: ``list_players`` is **not** confirmed here — the handler builds
     the response text from the live player list via ``format_list_players``.
@@ -214,7 +218,8 @@ async def execute_control(  # noqa: PLR0915
     control: ParsedControl,
     player: Any,
 ) -> None:
-    """Dispatch a ParsedControl to the matching MA command.
+    """
+    Dispatch a ParsedControl to the matching MA command.
 
     Errors are logged and swallowed — Alice has already been told the
     action was accepted; we don't have a channel to surface failures

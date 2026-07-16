@@ -1,4 +1,5 @@
-"""Tests for provider/auto_create.py — blocking single-click pipeline.
+"""
+Tests for provider/auto_create.py — blocking single-click pipeline.
 
 The self-resuming Device Flow state machine is gone (see Phase C
 refactor) — sign-in now lives in :mod:`provider.auth_page` as a

@@ -1,4 +1,5 @@
-"""Dialog-skill creation orchestrator — blocking single-click pipeline.
+"""
+Dialog-skill creation orchestrator — blocking single-click pipeline.
 
 Each click on *Create skill* runs ``auto_create_skill`` end-to-end
 against the Yandex Dialogs developer console using the cached
@@ -69,7 +70,8 @@ __all__ = [
 
 
 class LocalAutoCreateStage(StrEnum):
-    """High-level UX stage derived from artifacts + cached token.
+    """
+    High-level UX stage derived from artifacts + cached token.
 
     Drives the section routing in :mod:`provider.auto_create_view`
     and the button label / cancel visibility in Step 2.
@@ -88,7 +90,8 @@ class LocalAutoCreateStage(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AutoCreateOutcome:
-    """Result of one click on the Create skill / Recreate / Adopt button.
+    """
+    Result of one click on the Create skill / Recreate / Adopt button.
 
     The dispatcher in :mod:`provider.__init__` writes ``artifacts``
     and (when set) ``x_token`` into the form ``values`` so MA persists
@@ -128,7 +131,8 @@ async def _pre_check_duplicate(
     cached_x_token: str,
     skill_name: str,
 ) -> tuple[str, str] | None:
-    """Probe Yandex for an existing skill with the same name (case-insensitive).
+    """
+    Probe Yandex for an existing skill with the same name (case-insensitive).
 
     Returns ``(skill_id, registered_name)`` or ``None`` if no match.
     Any exception is logged and treated as "no match" — the duplicate
@@ -164,7 +168,8 @@ async def _pre_check_duplicate(
 
 
 def _make_logging_creator_factory() -> Callable[[aiohttp.ClientSession], DialogsSkillCreator]:
-    """Build a creator factory that logs update_draft payload + errors.
+    """
+    Build a creator factory that logs update_draft payload + errors.
 
     Wrapping is applied to the *instance* method post-construction so
     we don't need to subclass ``DialogsSkillCreator`` (which has
@@ -215,7 +220,8 @@ async def _run_pipeline(
     artifacts: SkillCreationArtifacts,
     skip_duplicate_check: bool = False,
 ) -> AutoCreateOutcome:
-    """Run the OAuth-free aliceSkill pipeline end-to-end on cached cookies.
+    """
+    Run the OAuth-free aliceSkill pipeline end-to-end on cached cookies.
 
     Error handling has two layers:
 
@@ -330,7 +336,8 @@ async def run_create_skill(
     entities: list[EntityDraft],
     artifacts: SkillCreationArtifacts,
 ) -> AutoCreateOutcome:
-    """Drive the create_skill click — duplicate pre-check + full pipeline.
+    """
+    Drive the create_skill click — duplicate pre-check + full pipeline.
 
     Pre-conditions:
 
@@ -372,7 +379,8 @@ async def adopt_existing_skill(
     entities: list[EntityDraft],
     existing_skill_id: str,
 ) -> AutoCreateOutcome:
-    """Re-deploy an existing skill against this MA's webhook URL.
+    """
+    Re-deploy an existing skill against this MA's webhook URL.
 
     Pre-positions ``artifacts`` to ``APP_CREATED`` (with the
     discovered ``skill_id``) so ``auto_create_skill`` skips

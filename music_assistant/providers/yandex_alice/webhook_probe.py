@@ -1,4 +1,5 @@
-"""Outgoing webhook reachability probe (#11).
+"""
+Outgoing webhook reachability probe (#11).
 
 Used by ``CONF_ACTION_TEST_WEBHOOK`` to verify the public path Yandex will
 take to reach our webhook before the user spends a Device Flow + skill
@@ -54,7 +55,8 @@ def _build_test_envelope() -> dict[str, object]:
 
 
 def _validate_inputs(base_url: str, webhook_secret: str) -> tuple[bool, str] | None:
-    """Pre-network sanity check; returns failure tuple or None to continue.
+    """
+    Pre-network sanity check; returns failure tuple or None to continue.
 
     Rejects private / loopback / link-local hosts up front: Yandex's cloud
     cannot reach them, and the probe itself would falsely report
@@ -77,7 +79,8 @@ def _validate_inputs(base_url: str, webhook_secret: str) -> tuple[bool, str] | N
 
 
 async def probe_webhook_reachability(base_url: str, webhook_secret: str) -> tuple[bool, str]:
-    """POST a sentinel envelope and classify the response.
+    """
+    POST a sentinel envelope and classify the response.
 
     Returns ``(reachable, message)``:
 

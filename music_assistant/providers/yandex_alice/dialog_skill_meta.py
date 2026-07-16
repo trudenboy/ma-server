@@ -1,4 +1,5 @@
-"""Pure helpers for assembling Yandex Dialogs skill metadata.
+"""
+Pure helpers for assembling Yandex Dialogs skill metadata.
 
 Side-effect free: no MA / aiohttp / network access. Lives in its own module
 so the orchestrator (auto_create.py / auto_update.py) can be tested without
@@ -14,7 +15,8 @@ from .url_helpers import is_public_https_url
 
 
 def validate_skill_name(value: object) -> bool:
-    """Pre-flight check for the Yandex Dialogs skill name field.
+    """
+    Pre-flight check for the Yandex Dialogs skill name field.
 
     Yandex enforces three constraints when a skill is created:
 
@@ -39,7 +41,8 @@ def validate_skill_name(value: object) -> bool:
 
 
 def validate_activation_phrase(value: object) -> bool:
-    """Pre-flight check for an *optional* extra activation phrase.
+    """
+    Pre-flight check for an *optional* extra activation phrase.
 
     Same word/length rules as :func:`validate_skill_name`, but an
     **empty / whitespace-only** value is accepted — the slot is
@@ -57,7 +60,8 @@ def validate_activation_phrase(value: object) -> bool:
 
 
 def build_backend_uri(base_url: str, webhook_secret: str) -> str:
-    """Compose the public webhook URL Yandex must call.
+    """
+    Compose the public webhook URL Yandex must call.
 
     Yandex sends voice phrases directly from its cloud to the URL we
     register, so the host must be reachable from the public internet.
@@ -88,7 +92,8 @@ def build_backend_uri(base_url: str, webhook_secret: str) -> str:
 
 
 def build_skill_description(skill_name: str) -> str:
-    """Default Russian description shown in the Alice catalog and to moderators.
+    """
+    Default Russian description shown in the Alice catalog and to moderators.
 
     Yandex rejects empty descriptions for ``aliceSkill`` skills, so we always
     return a non-empty string. Embeds the skill name so the catalog listing
@@ -109,7 +114,8 @@ def build_activation_phrases(skill_name: str) -> list[str]:
 
 
 def build_structured_examples(skill_name: str) -> list[dict[str, Any]]:
-    """Default structured examples shown to moderators.
+    """
+    Default structured examples shown to moderators.
 
     Shape captured from a successful PATCH issued by the dev console after a
     manual form fill (see ya_dialogs_api.api_client.build_dialog_draft_payload

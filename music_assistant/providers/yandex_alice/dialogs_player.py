@@ -1,5 +1,6 @@
 # ruff: noqa: RUF001
-"""Music + player resolvers for the Yandex Dialogs custom-skill webhook.
+"""
+Music + player resolvers for the Yandex Dialogs custom-skill webhook.
 
 `resolve_query` turns a `ParsedCommand` into a concrete URI/MediaItem ready
 to feed to `mass.player_queues.play_media`. `play_for_alice` wraps the
@@ -51,7 +52,7 @@ def _first(items: Any) -> Any:
     """Return the first item of a Sequence, or None if empty/not-a-sequence."""
     try:
         return next(iter(items))
-    except (StopIteration, TypeError):
+    except StopIteration, TypeError:
         return None
 
 
@@ -61,7 +62,8 @@ def _first(items: Any) -> Any:
 
 
 async def resolve_query(mass: MusicAssistant, parsed: ParsedCommand) -> MediaItemType | str | None:
-    """Pick the best media item for the parsed voice command.
+    """
+    Pick the best media item for the parsed voice command.
 
     Returns either a MediaItem or a URI string (both accepted by
     play_media); None means we couldn't resolve and the webhook handler
@@ -178,7 +180,8 @@ def _find_yandex_music_provider(mass: MusicAssistant) -> Any:
 
 
 async def _resolve_my_wave(mass: MusicAssistant) -> str | None:
-    """Resolve "My Wave" radio — yandex_music rotor station user:onyourwave.
+    """
+    Resolve "My Wave" radio — yandex_music rotor station user:onyourwave.
 
     Returns a track URI from the rotor batch; play_media in radio mode
     will keep pulling next tracks via the standard queue radio loop. If
@@ -209,7 +212,8 @@ async def _resolve_my_wave(mass: MusicAssistant) -> str | None:
 
 
 async def _resolve_genre(mass: MusicAssistant, query: str) -> MediaItemType | str | None:
-    """Resolve genre-based radio.
+    """
+    Resolve genre-based radio.
 
     Best-effort: try yandex_music genre rotor;
     fall back to plain artist search with radio_mode upstream.
@@ -273,7 +277,8 @@ async def play_for_alice(
     radio_mode: bool = False,
     enqueue_option: str | None = None,
 ) -> None:
-    """Power the player on if needed, then start playback via player_queues.
+    """
+    Power the player on if needed, then start playback via player_queues.
 
     ``enqueue_option`` (None / "replace" / "next" / "add") is mapped to
     the matching :class:`QueueOption` and forwarded to

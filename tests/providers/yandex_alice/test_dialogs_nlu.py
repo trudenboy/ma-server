@@ -238,7 +238,8 @@ class TestResolvePlayer:
         assert result is None
 
     def test_ambiguous_returns_none(self) -> None:
-        """When the hint matches multiple players in the same tier, resolve_player returns None.
+        """
+        When the hint matches multiple players in the same tier, resolve_player returns None.
 
         The caller is expected to use ``resolve_player_candidates`` directly
         when it wants to surface the ambiguity (P0.3 disambiguation).

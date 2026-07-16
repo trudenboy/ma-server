@@ -1,5 +1,6 @@
 # ruff: noqa: RUF001
-"""TTS pronunciation hints for Alice's text-to-speech.
+"""
+TTS pronunciation hints for Alice's text-to-speech.
 
 Yandex Alice's TTS gives passable Russian pronunciation out of the box but
 often mangles foreign artist / band names — "Metallica" becomes

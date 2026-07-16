@@ -1,4 +1,5 @@
-"""Public-HTTPS URL detection + validation helpers (#8).
+"""
+Public-HTTPS URL detection + validation helpers (#8).
 
 Phase 0 of the v1.2.0 UX overhaul confirmed that the obvious
 ``mass.streams.base_url`` and ``mass.webserver.base_url`` attributes
@@ -51,7 +52,8 @@ def _is_private_or_loopback_host(host: str) -> bool:
 
 
 def is_public_https_url(url: str) -> bool:
-    """Return True iff *url* is HTTPS and points to a non-private host.
+    """
+    Return True iff *url* is HTTPS and points to a non-private host.
 
     Used by:
 
@@ -70,7 +72,8 @@ def is_public_https_url(url: str) -> bool:
 
 
 def validate_external_base_url(value: object) -> bool:
-    """Pre-flight ``ConfigEntry(validate=...)`` for the External Base URL field.
+    """
+    Pre-flight ``ConfigEntry(validate=...)`` for the External Base URL field.
 
     Empty is allowed (user can still set up later); non-empty must be HTTPS
     and not a private host.
@@ -84,7 +87,8 @@ def validate_external_base_url(value: object) -> bool:
 
 
 def try_detect_public_https_url(mass: MusicAssistant) -> str | None:
-    """Best-effort: return MA's public HTTPS webserver URL, or None.
+    """
+    Best-effort: return MA's public HTTPS webserver URL, or None.
 
     Reads ``mass.webserver.base_url`` — the URL where MA's HTTP/WS API
     is hosted. The Yandex Dialogs webhook lives on this same server
@@ -109,7 +113,8 @@ def try_detect_public_https_url(mass: MusicAssistant) -> str | None:
 
 
 def try_detect_any_base_url(mass: MusicAssistant) -> str | None:
-    """Best-effort: return *any* base URL of MA's webserver, public or not.
+    """
+    Best-effort: return *any* base URL of MA's webserver, public or not.
 
     Falls back from :func:`try_detect_public_https_url` so the user
     sees a pre-filled value to edit even when MA is reachable only

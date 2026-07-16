@@ -1,4 +1,5 @@
-"""Borrow mode: the plugin uses a linked Yandex Music instance's account.
+"""
+Borrow mode: the plugin uses a linked Yandex Music instance's account.
 
 Covers spec 0001 — account-source dropdown in the Authorization block,
 read-only use of the borrowed x_token in the skill pipeline, and graceful

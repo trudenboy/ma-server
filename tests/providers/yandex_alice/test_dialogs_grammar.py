@@ -1,5 +1,6 @@
 # ruff: noqa: D102, RUF001
-"""Unit tests for ``provider.dialogs_grammar`` — trailing player-hint parser.
+"""
+Unit tests for ``provider.dialogs_grammar`` — trailing player-hint parser.
 
 After the v1.6.0 manifest refactor this module shrinks to a single
 helper: ``extract_trailing_player_hint``. ParsedControl/ParsedCommand
@@ -16,7 +17,8 @@ from music_assistant.providers.yandex_alice.dialogs_grammar import extract_trail
 
 
 class TestExtractTrailingPlayerHint:
-    """Recover trailing "на <player>" suffix attached to intent payloads.
+    """
+    Recover trailing "на <player>" suffix attached to intent payloads.
 
     Yandex's static intents can't enumerate the per-user player list,
     so the hint comes from raw command text. The function rejects

@@ -1,4 +1,5 @@
-"""Yandex Alice (Dialogs custom skill) plugin provider for Music Assistant.
+"""
+Yandex Alice (Dialogs custom skill) plugin provider for Music Assistant.
 
 Exposes Music Assistant playback to a Yandex Dialogs custom skill — a Russian
 NLU voice control surface invoked via *«Алиса, попроси Music Assistant …»*.
@@ -135,7 +136,8 @@ def _generate_webhook_secret() -> str:
 
 
 async def _delete_skill_in_yandex(x_token: str, skill_id: str) -> None:
-    """Hard-delete a skill from the user's Yandex Dialogs account.
+    """
+    Hard-delete a skill from the user's Yandex Dialogs account.
 
     Used by the *Delete skill* action button in Step 3 edit mode.
     Errors propagate to the caller (the dispatcher) which wraps them
@@ -171,7 +173,8 @@ async def _list_player_options(mass: MusicAssistant) -> list[ConfigValueOption]:
 def _build_diagnostics_entries(
     mass: MusicAssistant, instance_id: str | None
 ) -> tuple[ConfigEntry, ...]:
-    """Render runtime stats from the loaded plugin instance (#17).
+    """
+    Render runtime stats from the loaded plugin instance (#17).
 
     Reads counters off the running ``YandexAlicePlugin`` (set in
     ``handle_async_init`` / updated in the webhook handler). When the
@@ -235,7 +238,8 @@ def _resolve_saved_value(
 
 
 def _saved_provider_config(mass: MusicAssistant, instance_id: str | None) -> object | None:
-    """Cache helper: return the running provider's ``.config`` once per render.
+    """
+    Cache helper: return the running provider's ``.config`` once per render.
 
     SECURE_STRING fallback (see :func:`_resolve_secure_string_from`)
     has to look up the persisted value for *every* token field on
@@ -258,7 +262,8 @@ def _resolve_secure_string_from(
     values: dict[str, ConfigValueType],
     key: str,
 ) -> str:
-    """Read a SECURE_STRING value, resolving the FE substitute.
+    """
+    Read a SECURE_STRING value, resolving the FE substitute.
 
     MA's frontend never echoes the actual SECURE_STRING value back to
     the backend — instead it sends ``SECURE_STRING_SUBSTITUTE``
@@ -301,7 +306,8 @@ async def get_config_entries(  # noqa: PLR0915
     action: str | None = None,
     values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
-    """Build the provider config-form entries with auto-create / rename actions.
+    """
+    Build the provider config-form entries with auto-create / rename actions.
 
     Action handling:
 

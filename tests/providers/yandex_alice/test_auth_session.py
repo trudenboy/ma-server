@@ -1,5 +1,6 @@
 # ruff: noqa: ARG001, PLC0415
-"""Tests for provider/auth_session.py — Passport session helpers.
+"""
+Tests for provider/auth_session.py — Passport session helpers.
 
 The cached authenticator is the join point between the provider's cached
 ``x_token`` and ya-dialogs-api's ``AuthenticatorCM`` contract: it must

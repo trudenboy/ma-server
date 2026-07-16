@@ -1,5 +1,6 @@
 # ruff: noqa: PLC0415
-"""Integration tests for provider/__init__.get_config_entries — action dispatcher.
+"""
+Integration tests for provider/__init__.get_config_entries — action dispatcher.
 
 Mocks the orchestrator entry points (``run_auto_create_step``,
 ``run_auto_update``) so we test the dispatcher's ``values`` rehydration,
@@ -42,7 +43,8 @@ from .localization import entry_text
 
 
 def _make_mass() -> MagicMock:
-    """Build a MagicMock MA with empty player + playlist enumeration.
+    """
+    Build a MagicMock MA with empty player + playlist enumeration.
 
     ``webserver`` is explicitly set to ``None`` so the device-code page
     helper short-circuits — unit tests that exercise form rendering
@@ -374,7 +376,8 @@ class TestCancelAction:
 
 
 class TestStableWebhookSecret:
-    """Webhook secret must NOT regenerate between action clicks.
+    """
+    Webhook secret must NOT regenerate between action clicks.
 
     Otherwise auto-create would register a webhook URL containing a secret
     that the next render replaces with a different one — orphaning the
@@ -428,7 +431,8 @@ class TestStableWebhookSecret:
 
 
 class TestDeriveStageRespectsCachedToken:
-    """Intermediate artifact state without cached x_token → IDLE, not Resume.
+    """
+    Intermediate artifact state without cached x_token → IDLE, not Resume.
 
     Otherwise the button label says "Resume" but the next click actually
     starts a fresh Device Flow — confusing UX.
@@ -436,7 +440,8 @@ class TestDeriveStageRespectsCachedToken:
 
     @pytest.mark.asyncio
     async def test_intermediate_state_without_token_shows_sign_in(self) -> None:
-        """artifacts=APP_CREATED + no x_token → Auth block shows Sign in.
+        """
+        artifacts=APP_CREATED + no x_token → Auth block shows Sign in.
 
         Skill block ALSO renders because skill_id is known (manual
         backup-restore path), but the primary CTA stays the Sign in

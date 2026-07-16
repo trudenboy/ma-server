@@ -1,4 +1,5 @@
-"""Loader for the bundled Yandex Dialogs skill logo.
+"""
+Loader for the bundled Yandex Dialogs skill logo.
 
 The PNG (``skill_logo.png`` next to this module) is the official Music
 Assistant 512x512 PWA icon, used as the catalog / dev-console logo for
@@ -18,7 +19,8 @@ _LOGO_PATH = Path(__file__).parent / "skill_logo.png"
 
 @lru_cache(maxsize=1)
 def load_skill_logo_bytes() -> bytes:
-    """Return the bundled Music Assistant logo PNG bytes.
+    """
+    Return the bundled Music Assistant logo PNG bytes.
 
     Falls back to the ya-dialogs-api default logo if the bundled file
     is missing for any reason — keeps the create-skill pipeline alive

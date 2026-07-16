@@ -1,4 +1,5 @@
-"""Yandex Dialogs skill publication-status helper.
+"""
+Yandex Dialogs skill publication-status helper.
 
 A single-shot lookup against ``/developer/app-store-api/snapshot`` that
 classifies the user's skill into one of five stable status strings used
@@ -47,7 +48,8 @@ STATUS_UNKNOWN = "unknown"
 
 
 def classify_skill_entry(entry: dict[str, Any]) -> str:
-    """Classify a single ``snapshot.result.skills[]`` dict.
+    """
+    Classify a single ``snapshot.result.skills[]`` dict.
 
     Priority order (highest first):
 
@@ -86,7 +88,8 @@ async def fetch_skill_publication_status(
     cached_x_token: str,
     skill_id: str,
 ) -> str | None:
-    """Fetch the live publication status for ``skill_id``.
+    """
+    Fetch the live publication status for ``skill_id``.
 
     Returns one of the ``STATUS_*`` constants, or ``None`` if:
 

@@ -1,4 +1,5 @@
-r"""Provider settings form — clean rewrite with three top-level categories.
+r"""
+Provider settings form — clean rewrite with three top-level categories.
 
 The form is grouped by *what the entry semantically belongs to*, not
 by linear setup steps:
@@ -102,7 +103,8 @@ from .url_helpers import validate_external_base_url
 def _publication_status_banner(
     status: str | None,
 ) -> tuple[str, ConfigEntryType]:
-    """Map a classified publication status to a Step 3 banner.
+    """
+    Map a classified publication status to a Step 3 banner.
 
     Returns ``(translation_key, entry_type)`` — the key selects the
     banner text from ``strings.json``. Negative / actionable states
@@ -143,7 +145,8 @@ __all__ = ["build_form_entries"]
 
 
 def _stamp(entries: Iterable[ConfigEntry], category: str) -> tuple[ConfigEntry, ...]:
-    """Set ``category`` on every entry that hasn't picked one explicitly.
+    """
+    Set ``category`` on every entry that hasn't picked one explicitly.
 
     Default for ``ConfigEntry.category`` is ``"generic"``; treat that
     as "needs a category" and stamp it with *category*. The section
@@ -160,7 +163,7 @@ def _stamp(entries: Iterable[ConfigEntry], category: str) -> tuple[ConfigEntry, 
         # (the test suite's conftest stub); fall back to attribute set.
         try:
             out.append(dataclasses.replace(e, category=category))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             with contextlib.suppress(Exception):
                 e.category = category
             out.append(e)
@@ -646,7 +649,8 @@ def _skill_advanced_subblock(  # noqa: PLR0913
     external_base_url: str,
     diagnostics: tuple[ConfigEntry, ...],
 ) -> tuple[ConfigEntry, ...]:
-    """Skill-related Advanced fields (visible behind ``Show advanced`` toggle).
+    """
+    Skill-related Advanced fields (visible behind ``Show advanced`` toggle).
 
     The various ``suppress_*_mirror`` flags avoid duplicate-key
     collisions: when a key is already rendered *visible* by
@@ -880,7 +884,8 @@ def _manifest_block(
     paste_value: str,
     update_message: str | None,
 ) -> tuple[ConfigEntry, ...]:
-    """Skill manifest banner + Export / Import / Reset / Validate actions.
+    """
+    Skill manifest banner + Export / Import / Reset / Validate actions.
 
     The manifest controls intents + entities deployed to Yandex (skill
     grammar) and the runtime mapping that turns NLU matches into

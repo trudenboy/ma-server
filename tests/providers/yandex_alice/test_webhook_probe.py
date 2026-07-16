@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 from unittest.mock import MagicMock
 
 import aiohttp
@@ -18,7 +18,7 @@ def _patch_session_post(monkeypatch: pytest.MonkeyPatch, *, status: int) -> None
         def __init__(self, code: int) -> None:
             self.status = code
 
-        async def __aenter__(self) -> _FakeResp:
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *_: object) -> None:
@@ -28,7 +28,7 @@ def _patch_session_post(monkeypatch: pytest.MonkeyPatch, *, status: int) -> None
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        async def __aenter__(self) -> _FakeSession:
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *_: object) -> None:
@@ -47,7 +47,7 @@ def _patch_session_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        async def __aenter__(self) -> _FakeSession:
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *_: object) -> None:

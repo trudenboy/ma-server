@@ -1,5 +1,6 @@
 # ruff: noqa: D102, RUF001
-"""Tests for provider/dialogs_control.py — transfer parser + executor.
+"""
+Tests for provider/dialogs_control.py — transfer parser + executor.
 
 As of v1.4.0 the regex parser only handles ``transfer`` (target player
 is a per-user dynamic enum that can't fit a static intent grammar);
@@ -57,7 +58,8 @@ class TestParseControlTransfer:
 
 
 class TestParseControlFallthrough:
-    """Non-transfer phrases return None.
+    """
+    Non-transfer phrases return None.
 
     The platform-side intent parser (`provider.dialogs_grammar.parse_platform_intent`)
     handles them, and the play-command parser handles the rest.

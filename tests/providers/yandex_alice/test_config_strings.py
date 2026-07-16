@@ -1,4 +1,5 @@
-"""Every rendered config entry must resolve its user-facing text.
+"""
+Every rendered config entry must resolve its user-facing text.
 
 Entry texts live in ``strings.json`` under ``config_entries.<key>.<field>``
 and are resolved by MA at serialization (``translation_key`` re-keys an
@@ -151,7 +152,8 @@ async def test_dynamic_texts_are_not_shadowed_by_strings_json(state: str) -> Non
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", _FORM_STATES)
 async def test_placeholders_receive_translation_params(state: str) -> None:
-    """Authored ``{n}`` placeholders must be fed by enough translation_params.
+    """
+    Authored ``{n}`` placeholders must be fed by enough translation_params.
 
     ``action_label`` is resolved by MA without params, so it may not
     carry placeholders at all (checked separately below).

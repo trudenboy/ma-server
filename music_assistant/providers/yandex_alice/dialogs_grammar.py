@@ -1,4 +1,5 @@
-"""Trailing "на <player>" suffix recovery for platform-classified intents.
+"""
+Trailing "на <player>" suffix recovery for platform-classified intents.
 
 Yandex's static custom intents can't enumerate the per-user list of
 player names, so the destination hint at the end of the spoken phrase
@@ -60,7 +61,8 @@ _HINT_ACTION_WORDS: frozenset[str] = frozenset(
 
 
 def extract_trailing_player_hint(text: str) -> str | None:
-    """Return the lower-cased trailing "на <player>" suffix, or None.
+    """
+    Return the lower-cased trailing "на <player>" suffix, or None.
 
     Examples:
         ``"пауза на кухне"`` → ``"кухне"``

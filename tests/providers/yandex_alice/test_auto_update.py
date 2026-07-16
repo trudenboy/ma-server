@@ -1,4 +1,5 @@
-"""Tests for provider/auto_update.py — rename + drift-sync via cached x_token.
+"""
+Tests for provider/auto_update.py — rename + drift-sync via cached x_token.
 
 Mocks ``provider.auto_update.auto_update_skill`` (the ya-dialogs-api
 orchestrator) so we don't talk to ``dialogs.yandex.ru``. The auth path is

@@ -1,5 +1,6 @@
 # ruff: noqa: RUF001, RUF003
-"""HTTP handler for the Yandex Dialogs custom-skill webhook (experimental).
+"""
+HTTP handler for the Yandex Dialogs custom-skill webhook (experimental).
 
 Registers a single exact route on the MA webserver — the secret is
 **baked into the path string** at registration time, not a route
@@ -97,7 +98,8 @@ _TTS_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+")
 
 
 def _tts_for(text: str) -> str:
-    """Add `+` stress markers and foreign-name transliterations for Alice TTS.
+    """
+    Add `+` stress markers and foreign-name transliterations for Alice TTS.
 
     Two passes:
       1. Multi-word phrase replacement (longest first via the table's
@@ -160,7 +162,8 @@ _PLAYBACK_SUGGESTION_BUTTONS: list[dict[str, Any]] = [
 
 
 def _has_screen(meta: Any) -> bool:
-    """Return True if the calling surface has a display.
+    """
+    Return True if the calling surface has a display.
 
     Yandex sets ``meta.interfaces.screen = {}`` (empty dict, present-as-key)
     on devices that can render visual elements: mobile Alice, station-max,
@@ -178,7 +181,8 @@ def _has_screen(meta: Any) -> bool:
 
 
 def _without_pending(state: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of `state` with disambiguation/elicitation keys removed.
+    """
+    Return a copy of `state` with disambiguation/elicitation keys removed.
 
     Strips `pending_command`, `awaiting_query`, and `awaiting_player_id`.
     Used after the disambiguation / slot-elicit flow successfully
@@ -219,7 +223,8 @@ _ORDINAL_PATTERNS: tuple[tuple[re.Pattern[str], int], ...] = (
 
 
 def _parse_ordinal_choice(text: str) -> int | None:
-    """Parse 'первая' / 'выбираю первую' / 'номер три' / '2' as 0-based index.
+    """
+    Parse 'первая' / 'выбираю первую' / 'номер три' / '2' as 0-based index.
 
     Returns the index, or None if no ordinal/cardinal pattern matched.
     Tolerates leading filler words ("ну", "хочу", "выбираю", "давай")
@@ -272,7 +277,8 @@ class DialogsWebhookHandler:
         voice_continuation: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
-        """Initialize the handler.
+        """
+        Initialize the handler.
 
         :param mass: MusicAssistant instance.
         :param skill_id: Configured ``CONF_DIALOG_SKILL_ID``; payloads
@@ -312,7 +318,8 @@ class DialogsWebhookHandler:
 
     @property
     def authenticated_call_count(self) -> int:
-        """Webhook calls that passed the skill_id + secret gate.
+        """
+        Webhook calls that passed the skill_id + secret gate.
 
         Counts every authenticated request — including slot-elicitation,
         disambiguation, and info-only intents — not just calls that
@@ -351,7 +358,8 @@ class DialogsWebhookHandler:
         self._unregister_callbacks.clear()
 
     def _cache_key(self, session: dict[str, Any]) -> str | None:
-        """Pick the most stable identifier for the in-process state cache.
+        """
+        Pick the most stable identifier for the in-process state cache.
 
         Preference order: ``session.user.user_id`` (per Yandex account,
         most specific) → ``session.application.application_id`` (per
@@ -390,7 +398,8 @@ class DialogsWebhookHandler:
         return state
 
     def _cache_put(self, session: dict[str, Any], state: dict[str, Any]) -> None:
-        """Save state for this caller (LRU + TTL eviction).
+        """
+        Save state for this caller (LRU + TTL eviction).
 
         Pass an empty / cleared state dict (rather than skipping the
         call) when the action explicitly drops pending/awaiting — this
@@ -499,7 +508,8 @@ class DialogsWebhookHandler:
         req: dict[str, Any],
         has_screen: bool,
     ) -> web.Response:
-        """Dispatch the request body once authentication has cleared.
+        """
+        Dispatch the request body once authentication has cleared.
 
         Wrapped in ``try / except`` by the caller so any unexpected raise
         from a parser, the resolver, or MA dispatch lands as a graceful
@@ -1298,7 +1308,8 @@ class DialogsWebhookHandler:
         app_state_in: dict[str, Any] | None = None,
         has_screen: bool = True,
     ) -> web.Response:
-        """Ask the user which player to use — voice-first, with optional buttons.
+        """
+        Ask the user which player to use — voice-first, with optional buttons.
 
         Most Yandex Stations are screenless audio devices, so the prompt
         has to make voice answer obvious. We enumerate candidates with
@@ -1385,7 +1396,8 @@ class DialogsWebhookHandler:
         app_state_in: dict[str, Any],
         has_screen: bool = True,
     ) -> web.Response | None:
-        """Attempt to resume a saved pending_command using button payload or text.
+        """
+        Attempt to resume a saved pending_command using button payload or text.
 
         Returns a response if the pending command was resumed (success or
         decided failure). Returns None when the new utterance doesn't
@@ -1553,7 +1565,8 @@ class DialogsWebhookHandler:
         buttons: list[dict[str, Any]] | None = None,
         card: dict[str, Any] | None = None,
     ) -> web.Response:
-        """Build a Yandex Dialogs response envelope.
+        """
+        Build a Yandex Dialogs response envelope.
 
         ``session_state`` / ``application_state`` are full overwrites per
         Yandex spec; ``user_state_update`` is merged into the existing

@@ -1,5 +1,6 @@
 # ruff: noqa: D107, RUF001
-"""Effective skill manifest with file-based override + UI status reporting.
+"""
+Effective skill manifest with file-based override + UI status reporting.
 
 Single class :class:`SkillManifestProvider` is the only entry point for
 the rest of the provider to read / write / validate the skill TOML
@@ -64,7 +65,8 @@ _BASE64_PASTE_PREFIX = "data:base64,"
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class ManifestStatus:
-    """User-facing snapshot of the effective manifest.
+    """
+    User-facing snapshot of the effective manifest.
 
     :param source: ``"bundled"`` when no override file exists,
         ``"override_valid"`` when the override file parses cleanly,
@@ -98,7 +100,8 @@ class _Resolved:
 
 
 class SkillManifestProvider:
-    """Effective skill manifest gateway for the rest of the provider.
+    """
+    Effective skill manifest gateway for the rest of the provider.
 
     Cheap to construct (no I/O until the first call). Subsequent calls
     that hit the override path use a stat-keyed cache: the override is
@@ -165,7 +168,8 @@ class SkillManifestProvider:
         self,
         nlu_intents: dict[str, Any] | None,
     ) -> ParsedControl | ParsedCommand | None:
-        """Map an NLU intent block to the dispatcher's dataclass.
+        """
+        Map an NLU intent block to the dispatcher's dataclass.
 
         Walks ``request.nlu.intents`` matches against the effective
         manifest's ``runtime`` blocks; the first matched intent with a
@@ -207,7 +211,8 @@ class SkillManifestProvider:
     # -----------------------------------------------------------------------
 
     def export_to_override(self) -> str:
-        """Copy bundled default into the override path (if not already there).
+        """
+        Copy bundled default into the override path (if not already there).
 
         First-time export bootstraps the override file from the
         manifest the user is currently effectively running. Subsequent
@@ -224,7 +229,8 @@ class SkillManifestProvider:
         return f"Манифест экспортирован в {path}. Откройте файл во внешнем редакторе."
 
     def import_from_paste(self, paste: str) -> str:
-        """Validate and write a TOML paste into the override file.
+        """
+        Validate and write a TOML paste into the override file.
 
         ``data:base64,<b64>`` prefix triggers base64 decoding (fallback
         for MA UI clients that strip newlines from STRING fields).
@@ -259,7 +265,8 @@ class SkillManifestProvider:
         )
 
     def reset_override(self) -> str:
-        """Delete the override file so the bundled default takes effect.
+        """
+        Delete the override file so the bundled default takes effect.
 
         Idempotent in effect — calling on an already-clean state is
         a no-op. The returned message differs (``удалён`` vs
@@ -276,7 +283,8 @@ class SkillManifestProvider:
         return f"Override удалён ({path}), используется bundled default"
 
     def validate_override_message(self) -> str:
-        """Local-only validation of the override file.
+        """
+        Local-only validation of the override file.
 
         TOML parse + manifest schema check. Granet (Yandex) validation
         runs at "Apply skill changes" time; this method is a quick
@@ -303,7 +311,8 @@ class SkillManifestProvider:
     # -----------------------------------------------------------------------
 
     def _storage_root(self) -> Path:
-        """MA storage root, with a documented fallback.
+        """
+        MA storage root, with a documented fallback.
 
         Tries ``mass.storage_path`` first (the path MA-core uses for
         its own state). Falls back to ``$HOME/.musicassistant`` —
@@ -316,7 +325,8 @@ class SkillManifestProvider:
         return Path.home() / ".musicassistant"
 
     def _resolve(self) -> _Resolved:
-        """Stat-keyed effective-manifest cache.
+        """
+        Stat-keyed effective-manifest cache.
 
         Cache key is ``(override_exists, override_mtime_ns)``. Returns
         the cached snapshot when the key matches; otherwise re-reads
@@ -389,7 +399,8 @@ class SkillManifestProvider:
 
     @staticmethod
     def _atomic_write_text(path: Path, text: str) -> None:
-        """Write ``text`` to ``path`` atomically (tmp file + ``os.replace``).
+        """
+        Write ``text`` to ``path`` atomically (tmp file + ``os.replace``).
 
         Replaces the target in-place on POSIX/NT — readers either see
         the old content or the fully-written new content, never a
@@ -409,7 +420,8 @@ class SkillManifestProvider:
 
     @staticmethod
     def _decode_paste(paste: str) -> tuple[str, str | None]:
-        """Return ``(decoded_text, error_message)``.
+        """
+        Return ``(decoded_text, error_message)``.
 
         On success ``error_message`` is ``None``. On base64 decode
         failure the original paste is returned alongside an

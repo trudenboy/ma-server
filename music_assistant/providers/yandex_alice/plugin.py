@@ -1,4 +1,5 @@
-"""Yandex Alice (Dialogs custom skill) plugin provider for Music Assistant.
+"""
+Yandex Alice (Dialogs custom skill) plugin provider for Music Assistant.
 
 Bridges a Yandex Dialogs custom-skill webhook to MA player commands. The
 provider exposes a single HTTP route (``/api/yandex_dialogs/webhook/<secret>``)
@@ -52,7 +53,8 @@ class YandexAlicePlugin(PluginProvider):
         )
 
     async def loaded_in_mass(self) -> None:
-        """Register the Dialogs webhook route once the webserver is up.
+        """
+        Register the Dialogs webhook route once the webserver is up.
 
         The provider is implicitly enabled the moment ``skill_id`` and
         ``webhook_secret`` are populated — voice control is the *whole*

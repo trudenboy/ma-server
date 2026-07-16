@@ -1,4 +1,5 @@
-"""Package-data resources bundled with the Yandex Alice provider.
+"""
+Package-data resources bundled with the Yandex Alice provider.
 
 Holds the declarative skill manifest (``skill.toml``) accessed via
 ``importlib.resources``. The empty ``__init__.py`` makes

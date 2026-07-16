@@ -1,4 +1,5 @@
-"""Auto-update wrapper around ``ya_dialogs_api.auto_update_skill``.
+"""
+Auto-update wrapper around ``ya_dialogs_api.auto_update_skill``.
 
 Used for both rename and drift-sync clicks. ``auto_update_skill`` patches
 the full draft (so a rename also re-applies description / activation
@@ -62,7 +63,8 @@ async def run_auto_update(
     artifacts: SkillCreationArtifacts,
     voice: str | None = None,
 ) -> AutoUpdateOutcome:
-    """Patch the existing skill draft + re-deploy. No Device Flow fallback.
+    """
+    Patch the existing skill draft + re-deploy. No Device Flow fallback.
 
     Pre-conditions checked synchronously before any network call:
 

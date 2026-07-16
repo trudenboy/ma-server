@@ -1,5 +1,6 @@
 # ruff: noqa: RUF001, RUF002, RUF003
-"""Server-side NLU parser for Yandex Dialogs custom-skill webhook commands.
+"""
+Server-side NLU parser for Yandex Dialogs custom-skill webhook commands.
 
 The plugin's Dialogs skill registers in the Yandex Dialogs UI without
 declared intents/slots — Yandex passes the raw user phrase as
@@ -290,7 +291,8 @@ _GENERIC_PLAYER_STEMS = frozenset(
 
 
 def _normalize_player_token(name: str) -> str:
-    """Lowercase + strip common Russian inflection suffix.
+    """
+    Lowercase + strip common Russian inflection suffix.
 
     Applied to both haystack (player.name) and needle (hint) so they
     match each other after the same shaping.
@@ -315,7 +317,8 @@ def list_exposed_players(
     *,
     exposed_ids: set[str] | None = None,
 ) -> list[Any]:
-    """Return all available, enabled, non-synced players (filtered by exposure).
+    """
+    Return all available, enabled, non-synced players (filtered by exposure).
 
     Same filter as ``resolve_player_candidates`` uses for its candidate set,
     extracted so the dialog handler can answer "what speakers do you see?"
@@ -340,7 +343,8 @@ def resolve_player_candidates(
     default_id: str | None = None,
     exposed_ids: set[str] | None = None,
 ) -> list[Any]:
-    """Return the best-matching tier of players for ``hint``.
+    """
+    Return the best-matching tier of players for ``hint``.
 
     Filters: only players that are available, enabled, and not synced to
     a leader. Optional ``exposed_ids`` further restricts to the user's
@@ -464,7 +468,8 @@ def resolve_player(
     default_id: str | None = None,
     exposed_ids: set[str] | None = None,
 ) -> Any:
-    """Find an unambiguously-matching MA player for ``hint``, or None.
+    """
+    Find an unambiguously-matching MA player for ``hint``, or None.
 
     Thin wrapper over ``resolve_player_candidates`` — returns the single
     candidate when exactly one matches, ``None`` otherwise (zero matches

@@ -1,6 +1,7 @@
 # ruff: noqa: D101, D102, D103, PT018, PLC0415
 # mypy: disable-error-code="union-attr"
-"""Unit tests for ``provider.skill_manifest_provider``.
+"""
+Unit tests for ``provider.skill_manifest_provider``.
 
 Covers:
 
@@ -444,7 +445,8 @@ class TestStorageRoot:
 
 
 class TestResolvedCache:
-    """``manifest()`` / ``status()`` reuse the parsed manifest until stat changes.
+    """
+    ``manifest()`` / ``status()`` reuse the parsed manifest until stat changes.
 
     The cache is keyed by ``(exists, mtime_ns)``: identical stat → same
     object; mtime change → re-parse; mutating actions invalidate even
@@ -505,7 +507,8 @@ class TestResolvedCache:
 
 
 class TestBundledResourceLookup:
-    """Bundled manifest resolution must work after the upstream package rename.
+    """
+    Bundled manifest resolution must work after the upstream package rename.
 
     Locally this provider is ``provider``; upstream-synced into
     ``music-assistant/server`` it lives under

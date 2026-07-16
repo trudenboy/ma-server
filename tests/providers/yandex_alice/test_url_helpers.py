@@ -72,7 +72,8 @@ class TestValidateExternalBaseUrl:
 
 
 class TestTryDetectPublicHttpsUrl:
-    """try_detect_public_https_url reads mass.webserver.base_url only.
+    """
+    try_detect_public_https_url reads mass.webserver.base_url only.
 
     The Yandex webhook lives on the webserver (port 8095 by default),
     not on the streamserver (8097). Probing ``mass.streams.base_url``

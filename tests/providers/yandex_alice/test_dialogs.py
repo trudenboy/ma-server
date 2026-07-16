@@ -151,7 +151,8 @@ class TestDialogsWebhookHandler:
         assert resp.status == 404
 
     async def test_secret_parsed_from_path_when_no_match_info(self) -> None:
-        """Cover the production secret-from-path fallback in `_handle_webhook`.
+        """
+        Cover the production secret-from-path fallback in `_handle_webhook`.
 
         Production registers an exact route (no `{secret}` variable), so
         `request.match_info` is empty and the handler parses the secret
@@ -243,7 +244,8 @@ class TestDialogsWebhookHandler:
     async def test_dangerous_context_log_redacts_command(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Flagged content must NOT leak into DEBUG logs even at operator's request.
+        """
+        Flagged content must NOT leak into DEBUG logs even at operator's request.
 
         Copilot review on PR #18: the structured "Webhook recv" line was
         emitting `cmd=...` and `raw=...` *before* the dangerous_context
@@ -272,7 +274,8 @@ class TestDialogsWebhookHandler:
         assert any("redacted: dangerous_context" in r.getMessage() for r in caplog.records)
 
     async def test_unexpected_inner_exception_returns_graceful_fallback(self) -> None:
-        """An unexpected raise from inner dispatch surfaces as a Russian fallback, not HTTP 500.
+        """
+        An unexpected raise from inner dispatch surfaces as a Russian fallback, not HTTP 500.
 
         Flagged in the upstream PR review (#3843, @chrisuthe): only the
         ``request.json()`` parse was guarded; everything afterwards
@@ -407,7 +410,8 @@ class TestPlatformIntentDispatch:
         assert "не понял" not in body_out["response"]["text"].lower()
 
     async def test_unrecognised_intent_falls_back_to_regex_for_transfer(self) -> None:
-        """Unknown form_name + a transfer phrase → regex parse_control catches it.
+        """
+        Unknown form_name + a transfer phrase → regex parse_control catches it.
 
         After v1.4.0 ``parse_control`` only handles ``transfer`` (the
         per-user dynamic enum that can't fit a static intent grammar).
@@ -436,7 +440,8 @@ class TestPlatformIntentDispatch:
         mass.player_queues.transfer_queue.assert_awaited_once()
 
     async def test_empty_intents_block_falls_through_to_play_parser(self) -> None:
-        """Empty ``intents={}`` + non-transfer phrase → play parser runs.
+        """
+        Empty ``intents={}`` + non-transfer phrase → play parser runs.
 
         After v1.4.0 the regex control parser only recognises
         ``transfer``; a phrase like "следующая" with no platform-side
@@ -516,7 +521,8 @@ class TestBuiltInIntents:
         assert "awaiting_query" not in body_out["session_state"]
 
     async def test_reject_with_no_pending_falls_through(self) -> None:
-        """YANDEX.REJECT outside of any prompt context → falls through to normal flow.
+        """
+        YANDEX.REJECT outside of any prompt context → falls through to normal flow.
 
         The intent isn't a free-standing 'cancel app' signal — the user
         could just be talking. If parse_command also can't make sense of
@@ -991,7 +997,8 @@ class TestControlCommandsIntegration:
         assert "Не нашёл колонку «гостиной»" in body_out["response"]["text"]
 
     async def test_forget_player_clears_state_tiers(self) -> None:
-        """'забудь колонку' clears last_player_id from session/application/cache.
+        """
+        'забудь колонку' clears last_player_id from session/application/cache.
 
         After the user picks a player via disambiguation, every later play
         command without an explicit hint plays on it (by design — sticky
@@ -1097,7 +1104,8 @@ class TestControlCommandsIntegration:
         assert "Synced" not in text
 
     async def test_control_no_hint_no_default_asks_for_player(self) -> None:
-        """Control with no hint + no default + multi-player → ask for the player.
+        """
+        Control with no hint + no default + multi-player → ask for the player.
 
         Previously responded with the misleading "Не нашёл колонку «(не указано)»";
         now the message tells the user to specify the player.
@@ -1129,7 +1137,8 @@ class TestControlCommandsIntegration:
     # -------------------------------------------------------------------
 
     async def test_now_playing_returns_track(self) -> None:
-        """'что играет на кухне' → reads queue.current_item.name.
+        """
+        'что играет на кухне' → reads queue.current_item.name.
 
         Yandex pre-classifies "что играет" via control.now_playing intent;
         the player_hint "кухне" is recovered from the trailing "на" suffix
@@ -1220,7 +1229,8 @@ class TestControlCommandsIntegration:
         mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ONE)
 
     async def test_seek_forward_minute(self) -> None:
-        """'перемотай вперёд на 1 минуту на кухне' → skip(p1, 60).
+        """
+        'перемотай вперёд на 1 минуту на кухне' → skip(p1, 60).
 
         Yandex extracts amount=1 (YANDEX.NUMBER) and unit="minutes"
         (custom time_unit entity); the runtime mapper multiplies by 60.
@@ -1342,7 +1352,8 @@ class TestControlCommandsIntegration:
         mass.player_queues.transfer_queue.assert_not_awaited()
 
     async def test_add_to_queue_preserved_through_disambiguation(self) -> None:
-        """Ambiguous "добавь Iron Maiden" → disambiguation → user picks → ADD survives.
+        """
+        Ambiguous "добавь Iron Maiden" → disambiguation → user picks → ADD survives.
 
         Without this fix, the disambiguation flow rebuilt ParsedCommand
         from `pending_command` without `enqueue_option`, so the replay
@@ -1505,7 +1516,8 @@ class TestDisambiguation:
         assert body_out["session_state"]["last_player_id"] == "p1"
 
     async def test_slot_elicit_with_hint_persists_player(self) -> None:
-        """'включи на кухне' (player set, no query) elicits + saves hinted player.
+        """
+        'включи на кухне' (player set, no query) elicits + saves hinted player.
 
         Previously fell through to "Не нашёл такую музыку: ." — the user
         clearly wants something, just didn't name it. Now elicits and
@@ -1586,7 +1598,8 @@ class TestDisambiguation:
         assert "awaiting_query" not in body_out["session_state"]
 
     async def test_control_during_awaiting_query_dispatches_control(self) -> None:
-        """Slot-elicit was active, but the user pivots to a control phrase.
+        """
+        Slot-elicit was active, but the user pivots to a control phrase.
 
         "Включи." → "Что включить?" (awaiting_query=True). Then the user
         says "пауза на кухне" — this must dispatch a control command, not
@@ -1633,7 +1646,8 @@ class TestDisambiguation:
         assert search_query == "yesterday"
 
     async def test_play_no_hint_no_default_offers_disambiguation(self) -> None:
-        """Play branch: no hint + no default + 2+ players → disambiguation prompt.
+        """
+        Play branch: no hint + no default + 2+ players → disambiguation prompt.
 
         Without this, the user would see "Не нашёл колонку «(не указано)»".
         """
@@ -1668,7 +1682,8 @@ class TestDisambiguation:
         mass.player_queues.play_media.assert_not_awaited()
 
     async def test_button_payload_validated_against_exposed_set(self) -> None:
-        """ButtonPressed with a payload targeting a non-exposed player is rejected.
+        """
+        ButtonPressed with a payload targeting a non-exposed player is rejected.
 
         Defence-in-depth: even though Yandex echoes our own payload back,
         we never trust the player_id without re-checking it's currently
@@ -1704,7 +1719,8 @@ class TestDisambiguation:
         assert resp.status == 200
 
     async def test_disambiguation_clears_awaiting_query(self) -> None:
-        """Slot-elicit → multi-match → disambiguation prompt drops awaiting_query.
+        """
+        Slot-elicit → multi-match → disambiguation prompt drops awaiting_query.
 
         Without this, the next user utterance ("Кухня маленькая") would get
         auto-prefixed with "включи " by the awaiting-query branch and miss
@@ -1796,7 +1812,8 @@ class TestDisambiguation:
         assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p2"
 
     async def test_ordinal_out_of_range_reasks_does_not_fall_through(self) -> None:
-        """User says 'третья' when only 2 candidates → re-ask, don't search for 'третья'.
+        """
+        User says 'третья' when only 2 candidates → re-ask, don't search for 'третья'.
 
         Without this, the ordinal would be parsed but skip the lookup,
         the free-text path would parse the utterance as a search query,
@@ -1870,7 +1887,8 @@ class TestDisambiguation:
         mass.player_queues.play_media.assert_not_awaited()
 
     async def test_in_process_cache_recovers_when_yandex_drops_state(self) -> None:
-        """Reproduce the screenless-Station bug from the dev console transcript.
+        """
+        Reproduce the screenless-Station bug from the dev console transcript.
 
         Yandex doesn't echo `state.session` OR `state.application` back
         on the next turn, despite us setting both on the previous
@@ -1971,7 +1989,8 @@ class TestDisambiguation:
         assert "user:u1" not in handler._state_cache
 
     async def test_pending_command_falls_back_to_application_state(self) -> None:
-        """Yandex didn't echo `state.session` but kept `state.application` — still resolves.
+        """
+        Yandex didn't echo `state.session` but kept `state.application` — still resolves.
 
         Reproduces the screenless-Station bug where the second turn of
         a disambiguation arrives without the `pending_command` we put in
@@ -2008,7 +2027,8 @@ class TestDisambiguation:
         assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p2"
 
     async def test_disambiguation_writes_pending_to_application_state(self) -> None:
-        """The disambiguation prompt mirrors `pending_command` to application_state.
+        """
+        The disambiguation prompt mirrors `pending_command` to application_state.
 
         Without this, devices that drop `state.session` between turns can
         never complete the disambiguation flow.
@@ -2036,7 +2056,8 @@ class TestDisambiguation:
         assert body_out["application_state"]["pending_command"]["candidate_ids"] == ["p1", "p2"]
 
     async def test_voice_ordinal_with_filler(self) -> None:
-        """Filler-padded ordinal answers ('выбираю первую', 'хочу вторую') resolve.
+        """
+        Filler-padded ordinal answers ('выбираю первую', 'хочу вторую') resolve.
 
         On smart speakers users naturally pad voice replies with filler;
         the strict-anchor regex from v1.8.2 missed these.
@@ -2069,7 +2090,8 @@ class TestDisambiguation:
         assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p1"
 
     async def test_voice_accusative_adjective(self) -> None:
-        """Accusative-case answer 'большую' resolves to 'Кухня большая'.
+        """
+        Accusative-case answer 'большую' resolves to 'Кухня большая'.
 
         Caught by the new `ую` suffix in `_INFLECTION_SUFFIXES`.
         """
@@ -2159,7 +2181,8 @@ class TestDisambiguation:
         assert mass.player_queues.play_media.call_args.kwargs["queue_id"] == "p2"
 
     async def test_freetext_narrows_to_candidate_set(self) -> None:
-        """Free-text answer is matched only against the saved candidate IDs.
+        """
+        Free-text answer is matched only against the saved candidate IDs.
 
         With 3 exposed players (Кухня большая, Кухня маленькая, Гостиная)
         and a saved candidate set covering only the two kitchens, saying
