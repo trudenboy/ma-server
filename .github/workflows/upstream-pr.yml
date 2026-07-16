@@ -120,7 +120,12 @@ jobs:
 
           if [ -d "provider-repo/tests" ]; then
             mkdir -p "tests/providers/${DOMAIN}"
-            rsync -av --delete provider-repo/tests/ "tests/providers/${DOMAIN}/"
+            # --exclude=test_docs.py: provider-private docs test (checks the
+            # provider repo's own CLAUDE/docs files) — keep in lockstep with
+            # the identical exclude in reusable-sync-to-fork.yml; leaking it
+            # upstream fails their pytest on missing repo-local files
+            # (observed on yandex_ynison PR #4827).
+            rsync -av --delete --exclude='test_docs.py' provider-repo/tests/ "tests/providers/${DOMAIN}/"
 
             NEW_PKG="music_assistant.providers.${DOMAIN}"
             # Rewrite every shape of `provider`-as-import the provider repos
