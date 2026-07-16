@@ -1,4 +1,5 @@
-"""HTTP handlers backing the Connect Wizard endpoints.
+"""
+HTTP handlers backing the Connect Wizard endpoints.
 
 Five endpoints are mounted under ``<mount_path>/connect``:
 
@@ -77,7 +78,8 @@ def _is_loopback_host(host: str | None) -> bool:
 
 
 def _is_request_via_ha_ingress(request: web.Request) -> bool:
-    """Return True when MA recognises the request as arriving via HA ingress.
+    """
+    Return True when MA recognises the request as arriving via HA ingress.
 
     Home Assistant terminates TLS at its own ``https://ha.example/...``
     front door and forwards the request to MA over a *local* socket, so the
