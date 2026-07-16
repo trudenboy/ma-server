@@ -74,7 +74,7 @@ class SSDPAdvertiser:
         try:
             recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             reuse_port_enabled = True
-        except (AttributeError, OSError):
+        except AttributeError, OSError:
             reuse_port_enabled = False
         try:
             recv_sock.bind(("", SSDP_PORT))

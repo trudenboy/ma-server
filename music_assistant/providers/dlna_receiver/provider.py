@@ -969,7 +969,7 @@ class DLNAReceiverProvider(PluginProvider):
                 m, s = parts
                 return int(m) * 60 + int(float(s))
             return int(float(value))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
 
     @staticmethod

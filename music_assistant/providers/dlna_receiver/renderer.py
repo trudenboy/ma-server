@@ -418,7 +418,7 @@ class UPnPRenderer:
             if vol_str is not None:
                 try:
                     vol = int(vol_str.strip())
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     LOGGER.warning("Invalid DesiredVolume value: %r", vol_str)
                     return self._soap_error(402, "Invalid Args")
                 self.volume = max(0, min(100, vol))

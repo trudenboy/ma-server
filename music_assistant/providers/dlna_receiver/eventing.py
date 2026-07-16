@@ -285,7 +285,7 @@ class EventingManager:
         if header.lower().startswith("second-"):
             try:
                 return int(header.split("-", 1)[1])
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 pass
         return DEFAULT_SUBSCRIPTION_TIMEOUT
 
