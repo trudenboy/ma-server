@@ -53,7 +53,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict, cast
@@ -64,7 +64,7 @@ from music_assistant_models.config_entries import (
     ConfigValueType,
     ProviderConfig,
 )
-from music_assistant_models.enums import ConfigEntryType, PlayerType, QueueOption
+from music_assistant_models.enums import ConfigEntryType, PlayerType, ProviderFeature, QueueOption
 from music_assistant_models.errors import (
     AudioError,
     InvalidDataError,
@@ -148,7 +148,6 @@ from music_assistant.providers.music_quiz.quiz_types.base import (
 )
 
 if TYPE_CHECKING:
-    from music_assistant_models.enums import ProviderFeature
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -206,7 +205,7 @@ async def setup(
 
 
 async def get_config_entries(
-    mass: MusicAssistant,  # noqa: ARG001
+    mass: MusicAssistant,
     instance_id: str | None = None,  # noqa: ARG001
     action: str | None = None,  # noqa: ARG001
     values: dict[str, ConfigValueType] | None = None,  # noqa: ARG001
@@ -219,12 +218,24 @@ async def get_config_entries(
     :param action: Optional action key called from config entries UI.
     :param values: The (intermediate) raw values for config entries sent with the action.
     """
+    ai_available = any(
+        isinstance(provider, PluginProvider)
+        for provider in mass.get_providers_supporting_feature(ProviderFeature.AI_QUERY)
+    )
+    ai_setting = ConfigEntry(
+        key=CONF_USE_AI_DISTRACTORS,
+        type=ConfigEntryType.BOOLEAN,
+        required=False,
+        default_value=False,
+        read_only=not ai_available,
+    )
+    if ai_available:
+        return (ai_setting,)
     return (
+        ai_setting,
         ConfigEntry(
-            key=CONF_USE_AI_DISTRACTORS,
-            type=ConfigEntryType.BOOLEAN,
-            required=False,
-            default_value=False,
+            key="ai_unavailable",
+            type=ConfigEntryType.ALERT,
         ),
     )
 
@@ -417,7 +428,10 @@ class MusicQuizPlugin(PluginProvider):
                 sources=await self._resolve_sources(game_config.source_uris),
                 created_at=time.time(),
             )
-            quiz_strategy, answer_strategy = self._resolve_game_strategies(game)
+            quiz_strategy, answer_strategy = self._resolve_game_strategies(
+                game,
+                recent_track_uris=self._recent_track_uris_for_game(self._game),
+            )
             initial_round_task = await self._prepare_initial_round(quiz_strategy)
             selected_player = self._validate_playback_config(game_config)
             if selected_player is not None:
@@ -494,7 +508,10 @@ class MusicQuizPlugin(PluginProvider):
         """
         async with self._game_lock:
             game = self._require_game()
-            quiz_strategy, answer_strategy = self._resolve_game_strategies(game)
+            quiz_strategy, answer_strategy = self._resolve_game_strategies(
+                game,
+                recent_track_uris=self._recent_track_uris_for_game(game),
+            )
             initial_round_task = await self._prepare_initial_round(quiz_strategy)
             self._cancel_timers()
             self._cancel_next_round_task()
@@ -720,17 +737,35 @@ class MusicQuizPlugin(PluginProvider):
             raise MusicQuizNoGameError("There is no active Music Quiz game")
         return self._game
 
-    def _resolve_game_strategies(self, game: MusicQuizGame) -> tuple[QuizType, QuizAnswerType]:
+    def _resolve_game_strategies(
+        self,
+        game: MusicQuizGame,
+        *,
+        recent_track_uris: Iterable[str] = (),
+    ) -> tuple[QuizType, QuizAnswerType]:
         """
         Resolve the strategies declared by game state.
 
         :param game: Game whose strategy identities should be resolved.
+        :param recent_track_uris: Earlier game tracks to deprioritize.
         """
         quiz_type_class = get_quiz_type(game.quiz_type)
         answer_type_class = get_answer_type(game.answer_type)
         if quiz_type_class.answer_type != game.answer_type:
             raise InvalidDataError("Quiz type answer type does not match the game")
-        return quiz_type_class(self.mass, game.config), answer_type_class()
+        quiz_type = quiz_type_class(self.mass, game.config)
+        quiz_type.add_recent_track_uris(recent_track_uris)
+        return quiz_type, answer_type_class()
+
+    def _recent_track_uris_for_game(self, game: MusicQuizGame | None) -> set[str]:
+        """Return source tracks represented by an earlier game."""
+        if game is None:
+            return set()
+        quiz_type_class = get_quiz_type(game.quiz_type)
+        quiz_type = self._quiz_type
+        if quiz_type is None or type(quiz_type) is not quiz_type_class:
+            quiz_type = quiz_type_class(self.mass, game.config)
+        return quiz_type.get_recent_track_uris(game.rounds)
 
     def _require_game_strategies(
         self,
