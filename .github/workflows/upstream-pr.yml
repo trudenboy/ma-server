@@ -276,6 +276,25 @@ jobs:
             fi
           fi
 
+          # Carry HUMAN co-author credit across the squash boundary. The sync
+          # commit is a single bot commit, so upstream history would otherwise
+          # lose contributor credit that lives in the provider repo's commits
+          # (observed on music-assistant/server#4833). Collect Co-authored-by
+          # trailers from the synced commit range, drop AI-agent / bot trailers
+          # (per AI_POLICY those stay in the provider repo), normalize the
+          # trailer key casing, and dedupe preserving first-seen order.
+          HUMAN_COAUTHORS=""
+          if [[ -n "$PREV_TAG" ]]; then
+            HUMAN_COAUTHORS=$(gh api "repos/${PROVIDER_REPO}/compare/${PREV_TAG}...${VERSION}" \
+              --jq '.commits[].commit.message | split("\n")[] | select(test("^[Cc]o-[Aa]uthored-[Bb]y:"))' \
+              2>/dev/null \
+              | tr -d '\r' \
+              | sed -E 's/^[Cc]o-[Aa]uthored-[Bb]y:[[:space:]]*/Co-authored-by: /' \
+              | grep -Eiv '@anthropic\.com|@cursor\.com|@openai\.com|\[bot\]|github-actions|copilot|claude|opencode|aider|devin' \
+              | awk '!seen[$0]++' \
+              || true)
+          fi
+
           # Determine which "Types of changes" box(es) get ticked. Input is comma-separated
           # so cross-cutting releases can tick bugfix + enhancement + dependencies together.
           # First-time submission (no PREV_TAG) → always "new-provider".
@@ -302,6 +321,11 @@ jobs:
           PR_BODY+=$'\n\n'
           PR_BODY+="### Changed files (${COMPARE_LABEL})"
           PR_BODY+=$'\n\n'"${FILES_SECTION}"
+          if [[ -n "$HUMAN_COAUTHORS" ]]; then
+            PR_BODY+=$'\n\n'"### Credits"
+            PR_BODY+=$'\n\n'"Changes in this range co-authored by:"$'\n'
+            PR_BODY+="$(printf '%s\n' "$HUMAN_COAUTHORS" | sed -E 's/^Co-authored-by:[[:space:]]*/- /')"
+          fi
           PR_BODY+=$'\n\n'
           PR_BODY+="**Related issue (if applicable):**"
           PR_BODY+=$'\n\n'
@@ -338,7 +362,13 @@ jobs:
           # The current PR_TITLE is single-line so this is also a no-op today;
           # kept as a guardrail against future multi-line PR_TITLE changes.
           COMMIT_MSG="$(printf '%s\n' "$PR_TITLE" | sed -E '/^[Cc]o-[Aa]uthored-[Bb]y: .*(Claude|claude|@anthropic\.com).*$/d')"
-          git commit -m "$COMMIT_MSG"
+          # Append the (pre-filtered) human co-author trailers so GitHub's
+          # squash merge upstream carries the credit into server history.
+          if [[ -n "$HUMAN_COAUTHORS" ]]; then
+            git commit -m "$COMMIT_MSG" -m "$HUMAN_COAUTHORS"
+          else
+            git commit -m "$COMMIT_MSG"
+          fi
           git push origin "$BRANCH" $FORCE_PUSH
 
           EXISTING_PR=$(gh api "repos/music-assistant/server/pulls" \
