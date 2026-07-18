@@ -81,6 +81,7 @@ BROKEN_AIRPLAY_MODELS = (
 AIRPLAY_2_DEFAULT_MODELS = (
     # Models that are known to work better with AirPlay 2 protocol instead of RAOP
     # These use the translated/friendly model names from get_model_info()
+    # Both fields support fnmatch-style wildcards and match case-insensitively.
     ("Ubiquiti Inc.", "*"),
 )
 

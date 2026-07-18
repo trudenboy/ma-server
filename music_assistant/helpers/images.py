@@ -199,7 +199,7 @@ async def get_image_data(
             if (p := urllib.parse.urlparse(b)).netloc
         }
         if url_origin in server_origins:
-            # new opaque-id form: /imageproxy/<image_id>?size=...&fmt=...
+            # opaque-id form: /imageproxy/<image_id>?size=...&fmt=...
             if image_id := _extract_imageproxy_id(path_or_url):
                 resolved = await mass.metadata.resolve_image_id(image_id)
                 if resolved is None:
@@ -209,18 +209,7 @@ async def get_image_data(
                 return await get_image_data(
                     mass, extracted_path, extracted_provider, _depth=_depth + 1
                 )
-            # legacy form: /imageproxy?provider=X&path=Y
-            if imageproxy_params := _extract_imageproxy_params(path_or_url):
-                extracted_path, extracted_provider = imageproxy_params
-                # Validate extracted path before recursive call
-                if not extracted_path.startswith(("http://", "https://", "data:image")):
-                    if not is_safe_path(extracted_path):
-                        msg = f"Unsafe image path extracted from imageproxy URL: {extracted_path}"
-                        raise FileNotFoundError(msg)
-                return await get_image_data(
-                    mass, extracted_path, extracted_provider, _depth=_depth + 1
-                )
-            msg = f"Invalid imageproxy URL (missing path): {path_or_url}"
+            msg = f"Invalid imageproxy URL: {path_or_url}"
             raise FileNotFoundError(msg)
         try:
             return await _fetch_remote_image(mass, path_or_url)

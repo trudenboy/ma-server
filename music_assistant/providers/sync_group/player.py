@@ -547,22 +547,23 @@ class SyncGroupPlayer(Player):
         if not self.sync_leader:
             self.sync_leader = self._select_sync_leader()
 
-        if not self.sync_leader:
+        # pin the leader ref: a concurrent command (e.g. a dissolve) may clear
+        # or replace self.sync_leader while we await below
+        leader = self.sync_leader
+        if not leader:
             # we have no members in the group, so we can't form a syncgroup
             return
 
         # ensure the sync leader is first in the list
         self._attr_group_members = [
-            self.sync_leader.player_id,
-            *[x for x in self._attr_group_members if x != self.sync_leader.player_id],
+            leader.player_id,
+            *[x for x in self._attr_group_members if x != leader.player_id],
         ]
         # Translate the leader's group_members (may be protocol IDs) to parent IDs
         # so we can compare against our _attr_group_members (always parent IDs)
-        already_synced = set(self._translate_to_parent_ids(self.sync_leader.state.group_members))
+        already_synced = set(self._translate_to_parent_ids(leader.state.group_members))
         members_to_sync = [
-            x
-            for x in self._attr_group_members
-            if x != self.sync_leader.player_id and x not in already_synced
+            x for x in self._attr_group_members if x != leader.player_id and x not in already_synced
         ]
         if members_to_sync:
             # If the sync leader is playing something independently, stop it first
@@ -570,21 +571,25 @@ class SyncGroupPlayer(Player):
             # (we're about to start new playback on the syncgroup).
             # Wait for the leader to actually reach IDLE before adding members,
             # since some providers reject set_members while still playing.
-            if self.sync_leader.state.playback_state == PlaybackState.PLAYING:
+            if leader.state.playback_state == PlaybackState.PLAYING:
                 async with self.mass.players.wait_for_player_update(
-                    self.sync_leader.player_id,
+                    leader.player_id,
                     attribute_name="playback_state",
                     attribute_value=PlaybackState.IDLE,
                     timeout=5,
                 ):
-                    await self.mass.players._handle_cmd_stop(self.sync_leader.player_id)
+                    await self.mass.players._handle_cmd_stop(leader.player_id)
+                if self.sync_leader is not leader:
+                    # the group was dissolved or re-led while we waited —
+                    # this form attempt is stale, abort
+                    return
             # use _handle_set_members directly to avoid the redirect loop
             # (cmd_set_members redirects sync-leader targets back to this syncgroup)
             async with self.mass.players.get_player_lock(
-                self.sync_leader.player_id, PlayerLockPurpose.PLAYBACK
+                leader.player_id, PlayerLockPurpose.PLAYBACK
             ):
                 await self.mass.players._handle_set_members(
-                    self.sync_leader, player_ids_to_add=members_to_sync
+                    leader, player_ids_to_add=members_to_sync
                 )
 
     @asynccontextmanager
