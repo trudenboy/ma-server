@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 
@@ -26,6 +27,7 @@ from .constants import (
     CONF_MEMBERS_FILTER,
     EXTRA_FEATURES_FROM_MEMBERS,
     PROVIDERS_WITH_DYNAMIC_LEADER_SWITCH,
+    REFORM_DEBOUNCE_SECONDS,
 )
 
 if TYPE_CHECKING:
@@ -74,11 +76,16 @@ class SyncGroupPlayer(Player):
         Return whether this sync group is currently holding its members.
 
         The session is considered active while a sync leader is set (formed and
-        potentially playing/paused) or while the idle grace timer is still
-        pending. ``__final_active_group`` reads this to decide whether the
-        configured members should be marked as ``active_group`` for this group.
+        potentially playing/paused), while the idle grace timer is still
+        pending, or while a debounced re-form is pending. ``__final_active_group``
+        reads this to decide whether the configured members should be marked as
+        ``active_group`` for this group.
         """
-        return self.sync_leader is not None or self._idle_grace_task is not None
+        return (
+            self.sync_leader is not None
+            or self._idle_grace_task is not None
+            or self._reform_task is not None
+        )
 
     async def on_config_updated(self) -> None:
         """Handle logic when the PlayerConfig is first loaded or updated."""
@@ -335,6 +342,10 @@ class SyncGroupPlayer(Player):
         to pin the group as 'active'.
         """
         self._cancel_idle_grace_timer()
+        # an explicit stop also voids any pending debounced re-form and the
+        # startup marker — the user asked for silence
+        self._cancel_reform_timer()
+        self._playback_start_at = float("-inf")
         self._attr_current_media = None
         if sync_leader := self.sync_leader:
             # Use internal handler to target the sync leader directly,
@@ -399,7 +410,14 @@ class SyncGroupPlayer(Player):
                 f"Group {self.display_name} does not allow dynamically adding/removing members!"
             )
         sync_leader = self.sync_leader or self._select_sync_leader(new_members=player_ids_to_add)
-        was_playing = self.playback_state == PlaybackState.PLAYING
+        # A start that was just issued to the leader may not be reflected in the
+        # (transient) device state yet, so treat the startup window as playing —
+        # otherwise a (un)group command racing an in-flight start misreads the
+        # group as idle and skips the resume. An explicit pause always wins:
+        # PAUSED is deliberate user intent, never startup noise.
+        was_playing = self.playback_state == PlaybackState.PLAYING or (
+            self.playback_state != PlaybackState.PAUSED and self._playback_recently_started
+        )
 
         # handle additions
         final_players_to_add: list[str] = []
@@ -517,6 +535,10 @@ class SyncGroupPlayer(Player):
                     player_ids_to_add=final_players_to_add,
                     player_ids_to_remove=final_players_to_remove,
                 )
+        elif self._reform_task is not None:
+            # leaderless with a debounced re-form pending: membership just changed,
+            # so re-arm the window — the re-form picks up the final member list.
+            self._schedule_reform_timer()
         # NOTE: If we weren't playing before, we don't need to do anything else,
         # since the syncing will be done once playback starts
         self.mass.players.trigger_player_update(self.player_id)
@@ -606,6 +628,9 @@ class SyncGroupPlayer(Player):
         if (leader := self.sync_leader) is None:
             yield
             return
+        # stamp the start: device state is unreliable while a start settles, so
+        # group-command decisions treat this window as playing (see set_members)
+        self._playback_start_at = time.monotonic()
         async with self.mass.players.wait_for_player_update(
             leader.player_id,
             attribute_name="playback_state",
@@ -616,8 +641,12 @@ class SyncGroupPlayer(Player):
 
     async def _dissolve_syncgroup(self) -> None:
         """Dissolve the current syncgroup by ungrouping all members."""
-        # a dissolve is happening now — any pending grace timer is no longer needed
+        # a dissolve is happening now — any pending grace or re-form timer is no
+        # longer needed (_dissolve_and_reform re-arms the re-form right after)
+        # and the session whose start the marker tracked is gone
         self._cancel_idle_grace_timer()
+        self._cancel_reform_timer()
+        self._playback_start_at = float("-inf")
         if sync_leader := self.sync_leader:
             # dissolve the temporary syncgroup from the sync leader
             sync_children = [
@@ -868,18 +897,20 @@ class SyncGroupPlayer(Player):
         leader_to_stop: Player | None = None,
         resume_playback: bool = True,
     ) -> None:
-        """Stop the current sync session, dissolve the syncgroup, and optionally re-form.
+        """
+        Stop the current sync session, dissolve the syncgroup and schedule a re-form.
 
         Used when a seamless handoff isn't possible (e.g. the new leader is not
-        part of the live session). Accepts a brief audio gap in exchange for
-        correctness: the old session is fully torn down before a fresh one starts.
+        part of the live session). The stop/dissolve happens immediately; the
+        re-form (with resume) is debounced so cascaded unjoins coalesce into a
+        single restart with the final member list.
 
         :param old_leader_id: The player_id of the departing leader.
         :param leader_to_stop: The player to stop before dissolving. Defaults
             to ``self.sync_leader`` but callers should pass the old leader
             explicitly when ``self.sync_leader`` has already been cleared.
-        :param resume_playback: If True, call ``play()`` after dissolving to
-            restart playback on the new leader. Pass False when the group was
+        :param resume_playback: If True, schedule the debounced re-form which
+            restarts playback on the new leader. Pass False when the group was
             not actively playing (e.g. paused or idle).
         """
         leader_to_stop = leader_to_stop or self.sync_leader
