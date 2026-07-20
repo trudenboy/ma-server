@@ -22,6 +22,10 @@ from music_assistant_models.errors import (
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioFormat, AudioSource
+from ya_passport_auth import SecretStr
+from ya_passport_auth.ma import BorrowedCredentialSource, list_yandex_music_instances
+
+from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
@@ -47,10 +51,6 @@ from music_assistant.providers.yandex_ynison.streaming import (
     make_pcm_format,
 )
 from music_assistant.providers.yandex_ynison.ynison_client import YnisonSendError, YnisonState
-from ya_passport_auth import SecretStr
-from ya_passport_auth.ma import BorrowedCredentialSource, list_yandex_music_instances
-
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
 
 
 def _arm_play_media_recorder(provider: YandexYnisonProvider) -> list[tuple[str, str]]:

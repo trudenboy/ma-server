@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from music_assistant_models.errors import LoginFailed
+
 from music_assistant.providers.yandex_ynison import get_config_entries
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ACCOUNT_LOGIN,

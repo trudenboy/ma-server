@@ -6,13 +6,14 @@ from unittest import mock
 
 import pytest
 from music_assistant_models.errors import LoginFailed
-from music_assistant.providers.yandex_ynison.auth import perform_qr_auth, refresh_music_token
 from ya_passport_auth import SecretStr
 from ya_passport_auth.exceptions import (
     InvalidCredentialsError,
     QRTimeoutError,
     YaPassportError,
 )
+
+from music_assistant.providers.yandex_ynison.auth import perform_qr_auth, refresh_music_token
 
 # ---------------------------------------------------------------
 # refresh_music_token
