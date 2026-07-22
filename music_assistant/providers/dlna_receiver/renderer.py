@@ -1,4 +1,5 @@
-"""DLNA Receiver — UPnP MediaRenderer implementation.
+"""
+DLNA Receiver — UPnP MediaRenderer implementation.
 
 This module contains the HTTP server that serves UPnP device/service XML
 descriptions and processes incoming SOAP control actions from DLNA
@@ -37,6 +38,7 @@ LOGGER = logging.getLogger(__name__)
 SCPD_DIR = Path(__file__).parent / "scpd"
 
 SoapCallback = Callable[..., Awaitable[None]]
+PlayCallback = Callable[[str], Awaitable[None]]
 
 # Extra entity mapping for XML attribute values (default escape() handles only &, <, >).
 _ATTR_ENTITIES = {'"': "&quot;"}
@@ -60,7 +62,8 @@ class UPnPRenderer:
         udn: str | None = None,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
-        """Create a renderer bound to the given IP/port with a stable UDN.
+        """
+        Create a renderer bound to the given IP/port with a stable UDN.
 
         ``session`` — optional shared aiohttp session. When supplied (the
         typical provider path passes ``mass.http_session``), all three
@@ -100,7 +103,7 @@ class UPnPRenderer:
 
         # Callbacks (set by provider)
         self.on_set_av_transport_uri: SoapCallback | None = None
-        self.on_play: SoapCallback | None = None
+        self.on_play: PlayCallback | None = None
         self.on_pause: SoapCallback | None = None
         self.on_stop: SoapCallback | None = None
         self.on_seek: SoapCallback | None = None
@@ -146,7 +149,8 @@ class UPnPRenderer:
 
     @property
     def description_url(self) -> str:
-        """Return the device description URL.
+        """
+        Return the device description URL.
 
         IPv6 literals need square brackets in URL host components
         (RFC 3986 §3.2.2); without them the resulting URL would be
@@ -324,9 +328,10 @@ class UPnPRenderer:
             return self._soap_response(action_name, UPNP_SERVICE_AV_TRANSPORT)
 
         if action_name == "Play":
-            self.transport_state = TRANSPORT_STATE_PLAYING
+            previous_state = self.transport_state
             if self.on_play:
-                await self.on_play()
+                await self.on_play(previous_state)
+            self.transport_state = TRANSPORT_STATE_PLAYING
             await self._notify_av_transport_change()
             return self._soap_response(action_name, UPNP_SERVICE_AV_TRANSPORT)
 
@@ -498,7 +503,8 @@ class UPnPRenderer:
 
     @staticmethod
     def _extract_xml_value(xml_str: str, tag: str) -> str | None:
-        """Extract a value from a SOAP XML body by tag name.
+        """
+        Extract a value from a SOAP XML body by tag name.
 
         Accepts fragments (tests) or full envelopes: strips a leading
         ``<?xml ... ?>`` declaration, wraps the remainder in a synthetic
@@ -746,7 +752,8 @@ class UPnPRenderer:
         variables: dict[str, str],
         channel: str | None = None,
     ) -> str:
-        """Build a LastChange XML value for GENA eventing.
+        """
+        Build a LastChange XML value for GENA eventing.
 
         The LastChange event wraps state variable changes in an
         <Event><InstanceID> structure as required by UPnP spec.

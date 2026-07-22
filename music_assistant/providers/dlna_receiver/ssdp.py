@@ -133,7 +133,8 @@ class SSDPAdvertiser:
         LOGGER.info("SSDP advertiser stopped")
 
     def handle_search(self, data: bytes, addr: tuple[str, int]) -> None:
-        """Respond to M-SEARCH requests matching our device/service types.
+        """
+        Respond to M-SEARCH requests matching our device/service types.
 
         Per UPnP Device Architecture 1.1 §1.3.3, the responder must wait a
         random interval in [0, MX] seconds before replying so a roomful of
@@ -275,7 +276,8 @@ class SSDPAdvertiser:
 
 
 def _parse_mx_delay(header: str) -> float:
-    """Parse an SSDP ``MX:`` header into a jitter delay in seconds.
+    """
+    Parse an SSDP ``MX:`` header into a jitter delay in seconds.
 
     Returns 0.0 if the header is missing, malformed, or non-positive — in
     which case we respond immediately. A valid MX is clamped to

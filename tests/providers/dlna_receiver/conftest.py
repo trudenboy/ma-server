@@ -1,4 +1,5 @@
-"""Wire the stub ``music_assistant`` package to the installed MA server code.
+"""
+Wire the stub ``music_assistant`` package to the installed MA server code.
 
 The root conftest registers ``music_assistant`` / ``music_assistant.providers``
 as empty stub packages so ``provider/`` can be imported as

@@ -189,6 +189,32 @@ async def test_play_pause_stop(
     assert renderer.transport_state == "STOPPED"
 
 
+async def test_play_callback_receives_prior_transport_state(
+    client: TestClient[Request, Application],
+    renderer: UPnPRenderer,
+) -> None:
+    """Play exposes the prior state before committing the PLAYING transition."""
+    renderer.transport_state = "PAUSED_PLAYBACK"
+    received_states: list[tuple[str, str]] = []
+
+    async def _on_play(previous_state: str) -> None:
+        received_states.append((previous_state, renderer.transport_state))
+
+    renderer.on_play = _on_play
+
+    resp = await client.post(
+        "/AVTransport/control",
+        headers={
+            "SOAPACTION": '"urn:schemas-upnp-org:service:AVTransport:1#Play"',
+        },
+        data="<dummy/>",
+    )
+
+    assert resp.status == 200
+    assert received_states == [("PAUSED_PLAYBACK", "PAUSED_PLAYBACK")]
+    assert renderer.transport_state == "PLAYING"
+
+
 async def test_seek_action(client: TestClient[Request, Application]) -> None:
     """Test that Seek action returns success (no-op)."""
     resp = await client.post(
@@ -250,7 +276,8 @@ async def test_set_av_transport_uri_rejected(
     client: TestClient[Request, Application],
     renderer: UPnPRenderer,
 ) -> None:
-    """A callback that raises ValueError causes a 716 SOAP fault and no state change.
+    """
+    A callback that raises ValueError causes a 716 SOAP fault and no state change.
 
     Previously the renderer eagerly wrote ``current_uri`` and returned 200 OK
     before invoking the callback, so a silent SSRF-guard rejection in the
@@ -290,7 +317,8 @@ def test_description_url_ipv4_no_brackets() -> None:
 
 
 async def test_start_learns_ephemeral_port() -> None:
-    """Binding on http_port=0 must update self.http_port from the bound socket.
+    """
+    Binding on http_port=0 must update self.http_port from the bound socket.
 
     Without this, description_url and the SSDP LOCATION header advertise
     ``:0`` and nothing can reach the renderer.
