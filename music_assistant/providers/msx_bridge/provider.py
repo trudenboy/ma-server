@@ -35,6 +35,8 @@ from .player import MSXPlayer
 if TYPE_CHECKING:
     from music_assistant.controllers.streams.audio_processing import AudioOutputPlan
 
+    from .sendspin_bridge import MSXSendspinBridgeManager
+
 logger = logging.getLogger(__name__)
 
 
