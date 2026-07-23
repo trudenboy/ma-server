@@ -4,8 +4,8 @@ ARG BASE_IMAGE_VERSION=latest
 FROM --platform=$BUILDPLATFORM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION AS cliairplay-download
 
 # Bump the version and checksum-manifest hash together.
-ARG CLIAIRPLAY_VERSION=v0.1.0
-ARG CLIAIRPLAY_CHECKSUMS_SHA256=95f83ca025e2b132fedc9055bb5202efdbc63839ef29042bf88db6711026cd53
+ARG CLIAIRPLAY_VERSION=v0.1.1
+ARG CLIAIRPLAY_CHECKSUMS_SHA256=444dc5d51ff3196bc1102b795a056e85a2ba391284a31b87809d05ce34f60787
 ARG TARGETARCH
 
 # Download the cliairplay release asset for this image architecture.
@@ -36,9 +36,18 @@ COPY --from=cliairplay-download /cliairplay /cliairplay
 # Builder image. It builds the venv that will be copied to the final image
 #
 FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION AS builder
+ARG TARGETARCH
 
 ADD dist dist
 COPY requirements_all.txt .
+
+# miniaudio has no Linux arm64 wheels, so pyatv requires a source build there.
+# The compiler stays in this disposable builder stage and is not copied to the final image.
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update && \
+        apt-get install -y --no-install-recommends gcc g++ && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # ensure UV is installed
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
