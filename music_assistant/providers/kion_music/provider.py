@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
+import zlib
 from collections.abc import AsyncGenerator, Coroutine, Sequence
 from io import BytesIO
 from typing import TYPE_CHECKING, Any
@@ -161,6 +161,158 @@ class KionMusicProvider(MusicProvider):
         if self._streaming is None:
             raise ProviderUnavailableError("Provider not initialized")
         return self._streaming
+
+    async def get_recommendations(self) -> list[RecommendationFolder]:
+        """
+        Get the available recommendation rows, without items.
+
+        Returns My Mix, Made for you, Chart, New Releases, New Playlists,
+        Top Picks, Mood Mix, Activity Mix and Seasonal Mix rows.
+        """
+        # The seasonal row title carries the current season, derived locally from the month.
+        seasonal_tag = TAG_SEASONAL_MAP.get(utc().month, "autumn")
+        seasonal_name = (
+            self._media_source_name("folder", _media_label_key(seasonal_tag))
+            or seasonal_tag.title()
+        )
+        return [
+            RecommendationFolder(
+                item_id=MY_WAVE_PLAYLIST_ID,
+                provider=self.instance_id,
+                name="My Mix",
+                translation_key=MY_WAVE_PLAYLIST_ID,
+                icon="mdi-waveform",
+            ),
+            RecommendationFolder(
+                item_id="feed",
+                provider=self.instance_id,
+                name="Made for you",
+                translation_key="made_for_you",
+                icon="mdi-account-music",
+            ),
+            RecommendationFolder(
+                item_id="chart",
+                provider=self.instance_id,
+                name="Chart",
+                translation_key="chart",
+                icon="mdi-chart-line",
+            ),
+            RecommendationFolder(
+                item_id="new_releases",
+                provider=self.instance_id,
+                name="New Releases",
+                translation_key="new_releases",
+                icon="mdi-new-box",
+            ),
+            RecommendationFolder(
+                item_id="new_playlists",
+                provider=self.instance_id,
+                name="New Playlists",
+                translation_key="new_playlists",
+                icon="mdi-playlist-star",
+            ),
+            RecommendationFolder(
+                item_id="top_picks",
+                provider=self.instance_id,
+                name="Top Picks",
+                translation_key="top_picks",
+                icon="mdi-star",
+            ),
+            # Mood/Activity rows have a static title; the hourly rotating tag - derived
+            # deterministically, so the items call independently computes the same one -
+            # shows as the row subtitle (cache-only tag-list read, no backend I/O).
+            RecommendationFolder(
+                item_id="mood_mix",
+                provider=self.instance_id,
+                name="Mood Mix",
+                translation_key="mood_mix",
+                subtitle=await self._rotating_row_tag_subtitle("mood"),
+                icon="mdi-emoticon-outline",
+            ),
+            RecommendationFolder(
+                item_id="activity_mix",
+                provider=self.instance_id,
+                name="Activity Mix",
+                translation_key="activity_mix",
+                subtitle=await self._rotating_row_tag_subtitle("activity"),
+                icon="mdi-run",
+            ),
+            RecommendationFolder(
+                item_id="seasonal_mix",
+                provider=self.instance_id,
+                name=f"Seasonal: {seasonal_name}",
+                translation_key="seasonal_mix",
+                translation_params=[seasonal_name],
+                icon="mdi-weather-sunny",
+            ),
+        ]
+
+    async def get_recommendation_items(
+        self, item_id: str
+    ) -> UniqueList[MediaItemType | ItemMapping | BrowseFolder]:
+        """
+        Get the items for a single recommendation row.
+
+        :param item_id: The item_id of the row, as returned by get_recommendations.
+        """
+        folder: RecommendationFolder | None = None
+        if item_id == MY_WAVE_PLAYLIST_ID:
+            folder = await self._get_my_wave_recommendations()
+        elif item_id == "feed":
+            folder = await self._get_feed_recommendations()
+        elif item_id == "chart":
+            folder = await self._get_chart_recommendations()
+        elif item_id == "new_releases":
+            folder = await self._get_new_releases_recommendations()
+        elif item_id == "new_playlists":
+            folder = await self._get_new_playlists_recommendations()
+        elif item_id == "top_picks":
+            folder = await self._get_top_picks_recommendations()
+        elif item_id == "mood_mix":
+            # the deterministic hourly tag keeps the served items matching the row subtitle
+            if mood_tags := await self._get_valid_tags_for_category("mood"):
+                folder = await self._get_mood_mix_recommendations(
+                    self._rotating_row_tag("mood", mood_tags)
+                )
+        elif item_id == "activity_mix":
+            if activity_tags := await self._get_valid_tags_for_category("activity"):
+                folder = await self._get_activity_mix_recommendations(
+                    self._rotating_row_tag("activity", activity_tags)
+                )
+        elif item_id == "seasonal_mix":
+            folder = await self._get_seasonal_mix_recommendations()
+        if folder is None:
+            return UniqueList()
+        return folder.items
+
+    def _media_source_name(self, group: str, key: str) -> str | None:
+        """
+        Return the authored English ``name`` for *key* in *group*, or None when not authored.
+
+        :param group: Media translation group (``folder``, ``recommendations`` or ``playlist``).
+        :param key: Authoring key within the group.
+        """
+        return self.mass.translations.get_translation(
+            f"provider.{self.domain}.media.{group}.{key}.name"
+        )
+
+    def _media_label(self, group: str, key: str, fallback: str) -> tuple[str, str | None]:
+        """
+        Map a browse label to the in-code ``name`` and ``translation_key`` for its media item.
+
+        Authored keys return ``(English source name, key)`` — the English name from the
+        provider's ``strings.json`` plus a ``translation_key`` so the server localizes it for
+        the connection locale at serialization. An unauthored key — e.g. a tag discovered from
+        KION's landing API — returns ``(fallback, None)`` so its already-localized name is kept.
+
+        :param group: Media translation group (``folder``, ``recommendations`` or ``playlist``).
+        :param key: Authoring key within the group; also the item's ``translation_key``.
+        :param fallback: English name to use when no string is authored for *key*.
+        """
+        source = self._media_source_name(group, key)
+        if source is None:
+            return fallback, None
+        return source, key
 
     async def handle_async_init(self) -> None:
         """Handle async initialization of the provider."""
@@ -1259,7 +1411,9 @@ class KionMusicProvider(MusicProvider):
             self.logger.debug("Tag validation failed for %s: %s", tag_slug, err)
             return False
 
-    @use_cache(3600)
+    # allow_expired_cache keeps the items call serving the same (possibly stale) tag
+    # list the rows subtitle was derived from, while a background refresh runs
+    @use_cache(3600, allow_expired_cache=True)
     async def _get_valid_tags_for_category(self, category: str) -> list[str]:
         """
         Get validated tags for a category (only those with playlists).
@@ -2326,6 +2480,72 @@ class KionMusicProvider(MusicProvider):
         self.logger.debug("Liked tracks: fetched %s, parsed %s", len(track_shorts), len(tracks))
         return tracks
 
+    # Get related items
+
+    @use_cache(3600 * 24 * 30, allow_expired_cache=True)
+    async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
+        """
+        Get album tracks.
+
+        :param prov_album_id: The provider album ID.
+        :return: List of Track objects.
+        """
+        album = await self.client.get_album_with_tracks(prov_album_id)
+        if not album or not album.volumes:
+            return []
+
+        tracks = []
+        for volume_index, volume in enumerate(album.volumes):
+            for track_index, track in enumerate(volume):
+                try:
+                    parsed_track = parse_track(self, track)
+                    parsed_track.disc_number = volume_index + 1
+                    parsed_track.track_number = track_index + 1
+                    tracks.append(parsed_track)
+                except InvalidDataError as err:
+                    self.logger.debug("Error parsing album track: %s", err)
+        return tracks
+
+    @use_cache(3600 * 3, allow_expired_cache=True)
+    async def get_similar_tracks(self, prov_track_id: str, limit: int = 25) -> list[Track]:
+        """
+        Get similar tracks using Kion Rotor station for this track.
+
+        Uses rotor station track:{id} so MA radio mode gets Kion recommendations.
+
+        :param prov_track_id: Provider track ID (plain or track_id@station_id).
+        :param limit: Maximum number of tracks to return.
+        :return: List of similar Track objects.
+        """
+        track_id, _ = _parse_radio_item_id(prov_track_id)
+        station_id = f"track:{track_id}"
+        raw_tracks, _ = await self.client.get_rotor_station_tracks(station_id, queue=None)
+        tracks = []
+        for yt in raw_tracks[:limit]:
+            try:
+                tracks.append(parse_track(self, yt))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing similar track: %s", err)
+        return tracks
+
+    @use_cache(3600 * 3)
+    async def get_similar_artists(self, prov_artist_id: str, limit: int = 25) -> list[Artist]:
+        """
+        Get artists similar to the given one via Kion artists/similar endpoint.
+
+        :param prov_artist_id: Provider artist ID.
+        :param limit: Maximum number of artists to return.
+        :return: List of similar Artist objects.
+        """
+        raw_artists = await self.client.get_similar_artists(prov_artist_id, limit=limit)
+        artists: list[Artist] = []
+        for ya in raw_artists:
+            try:
+                artists.append(parse_artist(self, ya))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing similar artist: %s", err)
+        return artists
+
     @use_cache(600)
     async def _get_my_wave_recommendations(self) -> RecommendationFolder | None:
         """
@@ -2549,18 +2769,6 @@ class KionMusicProvider(MusicProvider):
             icon="mdi-star",
         )
 
-    async def _pick_random_tag_for_category(self, category: str) -> str | None:
-        """
-        Pick a random valid tag for a category (not cached — enables rotation).
-
-        :param category: Category name ('mood', 'activity', etc.).
-        :return: Random tag slug, or None if no valid tags.
-        """
-        valid_tags = await self._get_valid_tags_for_category(category)
-        if not valid_tags:
-            return None
-        return random.choice(valid_tags)
-
     @use_cache(1800)
     async def _get_mood_mix_recommendations(self, mood_tag: str) -> RecommendationFolder | None:
         """
@@ -2676,3 +2884,201 @@ class KionMusicProvider(MusicProvider):
             if mapping.provider_instance == self.instance_id:
                 return mapping.item_id
         return item.item_id if item.provider == self.instance_id else None
+
+    # Streaming
+
+    async def get_stream_details(
+        self, item_id: str, media_type: MediaType = MediaType.TRACK
+    ) -> StreamDetails:
+        """
+        Get stream details for a track.
+
+        :param item_id: The track ID (or track_id@station_id for My Mix).
+        :param media_type: The media type (should be TRACK).
+        :return: StreamDetails for the track.
+        """
+        return await self.streaming.get_stream_details(item_id)
+
+    async def get_audio_stream(
+        self, streamdetails: StreamDetails, seek_position: int = 0
+    ) -> AsyncGenerator[bytes]:
+        """
+        Return the audio stream for the provider item.
+
+        Uses windowed Range-request streaming to prevent Kion CDN drops.
+        Handles both raw (direct) and encrypted (encraw) transports.
+
+        :param streamdetails: Stream details with URL and optional decryption key.
+        :param seek_position: Seek position in seconds (handled by provider for raw transport).
+        :return: Async generator yielding audio chunks.
+        """
+        async for chunk in self.streaming.get_audio_stream(streamdetails, seek_position):
+            yield chunk
+
+    async def get_rotor_station_tracks(
+        self, station_id: str, queue: str | int | None = None
+    ) -> tuple[list[Any], str | None]:
+        """
+        Fetch tracks from a rotor station (My Mix, similar, etc.).
+
+        Wrapper around client.get_rotor_station_tracks for use by ynison plugin.
+        """
+        return await self.client.get_rotor_station_tracks(station_id, queue=queue)
+
+    def get_quality(self) -> str:
+        """
+        Return the configured audio quality tier (e.g. 'balanced', 'superb').
+
+        Mirrors the legacy-value normalization used by the streaming layer:
+        older configs store the lossless tier as ``"lossless"``, while the
+        current canonical value is ``QUALITY_LOSSLESS`` (``"superb"``).
+        External callers (e.g. the ynison plugin wrapper) see the same
+        normalized value the streaming code would resolve to.
+        """
+        quality = str(self.config.get_value(CONF_QUALITY) or "").strip().lower()
+        if quality == "lossless":
+            quality = QUALITY_LOSSLESS
+        return quality
+
+    async def resolve_image(self, path: str) -> str | bytes:
+        """
+        Resolve wave cover image with background color fill for transparent PNGs.
+
+        If the image URL has an associated background color (stored in _wave_bg_colors),
+        downloads the PNG from Kion CDN and composites it on a solid color background
+        using Pillow, returning JPEG bytes. Falls back to the original URL on any error.
+
+        :param path: Image URL (may include #rrggbb fragment used as cache key).
+        :return: Composited JPEG bytes, or original path string as fallback.
+        """
+        bg_color = self._wave_bg_colors.get(path)
+        if not bg_color:
+            return path
+
+        # Strip the #color fragment before fetching the actual image
+        fetch_url = path.split("#", maxsplit=1)[0] if "#" in path else path
+        try:
+            async with self.mass.http_session.get(fetch_url) as resp:
+                resp.raise_for_status()
+                raw = await resp.read()
+        except Exception as err:
+            self.logger.debug("Failed to fetch wave cover %s: %s", fetch_url, err)
+            return fetch_url
+
+        def _composite() -> bytes:
+            bg_clean = bg_color.lstrip("#")
+            try:
+                r = int(bg_clean[0:2], 16)
+                g = int(bg_clean[2:4], 16)
+                b = int(bg_clean[4:6], 16)
+            except ValueError, IndexError:
+                return raw
+            fg = PilImage.open(BytesIO(raw)).convert("RGBA")
+            bg = PilImage.new("RGBA", fg.size, (r, g, b, 255))
+            bg.paste(fg, mask=fg)
+            out = BytesIO()
+            bg.convert("RGB").save(out, "JPEG", quality=92)
+            return out.getvalue()
+
+        try:
+            return await asyncio.to_thread(_composite)
+        except Exception as err:
+            self.logger.debug("Wave cover composite failed for %s: %s", fetch_url, err)
+            return fetch_url
+
+    async def on_played(
+        self,
+        media_type: MediaType,
+        prov_item_id: str,
+        fully_played: bool,
+        position: int,
+        media_item: MediaItemType,
+        is_playing: bool = False,
+    ) -> None:
+        """
+        Report playback for rotor feedback when the track is from My Mix.
+
+        Sends trackStarted when the track is currently playing (is_playing=True).
+        trackFinished/skip are sent from on_streamed to use accurate seconds_streamed.
+        """
+        if media_type != MediaType.TRACK:
+            return
+        track_id, station_id = _parse_radio_item_id(prov_item_id)
+        if not station_id:
+            return
+        if is_playing:
+            if station_id == ROTOR_STATION_MY_MIX:
+                batch_id = self._my_wave_batch_id
+            else:
+                state = self._wave_states.get(station_id)
+                batch_id = state.batch_id if state else None
+            await self.client.send_rotor_station_feedback(
+                station_id,
+                "trackStarted",
+                track_id=track_id,
+                batch_id=batch_id,
+            )
+
+    async def on_streamed(self, streamdetails: StreamDetails) -> None:
+        """
+        Report stream completion for My Mix rotor feedback.
+
+        Sends trackFinished or skip with actual seconds_streamed so Kion
+        can improve recommendations.
+        """
+        track_id, station_id = _parse_radio_item_id(streamdetails.item_id)
+        if not station_id:
+            return
+        seconds = int(streamdetails.seconds_streamed or 0)
+        duration = streamdetails.duration or 0
+        feedback_type = "trackFinished" if duration and seconds >= max(0, duration - 10) else "skip"
+        if station_id == ROTOR_STATION_MY_MIX:
+            batch_id = self._my_wave_batch_id
+        else:
+            state = self._wave_states.get(station_id)
+            batch_id = state.batch_id if state else None
+        await self.client.send_rotor_station_feedback(
+            station_id,
+            feedback_type,
+            track_id=track_id,
+            total_played_seconds=seconds,
+            batch_id=batch_id,
+        )
+
+    async def _rotating_row_tag_subtitle(self, category: str) -> str | None:
+        """
+        Return the display label of the current rotating tag for a mood/activity row.
+
+        Cache-only read of the validated tag list (rows must stay free of backend I/O):
+        returns None - no subtitle - until an items fetch has warmed that cache.
+
+        :param category: Tag category ('mood' or 'activity').
+        """
+        # key mirrors the @use_cache key construction on _get_valid_tags_for_category:
+        # the wrapped function's __name__ (preserved by functools.wraps, so it survives
+        # renames) plus its positional args, joined by dots
+        tags, _, found = await self.mass.cache.get_with_freshness(
+            f"{self._get_valid_tags_for_category.__name__}.{category}",
+            provider=self.instance_id,
+            include_expired=True,
+        )
+        if not found or not tags:
+            return None
+        tag = self._rotating_row_tag(category, tags)
+        return self._media_source_name("folder", _media_label_key(tag)) or tag.title()
+
+    def _rotating_row_tag(self, category: str, valid_tags: list[str]) -> str:
+        """
+        Deterministically pick the current hour's tag for a mood/activity row.
+
+        Rows and items derive the same tag independently - no shared state, so
+        concurrent clients (or multiple users on one instance) can never make the
+        served items mismatch the row subtitle. The pick rotates hourly and
+        differs per provider instance.
+
+        :param category: Tag category the tags belong to.
+        :param valid_tags: Non-empty list of valid tag slugs to pick from.
+        """
+        hour_bucket = int(utc().timestamp()) // 3600
+        seed = f"{self.instance_id}.{category}.{hour_bucket}".encode()
+        return sorted(valid_tags)[zlib.crc32(seed) % len(valid_tags)]
