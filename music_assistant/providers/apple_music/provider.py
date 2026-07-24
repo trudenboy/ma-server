@@ -15,9 +15,11 @@ from music_assistant_models.media_items import (
     RecommendationFolder,
     SearchResults,
     Track,
+    UniqueList,
 )
 
 from music_assistant.models.music_provider import MusicProvider
+from music_assistant.models.recommendation_payload import RecommendationPayloadMixin
 
 from .api_client import AppleMusicAPIClient
 from .constants import (
@@ -43,7 +45,7 @@ if TYPE_CHECKING:
     from music_assistant import MusicAssistant
 
 
-class AppleMusicProvider(MusicProvider):
+class AppleMusicProvider(RecommendationPayloadMixin, MusicProvider):
     """Implementation of an Apple Music MusicProvider."""
 
     _music_user_token: str | None = None
@@ -110,9 +112,19 @@ class AppleMusicProvider(MusicProvider):
         """Perform search on musicprovider."""
         return await self.media_manager.search(search_query, media_types, limit)
 
-    async def recommendations(self) -> list[RecommendationFolder]:
-        """Get personalized station recommendations for the Discover page."""
-        return await self.recommendation_manager.get_personal_recommendations()
+    async def get_recommendations(self) -> list[RecommendationFolder]:
+        """Get this provider's available recommendation rows, without items."""
+        return await self._recommendation_rows_from_payload()
+
+    async def get_recommendation_items(
+        self, item_id: str
+    ) -> UniqueList[MediaItemType | ItemMapping | BrowseFolder]:
+        """
+        Get the items for a single recommendation row.
+
+        :param item_id: The item_id of the row, as returned by get_recommendations.
+        """
+        return await self._recommendation_items_from_payload(item_id)
 
     # ------------------------------------------------------------------
     # Media item getters
@@ -224,3 +236,7 @@ class AppleMusicProvider(MusicProvider):
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Return the content details for the given track when it will be streamed."""
         return await self.streaming_manager.get_stream_details(item_id)
+
+    async def _fetch_recommendation_payload(self) -> list[RecommendationFolder]:
+        """Fetch and parse the full recommendations payload (folders with items)."""
+        return await self.recommendation_manager.get_personal_recommendations()
