@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import socket
 import time
 from contextlib import suppress
 from ipaddress import IPv4Address, IPv6Address, ip_address
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from music_assistant_models.enums import PlaybackState
-from zeroconf import ServiceStateChange
+from zeroconf import NonUniqueNameException, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceInfo
 
 from music_assistant.constants import (
+    CONF_LOG_LEVEL,
     CONF_PLAYERS,
     CONF_PROVIDERS,
     CONF_SYNC_ADJUST,
@@ -51,6 +53,7 @@ from .constants import (
     StreamingProtocol,
 )
 from .control_player import AirPlayControlPlayer
+from .dashboard import AirPlayDashboards
 from .helpers import (
     convert_airplay_volume,
     get_cli_binary,
@@ -59,6 +62,9 @@ from .helpers import (
 )
 from .player import AirPlayPlayer, GenericAirPlayPlayer
 from .sendspin_bridge import SendspinBridgeManager
+
+if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ProviderConfig
 
 # Marker the `cliairplay --ptp-daemon` process prints once it has bound the
 # privileged PTP ports (UDP 319/320) and opened its control channel. Until this
@@ -70,6 +76,9 @@ PTP_DAEMON_READY_MARKER: Final[str] = "[PTP] daemon up"
 # session that starts while the daemon is still coming up (or never binds) pays
 # any of this, and only up to the moment readiness is signalled.
 PTP_DAEMON_READY_TIMEOUT: Final[float] = 3.0
+# Grace period after broadcasting a goodbye for a stale DACP registration before
+# re-registering the (name-stable) service, letting the cache flush the old record.
+DACP_RECLAIM_DELAY: Final[float] = 1.0
 
 
 class AirPlayProvider(PlayerProvider):
@@ -78,6 +87,7 @@ class AirPlayProvider(PlayerProvider):
     _dacp_server: asyncio.Server
     _dacp_info: AsyncServiceInfo
     _bridge_manager: SendspinBridgeManager
+    dashboards: AirPlayDashboards
     _ptp_daemon: AsyncProcess | None = None
     _ptp_daemon_stdout_task: asyncio.Task[None] | None = None
     _ptp_daemon_started: float = 0.0
@@ -171,11 +181,15 @@ class AirPlayProvider(PlayerProvider):
 
     async def handle_async_init(self) -> None:
         """Handle async initialization of the provider."""
+        self._set_pyatv_log_level()
         self._companion_info_by_address: dict[str, AsyncServiceInfo] = {}
         self._mrp_info_by_address: dict[str, AsyncServiceInfo] = {}
 
         # Initialize Sendspin bridge manager for protocol linking
         self._bridge_manager = SendspinBridgeManager(self)
+
+        # Registers eligible Apple TVs as dashboard endpoints for the tvOS app
+        self.dashboards = AirPlayDashboards(self)
 
         # register DACP zeroconf service
         dacp_port = await select_free_port(39831, 49831)
@@ -199,7 +213,7 @@ class AirPlayProvider(PlayerProvider):
             },
             server=f"{socket.gethostname()}.local",
         )
-        await self.mass.discovery.aiozc.async_register_service(self._dacp_info)
+        await self._register_dacp_service()
 
         self._migrate_protocol_preferences()
         self._migrate_sync_adjust()
@@ -208,6 +222,14 @@ class AirPlayProvider(PlayerProvider):
         # AirPlay 2 streams attach to it (--ptp-shared) so multi-room sync groups
         # lock to a single grandmaster while UDP 319/320 is bound only once.
         await self._start_ptp_daemon()
+
+    async def update_config(self, config: ProviderConfig, changed_keys: set[str]) -> None:
+        """Handle logic when the config is updated."""
+        await super().update_config(config, changed_keys)
+        # a log level(-only) change does not reload the provider,
+        # so realign pyatv's logger here
+        if f"values/{CONF_LOG_LEVEL}" in changed_keys:
+            self._set_pyatv_log_level()
 
     async def on_mdns_service_state_change(
         self, name: str, state_change: ServiceStateChange, info: AsyncServiceInfo | None
@@ -244,6 +266,7 @@ class AirPlayProvider(PlayerProvider):
                 # Remove the Sendspin bridge first
                 await self._bridge_manager.remove_bridge(player_id)
                 await self.mass.players.unregister(player_id)
+            self.dashboards.unregister(player_id)
             return
         # handle update for existing device
         assert info is not None  # type guard
@@ -251,11 +274,18 @@ class AirPlayProvider(PlayerProvider):
         if player := cast("AirPlayPlayer | None", self.mass.players.get_player(player_id)):
             # update the latest discovery info for existing player
             player.set_discovery_info(info, display_name)
+            # only control players can ever be dashboard endpoints
+            if isinstance(player, AirPlayControlPlayer):
+                self.dashboards.reconcile(player_id)
             return
         await self._setup_player(player_id, display_name, info)
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle unload/close of the provider."""
+        # Unregister all dashboard endpoints
+        dashboards = getattr(self, "dashboards", None)
+        if dashboards:
+            await dashboards.unload()
         # Stop all Sendspin bridges
         bridge_manager = getattr(self, "_bridge_manager", None)
         if bridge_manager:
@@ -301,6 +331,16 @@ class AirPlayProvider(PlayerProvider):
     def get_player(self, player_id: str) -> AirPlayPlayer | None:
         """Return AirplayPlayer by id."""
         return cast("AirPlayPlayer | None", self.mass.players.get_player(player_id))
+
+    def _set_pyatv_log_level(self) -> None:
+        """Keep pyatv's (very chatty) logging quiet unless verbose logging is enabled."""
+        # pyatv is extremely chatty at debug level (it logs every protocol
+        # message and heartbeat of each control connection), so only pass
+        # through its debug logging when verbose logging is enabled
+        if self.logger.isEnabledFor(VERBOSE_LOG_LEVEL):
+            logging.getLogger("pyatv").setLevel(logging.DEBUG)
+        else:
+            logging.getLogger("pyatv").setLevel(self.logger.level + 10)
 
     async def _setup_player(
         self, player_id: str, display_name: str, discovery_info: AsyncServiceInfo
@@ -435,6 +475,10 @@ class AirPlayProvider(PlayerProvider):
 
         # Set up Sendspin bridge for protocol linking (if Sendspin provider is available)
         await self._bridge_manager.evaluate_bridge(player)
+
+        # Track control players (Apple TVs) for dashboard eligibility
+        if isinstance(player, AirPlayControlPlayer):
+            self.dashboards.setup_player(player)
 
     async def _is_own_airplay_receiver(
         self, display_name: str, discovery_info: AsyncServiceInfo
@@ -695,6 +739,30 @@ class AirPlayProvider(PlayerProvider):
         self.mass.config.set_raw_provider_config_value(
             self.instance_id, CONF_PROTOCOL_MIGRATION_MARKER, True
         )
+
+    async def _register_dacp_service(self) -> None:
+        """
+        Register the DACP ActiveRemote mDNS service, reclaiming a stale name if needed.
+
+        The service name is derived from the (persistent) server id, so it is identical
+        across every reload and restart. A previous registration that was not cleanly
+        torn down - a reload racing a slow initial load, or a leftover from a prior crash -
+        keeps the same name in the zeroconf cache and makes a plain register raise
+        NonUniqueNameException. In that case we broadcast a goodbye for the name to flush
+        the stale record, then register again.
+        """
+        aiozc = self.mass.discovery.aiozc
+        try:
+            await aiozc.async_register_service(self._dacp_info)
+            return
+        except NonUniqueNameException:
+            self.logger.debug(
+                "DACP service %s already advertised - reclaiming stale registration",
+                self._dacp_info.name,
+            )
+        await aiozc.async_unregister_service(self._dacp_info)
+        await asyncio.sleep(DACP_RECLAIM_DELAY)
+        await aiozc.async_register_service(self._dacp_info)
 
     async def _start_ptp_daemon(self) -> None:
         """Spawn the shared PTP clock daemon (cliairplay --ptp-daemon)."""
