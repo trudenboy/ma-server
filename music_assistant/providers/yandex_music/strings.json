@@ -50,8 +50,8 @@
       }
     },
     "remember_session": {
-      "label": "[%key:common::config_entries::remember_session::label%]",
-      "description": "[%key:common::config_entries::remember_session::description%]"
+      "label": "Remember session (auto-refresh token)",
+      "description": "When enabled, stores a long-lived session token to automatically refresh your music token when it expires. When disabled, you must re-authenticate manually when the token expires."
     },
     "quality": {
       "label": "Audio quality",

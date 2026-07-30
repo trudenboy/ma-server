@@ -15,6 +15,7 @@ stores no long-lived secrets, exactly as the old action handlers did.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from html import escape
 from typing import TYPE_CHECKING
@@ -45,13 +46,12 @@ if TYPE_CHECKING:
 
     from music_assistant.models.setup_flow import SetupSession
 
-# login method choices on the first form
 CONF_METHOD = "method"
 METHOD_DEVICE = "device"
 METHOD_QR = "qr"
 
-# device name shown on the Yandex confirmation screen during the login flows
 _DEVICE_NAME = "Music Assistant"
+_AUTH_FLOW_TIMEOUT_SECONDS = 15 * 60
 
 
 async def run_setup(session: SetupSession) -> None:
@@ -68,10 +68,10 @@ async def run_setup(session: SetupSession) -> None:
                     key=CONF_METHOD,
                     type=ConfigEntryType.STRING,
                     required=True,
-                    default_value=METHOD_DEVICE,
+                    default_value=METHOD_QR,
                     options=[
-                        ConfigValueOption(value=METHOD_DEVICE),
                         ConfigValueOption(value=METHOD_QR),
+                        ConfigValueOption(value=METHOD_DEVICE),
                     ],
                 ),
                 ConfigEntry(
@@ -124,19 +124,29 @@ async def _qr_login(session: SetupSession) -> Credentials:
     progress step re-emitted in place.
     """
     ttl = ClientConfig().qr_poll_total_timeout_seconds
-    async with PassportClient.create(config=ClientConfig()) as client:
-        while True:
-            qr = await client.start_qr_login()
-            try:
-                return await session.progress_until(
-                    client.poll_qr_until_confirmed(qr, total_timeout=ttl),
-                    step_id="scan_qr",
-                    text="scan_qr",
-                    image=_qr_image(qr.qr_url),
-                    expires_in=int(ttl),
-                )
-            except StepExpiredError, QRTimeoutError:
-                continue
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _AUTH_FLOW_TIMEOUT_SECONDS
+    try:
+        async with asyncio.timeout_at(deadline):
+            async with PassportClient.create(config=ClientConfig()) as client:
+                while True:
+                    qr = await client.start_qr_login()
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    code_timeout = min(float(ttl), remaining)
+                    try:
+                        return await session.progress_until(
+                            client.poll_qr_until_confirmed(qr, total_timeout=code_timeout),
+                            step_id="scan_qr",
+                            text="scan_qr",
+                            image=_qr_image(qr.qr_url),
+                            expires_in=code_timeout,
+                        )
+                    except StepExpiredError, QRTimeoutError:
+                        continue
+    except TimeoutError as err:
+        raise StepExpiredError from err
 
 
 async def _device_login(session: SetupSession) -> Credentials:
@@ -146,25 +156,32 @@ async def _device_login(session: SetupSession) -> Credentials:
     Shows the ``user_code`` + verification URL as an inline image and polls until the user
     confirms; a code that elapses is minted afresh and the progress step re-emitted in place.
     """
-    async with PassportClient.create(config=ClientConfig()) as client:
-        while True:
-            device = await client.start_device_login(device_name=_DEVICE_NAME)
-            try:
-                return await session.progress_until(
-                    # give the poll a longer deadline than the step so the step's
-                    # countdown (StepExpiredError -> refresh) always wins the race
-                    client.poll_device_until_confirmed(
-                        device, total_timeout=float(device.expires_in) + 60
-                    ),
-                    step_id="device_login",
-                    text="device_login",
-                    image=_device_image(device.user_code, device.verification_url),
-                    expires_in=float(device.expires_in),
-                )
-            except StepExpiredError, DeviceCodeTimeoutError:
-                continue
-            except InvalidCredentialsError as err:
-                raise AbortFlow("login_denied") from err
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _AUTH_FLOW_TIMEOUT_SECONDS
+    try:
+        async with asyncio.timeout_at(deadline):
+            async with PassportClient.create(config=ClientConfig()) as client:
+                while True:
+                    device = await client.start_device_login(device_name=_DEVICE_NAME)
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    code_timeout = min(float(device.expires_in), remaining)
+                    poll_timeout = min(float(device.expires_in) + 60, remaining)
+                    try:
+                        return await session.progress_until(
+                            client.poll_device_until_confirmed(device, total_timeout=poll_timeout),
+                            step_id="device_login",
+                            text="device_login",
+                            image=_device_image(device.user_code, device.verification_url),
+                            expires_in=code_timeout,
+                        )
+                    except StepExpiredError, DeviceCodeTimeoutError:
+                        continue
+                    except InvalidCredentialsError as err:
+                        raise AbortFlow("login_denied") from err
+    except TimeoutError as err:
+        raise StepExpiredError from err
 
 
 def _qr_image(qr_url: str) -> str:
