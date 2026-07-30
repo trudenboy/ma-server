@@ -881,21 +881,12 @@ class YandexMusicProvider(MusicProvider):
 
         # The English name on each folder doubles as the fallback; translation_key localizes
         # it for the connection locale at serialization (the server is the single source).
-        folders: list[BrowseFolder] = []
+        items: list[MediaItemType | ItemMapping | BrowseFolder] = []
         base = path if path.endswith("//") else path.rstrip("/") + "/"
-        # My Wave folder (always enabled — Яндекс «Моя волна»)
-        folders.append(
-            BrowseFolder(
-                item_id=MY_WAVE_PLAYLIST_ID,
-                provider=self.instance_id,
-                path=f"{base}{MY_WAVE_PLAYLIST_ID}",
-                name="My Wave",
-                translation_key=MY_WAVE_PLAYLIST_ID,
-                is_playable=True,
-            )
-        )
+        # Expose My Wave as its dynamic virtual playlist so queue refills stay enabled.
+        items.append(await self.get_playlist(MY_WAVE_PLAYLIST_ID))
         # Wave modes folder (P4): discover / calm / active / language presets
-        folders.append(
+        items.append(
             BrowseFolder(
                 item_id=MY_WAVE_MODES_FOLDER_ID,
                 provider=self.instance_id,
@@ -907,7 +898,7 @@ class YandexMusicProvider(MusicProvider):
         )
         # User-defined wave presets (P8) — shown only when any configured.
         if self._get_user_wave_presets():
-            folders.append(
+            items.append(
                 BrowseFolder(
                     item_id=MY_WAVE_PRESETS_FOLDER_ID,
                     provider=self.instance_id,
@@ -918,7 +909,7 @@ class YandexMusicProvider(MusicProvider):
                 )
             )
         # For You folder — Picks + Mixes (Яндекс «Для вас»)
-        folders.append(
+        items.append(
             BrowseFolder(
                 item_id=FOR_YOU_FOLDER_ID,
                 provider=self.instance_id,
@@ -939,7 +930,7 @@ class YandexMusicProvider(MusicProvider):
             )
         )
         if has_library:
-            folders.append(
+            items.append(
                 BrowseFolder(
                     item_id=COLLECTION_FOLDER_ID,
                     provider=self.instance_id,
@@ -950,7 +941,7 @@ class YandexMusicProvider(MusicProvider):
                 )
             )
         # Radio folder — rotor stations (Яндекс волны, shown as Radio)
-        folders.append(
+        items.append(
             BrowseFolder(
                 item_id=RADIO_FOLDER_ID,
                 provider=self.instance_id,
@@ -961,7 +952,7 @@ class YandexMusicProvider(MusicProvider):
             )
         )
         # AI Wave Sets — parametric stations from /landing-blocks/mixes-waves
-        folders.append(
+        items.append(
             BrowseFolder(
                 item_id=MY_WAVES_SET_FOLDER_ID,
                 provider=self.instance_id,
@@ -972,7 +963,7 @@ class YandexMusicProvider(MusicProvider):
             )
         )
         # Pinned items — user-pinned artists/albums/playlists/waves
-        folders.append(
+        items.append(
             BrowseFolder(
                 item_id=PINNED_ITEMS_FOLDER_ID,
                 provider=self.instance_id,
@@ -983,7 +974,7 @@ class YandexMusicProvider(MusicProvider):
             )
         )
         # Listening history — recently played tracks/albums
-        folders.append(
+        items.append(
             BrowseFolder(
                 item_id=LISTENING_HISTORY_FOLDER_ID,
                 provider=self.instance_id,
@@ -993,9 +984,9 @@ class YandexMusicProvider(MusicProvider):
                 is_playable=False,
             )
         )
-        if len(folders) == 1:
-            return await self.browse(folders[0].path)
-        return folders
+        if len(items) == 1 and isinstance(items[0], BrowseFolder):
+            return await self.browse(items[0].path)
+        return items
 
     # Search
 
@@ -3291,6 +3282,60 @@ class YandexMusicProvider(MusicProvider):
         lyrics, lyrics_synced = await self.client.get_track_lyrics_from_track(yandex_track)
 
         return parse_track(self, yandex_track, lyrics=lyrics, lyrics_synced=lyrics_synced)
+
+    async def get_playlist(self, prov_playlist_id: str) -> Playlist:
+        """
+        Get playlist details by ID.
+
+        Supports virtual playlists MY_WAVE_PLAYLIST_ID (My Wave) and
+        LIKED_TRACKS_PLAYLIST_ID (Liked Tracks). Real playlists use format "owner_id:kind".
+
+        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind",
+            my_wave, or liked_tracks).
+        :return: Playlist object.
+        :raises MediaNotFoundError: If playlist not found.
+        """
+        # Virtual playlists - constructed locally (no API call); translation_key localizes
+        # the name for the connection locale at serialization.
+        if prov_playlist_id == MY_WAVE_PLAYLIST_ID:
+            return Playlist(
+                item_id=MY_WAVE_PLAYLIST_ID,
+                provider=self.instance_id,
+                name="My Wave",
+                translation_key=MY_WAVE_PLAYLIST_ID,
+                owner=get_canonical_provider_name(self),
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=MY_WAVE_PLAYLIST_ID,
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                        is_unique=True,
+                    )
+                },
+                is_editable=False,
+                is_dynamic=True,
+            )
+
+        if prov_playlist_id == LIKED_TRACKS_PLAYLIST_ID:
+            return Playlist(
+                item_id=LIKED_TRACKS_PLAYLIST_ID,
+                provider=self.instance_id,
+                name="My Favorites",
+                translation_key=LIKED_TRACKS_PLAYLIST_ID,
+                owner=get_canonical_provider_name(self),
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=LIKED_TRACKS_PLAYLIST_ID,
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                        is_unique=True,
+                    )
+                },
+                is_editable=False,
+            )
+
+        # Real playlists - use cached method
+        return await self._get_real_playlist(prov_playlist_id)
 
     @use_cache(3600 * 24 * 30, allow_expired_cache=True)
     async def _get_real_playlist(self, prov_playlist_id: str) -> Playlist:
