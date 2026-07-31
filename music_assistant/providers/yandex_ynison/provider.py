@@ -32,7 +32,6 @@ from music_assistant_models.errors import (
 from music_assistant_models.media_items import AudioSource, ProviderMapping
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from ya_passport_auth import SecretStr
-from ya_passport_auth.ma import BorrowedCredentialSource
 
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, ThrottlerManager
@@ -46,16 +45,15 @@ from .constants import (
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
     CONF_PUBLISH_NAME,
-    CONF_TOKEN,
-    CONF_X_TOKEN,
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
+    LEGACY_YM_INSTANCE_OWN,
     OUTPUT_AUTO,
     PLAYER_ID_AUTO,
     YANDEX_MUSIC_CONF_QUALITY,
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
-    YM_INSTANCE_OWN,
 )
+from .credential_source import YandexMusicCredentialSource
 from .protocols import YandexMusicProviderLike
 from .streaming import (
     PCM_LOSSLESS_PARAMS,
@@ -108,13 +106,11 @@ _API_MAX_BACKOFF = 30.0
 _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
 
 # In-memory music-token cache TTL (seconds). Yandex music tokens live ~60 min;
-# 50 min leaves 10 min headroom before the server would reject them. Tied to
-# the borrow-mode-with-only-x_token + 401-storm path described in spec 0004.
+# 50 min leaves 10 min headroom before the server would reject them.
 _MUSIC_TOKEN_TTL_S = 50 * 60
 
-# Maximum number of distinct x_token entries kept in the own-mode music-token
-# cache (borrow mode caches inside BorrowedCredentialSource). 4 keeps headroom
-# for an x_token rotation with one refresh in flight.
+# Maximum number of distinct linked x_token entries kept in the temporary
+# music-token cache. Four keeps headroom for a token rotation in flight.
 _MUSIC_TOKEN_CACHE_MAX = 4
 
 # Accepted non-auto values for output format overrides; mirrors the options
@@ -171,7 +167,7 @@ class YandexYnisonProvider(PluginProvider):
         """Initialize the Ynison plugin provider."""
         super().__init__(mass, manifest, config, supported_features)
 
-        # Setup identity and playback options
+        # Setup-owned identity
         self._default_player_id: str = (
             cast("str", self.get_setup_value(CONF_MASS_PLAYER_ID)) or PLAYER_ID_AUTO
         )
@@ -189,23 +185,16 @@ class YandexYnisonProvider(PluginProvider):
             cast("str", self.get_setup_value(CONF_PUBLISH_NAME)) or DEFAULT_DISPLAY_NAME
         )
 
-        # Token source — None = own (manually entered CONF_TOKEN);
-        # otherwise the instance_id of a linked yandex_music provider to borrow from.
         ym_instance_value = cast("str | None", self.get_setup_value(CONF_YM_INSTANCE))
-        self._ym_instance_id: str | None = (
-            ym_instance_value
-            if ym_instance_value and ym_instance_value != YM_INSTANCE_OWN
-            else None
-        )
-        # Borrow mode: read-only credential source over the linked
-        # yandex_music instance (shared auth layer). The owner stays the
-        # single writer/rotator of persisted credentials; minted music
-        # tokens are cached in-memory inside the source (TTL + LRU +
-        # coalesced refreshes per its spec).
-        self._borrow_source: BorrowedCredentialSource | None = (
-            BorrowedCredentialSource(self.mass, self._ym_instance_id)
-            if self._ym_instance_id is not None
-            else None
+        if not ym_instance_value or ym_instance_value == LEGACY_YM_INSTANCE_OWN:
+            raise LoginFailed(
+                "Own credentials are no longer supported. Reconfigure this Ynison "
+                "instance and select a Yandex Music provider."
+            )
+        self._ym_instance_id = ym_instance_value
+        self._credential_source = YandexMusicCredentialSource(
+            self.mass,
+            self._ym_instance_id,
         )
 
         # Device ID — persist in config so re-registration uses the same ID
@@ -296,12 +285,7 @@ class YandexYnisonProvider(PluginProvider):
         self._now: Callable[[], float] = time.monotonic
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
-        """
-        Return Config entries to configure this provider.
-
-        Account, player and device identity are collected by the interactive setup flow;
-        only runtime playback options live here.
-        """
+        """Return runtime playback configuration entries for this provider."""
         return (
             ConfigEntry(
                 key=CONF_ALLOW_PLAYER_SWITCH,
@@ -345,13 +329,10 @@ class YandexYnisonProvider(PluginProvider):
 
     async def handle_async_init(self) -> None:
         """Handle async initialization of the provider."""
-        if self._ym_instance_id is not None:
-            self.logger.info(
-                "Borrowing credentials from yandex_music instance '%s'",
-                self._ym_instance_id,
-            )
-        else:
-            self.logger.info("Using manually configured Yandex Music token (no auto-refresh)")
+        self.logger.info(
+            "Using credentials from yandex_music instance '%s'",
+            self._ym_instance_id,
+        )
         token = await self._resolve_token()
 
         device_info = YnisonDeviceInfo(
@@ -939,24 +920,20 @@ class YandexYnisonProvider(PluginProvider):
         """
         Resolve the Yandex Music OAuth token for the Ynison connection.
 
-        In borrow mode: read from the linked yandex_music provider's config.
-        If only x_token is present (YM hasn't refreshed yet), do a cached
-        in-memory refresh without writing back — YM owns token persistence.
-
-        In own mode: return CONF_TOKEN if set; otherwise, when CONF_X_TOKEN
-        is present (QR-with-Remember-session path), cached in-memory refresh.
+        Read setup-owned credentials from the linked Yandex Music provider.
+        If it exposes only an x-token, mint and cache a temporary music token
+        without writing it back; Yandex Music remains the persistent owner.
         """
-        if self._borrow_source is not None:
-            return await self._borrow_source.resolve_music_token()
-
-        token = cast("str | None", self.get_setup_value(CONF_TOKEN))
-        if token:
-            return SecretStr(token)
-        x_token = cast("str | None", self.get_setup_value(CONF_X_TOKEN))
+        token, x_token = self._credential_source.read_tokens()
+        if token is not None:
+            return token
         if x_token:
-            self.logger.debug("Own-mode token not present — refreshing from stored x_token")
-            return await self._refresh_via_x_token(x_token)
-        raise LoginFailed("No Yandex Music token configured")
+            self.logger.debug("Linked music token not present — refreshing from x_token")
+            return await self._refresh_via_x_token(x_token.get_secret())
+        raise LoginFailed(
+            "Linked Yandex Music provider has no usable token. "
+            "Reconfigure Yandex Music authentication."
+        )
 
     async def _refresh_ynison_token(self) -> SecretStr:
         """
@@ -964,40 +941,20 @@ class YandexYnisonProvider(PluginProvider):
 
         Called by YnisonClient on auth failure (401/403) during reconnect.
 
-        In borrow mode: re-read the linked YM instance's x_token and refresh
-        in-memory only (no config writes — YM owns token persistence).
-
-        In own mode: refresh from stored CONF_X_TOKEN when present (QR with
-        "Remember session" enabled). When absent (manual token paste only),
-        surface LoginFailed so the user knows to paste a new token.
-
         The cached token entry for the current x_token is invalidated up
         front — this method is reached only on a server-rejected token, so
         the cached value is provably stale.
         """
-        if self._borrow_source is not None:
-            ym_music_token, ym_x_token = self._borrow_source.read_tokens()
-            if ym_x_token is None:
-                raise LoginFailed("Cannot refresh: linked Yandex Music instance has no x_token")
-            # Both the minted entry AND the owner's persisted token may be the
-            # value the server just rejected — invalidate both so the source
-            # can't re-serve either; it will mint fresh from x_token.
-            if ym_music_token is not None:
-                self._borrow_source.invalidate(ym_music_token)
-            self._borrow_source.invalidate(ym_x_token)
-            self.logger.info("Refreshing Yandex Music token for Ynison reconnect (borrow mode)")
-            return await self._borrow_source.resolve_music_token()
-
-        x_token = cast("str | None", self.get_setup_value(CONF_X_TOKEN))
-        if x_token:
-            self._invalidate_cached_token(x_token)
-            self.logger.info("Refreshing Yandex Music token for Ynison reconnect (own mode)")
-            return await self._refresh_via_x_token(x_token)
-
-        raise LoginFailed(
-            "Token expired and no stored x_token to refresh from. Re-authenticate "
-            "via QR or paste a fresh Yandex Music token."
-        )
+        _music_token, x_token = self._credential_source.read_tokens()
+        if x_token is None:
+            raise LoginFailed(
+                "Cannot refresh: linked Yandex Music instance has no x_token. "
+                "Reconfigure Yandex Music authentication."
+            )
+        raw_x_token = x_token.get_secret()
+        self._invalidate_cached_token(raw_x_token)
+        self.logger.info("Refreshing Yandex Music token for Ynison reconnect")
+        return await self._refresh_via_x_token(raw_x_token)
 
     # ------------------------------------------------------------------
     # Ynison state handling
@@ -1514,14 +1471,13 @@ class YandexYnisonProvider(PluginProvider):
         """
         Check if a Yandex Music provider is available for audio streaming.
 
-        In borrow mode (self._ym_instance_id set), match strictly by instance_id
-        so that audio and credentials come from the same account. In own mode,
-        accept any yandex_music music-provider (prior behavior).
+        Match strictly by instance id so audio and credentials always come
+        from the same Yandex account.
         """
         for provider in self.mass.get_providers():
             if provider.domain != "yandex_music" or provider.type != ProviderType.MUSIC:
                 continue
-            if self._ym_instance_id is not None and provider.instance_id != self._ym_instance_id:
+            if provider.instance_id != self._ym_instance_id:
                 continue
             self.logger.debug("Found Yandex Music provider — enabling playback control")
             self._yandex_provider = cast("YandexMusicProviderLike", provider)

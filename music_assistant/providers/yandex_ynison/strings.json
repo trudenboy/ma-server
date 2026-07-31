@@ -1,15 +1,8 @@
 {
   "config_entries": {
     "ym_instance": {
-      "label": "Yandex Music source",
-      "description": "Borrow OAuth credentials from a linked Yandex Music provider instance, or use your own credentials (QR-scan login or manual token paste). Per-instance own credentials let you bind separate players to separate Yandex accounts without sharing tokens with a Yandex Music provider.",
-      "options": {
-        "__own__": "Use own credentials (QR or token)"
-      }
-    },
-    "remember_session": {
-      "label": "Remember session (auto-refresh token)",
-      "description": "Store a long-lived session token (x_token) alongside the music token so this plugin can refresh on its own when the token expires. Disable to keep only the short-lived music token (re-QR required on expiry)."
+      "label": "Yandex Music account",
+      "description": "The configured Yandex Music provider instance whose account Ynison uses. To use another Yandex account, configure another Yandex Music instance first."
     },
     "mass_player_id": {
       "label": "[%key:common::config_entries::mass_player_id::label%]",
@@ -51,17 +44,12 @@
   },
   "setup_flow": {
     "user": {
-      "title": "Yandex Music account",
-      "description": "Choose the Yandex Music account, target player and device name."
+      "title": "Configure Yandex Music Connect",
+      "description": "Choose the Yandex Music account, target Music Assistant player, and device name published to the Yandex Music app."
     },
-    "scan_qr": {
-      "title": "Scan to sign in",
-      "description": "Scan the QR code with the Yandex app and confirm the login. A fresh code is shown automatically if it expires.",
-      "progress_text": "Waiting for you to scan and confirm in the Yandex app..."
+    "abort": {
+      "missing_dependency": "Configure and authenticate a Yandex Music provider before adding or reconfiguring Ynison."
     }
-  },
-  "errors": {
-    "no_music_token": "Login succeeded but Yandex returned no music token. Please try again."
   },
   "manifest": {
     "description": "Makes a Music Assistant player appear as a device in the Yandex Music app via the Ynison protocol."

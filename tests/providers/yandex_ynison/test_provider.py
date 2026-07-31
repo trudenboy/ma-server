@@ -23,22 +23,20 @@ from music_assistant_models.errors import (
 )
 from music_assistant_models.media_items import AudioFormat, AudioSource
 from ya_passport_auth import SecretStr
-from ya_passport_auth.ma import BorrowedCredentialSource, list_yandex_music_instances
 
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, ThrottlerManager
+from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
+from music_assistant.providers.yandex_ynison.config_helpers import list_yandex_music_instances
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_ALLOW_PLAYER_SWITCH,
     CONF_DEVICE_ID,
     CONF_MASS_PLAYER_ID,
     CONF_PUBLISH_NAME,
-    CONF_TOKEN,
-    CONF_X_TOKEN,
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
     OUTPUT_AUTO,
     PLAYER_ID_AUTO,
-    YM_INSTANCE_OWN,
 )
+from music_assistant.providers.yandex_ynison.credential_source import YandexMusicCredentialSource
 from music_assistant.providers.yandex_ynison.provider import (
     _API_MAX_RETRIES,
     _COMMAND_IDEMPOTENCY_TTL,
@@ -81,8 +79,7 @@ def _stub_attr(obj: object, name: str, value: Any) -> None:
 def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
     """Create a mock ProviderConfig."""
     defaults: dict[str, Any] = {
-        CONF_TOKEN: "test-music-token",
-        CONF_YM_INSTANCE: YM_INSTANCE_OWN,
+        CONF_YM_INSTANCE: "ym-inst",
         CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
         CONF_ALLOW_PLAYER_SWITCH: True,
         CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
@@ -93,6 +90,7 @@ def _make_mock_config(values: dict[str, Any] | None = None) -> MagicMock:
         defaults.update(values)
     config = MagicMock()
     config.get_value.side_effect = defaults.get
+    config.values = {}
     # Provider.__init__ now caches the AudioSource which serialises name into a
     # uri/sort_name — both expect real strings, not MagicMock attribute access.
     config.instance_id = "yandex_ynison_test"
@@ -114,11 +112,7 @@ def _make_mock_mass() -> MagicMock:
     mass.subscribe = MagicMock(return_value=MagicMock())
     mass.get_providers = MagicMock(return_value=[])
     mass.config.set_raw_provider_config_value = MagicMock()
-    # Auth values now live in setup_data; the provider reads them via
-    # get_setup_value. Empty setup_data routes those reads through to
-    # config.get_value (via get_config_value; the seeded stub above).
-    mass.config.get = MagicMock(return_value={})
-    mass.config.get_raw_provider_config_value = MagicMock(return_value=None)
+    mass.config.decrypt_string = MagicMock(side_effect=lambda value: value)
 
     # Cache — return None (miss) by default
     mass.cache.get = AsyncMock(return_value=None)
@@ -157,9 +151,7 @@ def _make_provider(player_id: str = PLAYER_ID_AUTO) -> YandexYnisonProvider:
     mass = _make_mock_mass()
     config = _make_mock_config({CONF_MASS_PLAYER_ID: player_id})
     manifest = _make_mock_manifest()
-    provider = YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
-    provider._api_throttler = ThrottlerManager(rate_limit=1000)
-    return provider
+    return YandexYnisonProvider(mass, manifest, config, {ProviderFeature.AUDIO_SOURCE})
 
 
 # ------------------------------------------------------------------
@@ -169,6 +161,51 @@ def _make_provider(player_id: str = PLAYER_ID_AUTO) -> YandexYnisonProvider:
 
 class TestProviderInit:
     """Tests for provider initialization."""
+
+    def test_reads_setup_owned_identity_from_setup_data(self) -> None:
+        """Using ordinary config must not ignore the linked account selected by setup."""
+        mass = _make_mock_mass()
+        mass.config.get.return_value = {
+            CONF_YM_INSTANCE: "ym-primary",
+            CONF_MASS_PLAYER_ID: "living-room",
+            CONF_PUBLISH_NAME: "Living room",
+        }
+        config = _make_mock_config(
+            {
+                CONF_YM_INSTANCE: "__own__",
+                CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+                CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+            }
+        )
+
+        provider = YandexYnisonProvider(
+            mass,
+            _make_mock_manifest(),
+            config,
+            {ProviderFeature.AUDIO_SOURCE},
+        )
+
+        assert provider._ym_instance_id == "ym-primary"
+        assert provider._default_player_id == "living-room"
+        assert provider._display_name == "Living room"
+
+    def test_rejects_missing_or_legacy_own_source(self) -> None:
+        """Keeping own-mode fallback must not let legacy credentials load silently."""
+        for source in (None, "__own__"):
+            mass = _make_mock_mass()
+            mass.config.get.return_value = {
+                CONF_YM_INSTANCE: source,
+                CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+                CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+            }
+
+            with pytest.raises(LoginFailed, match="Reconfigure this Ynison instance"):
+                YandexYnisonProvider(
+                    mass,
+                    _make_mock_manifest(),
+                    _make_mock_config(),
+                    {ProviderFeature.AUDIO_SOURCE},
+                )
 
     def test_audio_source_details(self) -> None:
         """AudioSource should be configured correctly."""
@@ -362,6 +399,7 @@ class TestProviderMatching:
         provider = _make_provider()
 
         mock_ym = MagicMock()
+        mock_ym.instance_id = "ym-inst"
         mock_ym.domain = "yandex_music"
         mock_ym.type = ProviderType.MUSIC
         provider.mass.get_providers.return_value = [mock_ym]  # type: ignore[attr-defined]
@@ -1288,16 +1326,12 @@ class TestPCMNormalization:
         """If get_stream_details fails, _stream_track yields nothing."""
         provider = _make_provider()
         mock_yandex = MagicMock()
+        mock_yandex.get_stream_details = AsyncMock(side_effect=Exception("API error"))
         provider._yandex_provider = mock_yandex
 
         collected: list[bytes] = []
-        with patch.object(
-            provider,
-            "_get_stream_details_with_retry",
-            new=AsyncMock(side_effect=Exception("API error")),
-        ):
-            async for chunk in provider._stream_track("track:bad"):
-                collected.append(chunk)
+        async for chunk in provider._stream_track("track:bad"):
+            collected.append(chunk)
 
         assert collected == []
 
@@ -1341,7 +1375,7 @@ def _make_ym_provider_stub(
     token: str | None = None,
     x_token: str | None = None,
 ) -> MagicMock:
-    """Build a stub yandex_music provider with a config exposing token/x_token."""
+    """Build a Yandex Music provider stub exposing setup-owned credentials."""
     values: dict[str, Any] = {"token": token, "x_token": x_token}
     ym_config = MagicMock()
     ym_config.get_value.side_effect = values.get
@@ -1350,6 +1384,7 @@ def _make_ym_provider_stub(
     ym.domain = "yandex_music"
     ym.type = ProviderType.MUSIC
     ym.config = ym_config
+    ym.get_setup_value.side_effect = values.get
     return ym
 
 
@@ -1418,63 +1453,12 @@ class TestPlayerRateSnap:
         assert provider._normalized_format.sample_rate == 96000
 
 
-class TestResolveTokenOwnMode:
-    """_resolve_token in own mode (manual token, no refresh)."""
-
-    async def test_returns_stored_token(self) -> None:
-        """Returns the manually configured music token as-is."""
-        provider = _make_provider()
-        provider.config = _make_mock_config(
-            {CONF_TOKEN: "manual-token", CONF_YM_INSTANCE: YM_INSTANCE_OWN}
-        )
-        provider._ym_instance_id = None
-
-        result = await provider._resolve_token()
-
-        assert result.get_secret() == "manual-token"
-
-    async def test_raises_when_no_token(self) -> None:
-        """Raises LoginFailed when CONF_TOKEN and CONF_X_TOKEN are both empty."""
-        provider = _make_provider()
-        provider.config = _make_mock_config(
-            {CONF_TOKEN: None, CONF_X_TOKEN: None, CONF_YM_INSTANCE: YM_INSTANCE_OWN}
-        )
-        provider._ym_instance_id = None
-
-        with pytest.raises(LoginFailed, match="No Yandex Music token"):
-            await provider._resolve_token()
-
-    async def test_falls_back_to_x_token_refresh_when_token_missing(self) -> None:
-        """Own mode with stored x_token but no music token refreshes in-memory."""
-        provider = _make_provider()
-        provider.config = _make_mock_config(
-            {CONF_TOKEN: None, CONF_X_TOKEN: "own-x-token", CONF_YM_INSTANCE: YM_INSTANCE_OWN}
-        )
-        provider._ym_instance_id = None
-
-        with patch(
-            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
-            new_callable=AsyncMock,
-            return_value=SecretStr("refreshed"),
-        ) as mock_refresh:
-            result = await provider._resolve_token()
-
-        assert result.get_secret() == "refreshed"
-        mock_refresh.assert_awaited_once()
-        await_args = mock_refresh.await_args
-        assert await_args is not None
-        sent: SecretStr = await_args.args[0]
-        assert sent.get_secret() == "own-x-token"
-
-
-class TestResolveTokenBorrowMode:
-    """_resolve_token in borrow mode (reads from linked yandex_music instance)."""
+class TestResolveLinkedToken:
+    """Resolve Ynison authentication from the selected Yandex Music provider."""
 
     async def test_uses_ym_token_when_available(self) -> None:
         """Returns the music token from the linked YM instance config."""
         provider = _make_provider()
-        provider._ym_instance_id = "ym-inst"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="ym-music-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
@@ -1485,13 +1469,11 @@ class TestResolveTokenBorrowMode:
     async def test_refreshes_in_memory_when_only_x_token(self) -> None:
         """Falls back to in-memory refresh via x_token; does not write config."""
         provider = _make_provider()
-        provider._ym_instance_id = "ym-inst"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token=None, x_token="ym-x-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
         with patch(
-            "ya_passport_auth.ma.borrow.refresh_music_token",
+            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
             new_callable=AsyncMock,
             return_value=SecretStr("fresh-token"),
         ) as mock_refresh:
@@ -1503,19 +1485,15 @@ class TestResolveTokenBorrowMode:
     async def test_raises_when_ym_has_no_credentials(self) -> None:
         """Raises LoginFailed when YM instance config has neither token nor x_token."""
         provider = _make_provider()
-        provider._ym_instance_id = "ym-inst"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token=None, x_token=None)
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
-        with pytest.raises(LoginFailed, match="no credentials"):
+        with pytest.raises(LoginFailed, match="no usable token"):
             await provider._resolve_token()
 
     async def test_raises_when_ym_instance_unavailable(self) -> None:
         """A missing YM instance is a startup-ordering condition — transient error."""
         provider = _make_provider()
-        provider._ym_instance_id = "ym-inst"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=None))
 
         with pytest.raises(ResourceTemporarilyUnavailable, match="not loaded"):
@@ -1524,8 +1502,10 @@ class TestResolveTokenBorrowMode:
     async def test_raises_when_linked_provider_is_not_yandex_music(self) -> None:
         """Stale/edited instance id pointing at a non-YM provider yields a clear error."""
         provider = _make_provider()
-        provider._ym_instance_id = "some-other-id"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "some-other-id")
+        provider._credential_source = YandexMusicCredentialSource(
+            provider.mass,
+            "some-other-id",
+        )
         wrong = _make_ym_provider_stub()
         wrong.domain = "spotify"  # not yandex_music
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=wrong))
@@ -1537,46 +1517,9 @@ class TestResolveTokenBorrowMode:
 class TestRefreshYnisonToken:
     """_refresh_ynison_token on YnisonClient auth-failure callback."""
 
-    async def test_own_mode_no_x_token_raises_login_failed(self) -> None:
-        """Own mode with neither token nor stored x_token — surface LoginFailed."""
-        provider = _make_provider()
-        provider._ym_instance_id = None
-        # Stub the config: no token, no x_token.
-        provider.config = MagicMock()
-        provider.config.get_value = MagicMock(return_value=None)
-
-        with pytest.raises(LoginFailed, match="Re-authenticate"):
-            await provider._refresh_ynison_token()
-
-    async def test_own_mode_with_stored_x_token_refreshes(self) -> None:
-        """Own mode with CONF_X_TOKEN set refreshes in-memory via passport."""
-        provider = _make_provider()
-        provider._ym_instance_id = None
-        provider.config = MagicMock()
-        provider.config.get_value = MagicMock(
-            side_effect=lambda key, default=None: "own-x-token" if key == CONF_X_TOKEN else default
-        )
-
-        with patch(
-            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
-            new_callable=AsyncMock,
-            return_value=SecretStr("fresh"),
-        ) as mock_refresh:
-            result = await provider._refresh_ynison_token()
-
-        assert result.get_secret() == "fresh"
-        mock_refresh.assert_awaited_once()
-        # The refresh argument is a SecretStr wrapping the stored x_token.
-        await_args = mock_refresh.await_args
-        assert await_args is not None
-        sent: SecretStr = await_args.args[0]
-        assert sent.get_secret() == "own-x-token"
-
-    async def test_borrow_mode_refreshes_from_ym_x_token(self) -> None:
+    async def test_refreshes_from_linked_ym_x_token(self) -> None:
         """Reads x_token from linked YM and refreshes in-memory only."""
         provider = _make_provider()
-        provider._ym_instance_id = "ym-inst"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="stale", x_token="ym-x-token")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
         # Ensure config writes are not invoked
@@ -1584,7 +1527,7 @@ class TestRefreshYnisonToken:
         _stub_attr(provider, "_update_config_value", mock_update_config)
 
         with patch(
-            "ya_passport_auth.ma.borrow.refresh_music_token",
+            "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
             new_callable=AsyncMock,
             return_value=SecretStr("fresh-token"),
         ) as mock_refresh:
@@ -1594,22 +1537,18 @@ class TestRefreshYnisonToken:
         mock_refresh.assert_awaited_once()
         mock_update_config.assert_not_called()
 
-    async def test_borrow_mode_raises_without_x_token(self) -> None:
+    async def test_raises_without_x_token(self) -> None:
         """Raises LoginFailed when YM has no x_token for refresh."""
         provider = _make_provider()
-        provider._ym_instance_id = "ym-inst"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         ym = _make_ym_provider_stub(token="only-token", x_token=None)
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=ym))
 
-        with pytest.raises(LoginFailed, match="no x_token"):
+        with pytest.raises(LoginFailed, match="Reconfigure Yandex Music authentication"):
             await provider._refresh_ynison_token()
 
-    async def test_borrow_mode_raises_when_ym_not_loaded(self) -> None:
+    async def test_raises_when_ym_not_loaded(self) -> None:
         """A missing YM instance is transient on reactive refresh too."""
         provider = _make_provider()
-        provider._ym_instance_id = "ym-inst"
-        provider._borrow_source = BorrowedCredentialSource(provider.mass, "ym-inst")
         _stub_attr(provider.mass, "get_provider", MagicMock(return_value=None))
 
         with pytest.raises(ResourceTemporarilyUnavailable, match="not loaded"):
@@ -1617,9 +1556,9 @@ class TestRefreshYnisonToken:
 
 
 class TestYandexProviderMatch:
-    """_check_yandex_provider_match obeys _ym_instance_id in borrow mode."""
+    """_check_yandex_provider_match obeys the linked Yandex Music instance id."""
 
-    async def test_borrow_mode_ignores_other_ym_instances(self) -> None:
+    async def test_ignores_other_ym_instances(self) -> None:
         """Does not link to a YM instance with a different instance_id."""
         provider = _make_provider()
         provider._ym_instance_id = "wanted"
@@ -1630,7 +1569,7 @@ class TestYandexProviderMatch:
 
         assert provider._yandex_provider is None
 
-    async def test_borrow_mode_matches_on_instance_id(self) -> None:
+    async def test_matches_on_instance_id(self) -> None:
         """Links to the specific YM instance requested by config."""
         provider = _make_provider()
         provider._ym_instance_id = "wanted"
@@ -1641,17 +1580,6 @@ class TestYandexProviderMatch:
         await provider._check_yandex_provider_match()
 
         assert provider._yandex_provider is wanted
-
-    async def test_own_mode_accepts_any_ym(self) -> None:
-        """In own mode, the first available yandex_music provider is used."""
-        provider = _make_provider()
-        provider._ym_instance_id = None
-        ym = _make_ym_provider_stub(instance_id="any")
-        _stub_attr(provider.mass, "get_providers", MagicMock(return_value=[ym]))
-
-        await provider._check_yandex_provider_match()
-
-        assert provider._yandex_provider is ym
 
 
 # ------------------------------------------------------------------
@@ -2398,13 +2326,8 @@ class TestAdvanceQueueIndex:
 
         type(mock_yn).connected = property(_get_connected)
 
-        with patch(
-            "music_assistant.providers.yandex_ynison.provider.asyncio.sleep",
-            new_callable=AsyncMock,
-        ) as sleep:
-            await provider._advance_queue_index(1)
+        await provider._advance_queue_index(1)
 
-        assert sleep.await_count == 2
         mock_yn.update_player_state.assert_awaited_once()
 
     async def test_timeout_no_send(self) -> None:
@@ -3254,18 +3177,18 @@ class TestMusicTokenCache:
     """Tests for the in-memory cache around `refresh_music_token`."""
 
     @staticmethod
-    def _own_provider_with_x_token(x_token: str = "xtok-1") -> YandexYnisonProvider:  # noqa: S107 — test fixture value
-        """Construct an own-mode provider whose x_token drives refresh."""
+    def _linked_provider_with_x_token(
+        x_token: str = "xtok-1",  # noqa: S107 — test fixture value
+    ) -> tuple[YandexYnisonProvider, MagicMock]:
+        """Construct a linked provider whose owner's x-token drives refresh."""
         provider = _make_provider()
-        provider._ym_instance_id = None
-        provider.config = _make_mock_config(
-            {CONF_TOKEN: None, CONF_X_TOKEN: x_token, CONF_YM_INSTANCE: YM_INSTANCE_OWN}
-        )
-        return provider
+        owner = _make_ym_provider_stub(token=None, x_token=x_token)
+        _stub_attr(provider.mass, "get_provider", MagicMock(return_value=owner))
+        return provider, owner
 
     async def test_resolve_token_caches_x_token_refresh(self) -> None:
         """Second `_resolve_token` call within TTL is a cache hit."""
-        provider = self._own_provider_with_x_token("xtok-1")
+        provider, _owner = self._linked_provider_with_x_token("xtok-1")
 
         with patch(
             "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
@@ -3281,7 +3204,7 @@ class TestMusicTokenCache:
 
     async def test_resolve_token_refreshes_after_ttl_expires(self) -> None:
         """Time advancing past the TTL forces a fresh refresh."""
-        provider = self._own_provider_with_x_token("xtok-1")
+        provider, _owner = self._linked_provider_with_x_token("xtok-1")
 
         clock = {"now": 1000.0}
         provider._now = lambda: clock["now"]
@@ -3299,7 +3222,7 @@ class TestMusicTokenCache:
 
     async def test_refresh_ynison_token_invalidates_cache(self) -> None:
         """A 401-driven refresh must bypass + drop the cached entry."""
-        provider = self._own_provider_with_x_token("xtok-1")
+        provider, _owner = self._linked_provider_with_x_token("xtok-1")
 
         with patch(
             "music_assistant.providers.yandex_ynison.provider.refresh_music_token",
@@ -3329,7 +3252,7 @@ class TestMusicTokenCache:
 
     async def test_concurrent_resolve_token_calls_refresh_once(self) -> None:
         """Two concurrent `_resolve_token` calls coalesce into one refresh."""
-        provider = self._own_provider_with_x_token("xtok-1")
+        provider, _owner = self._linked_provider_with_x_token("xtok-1")
 
         refresh_started = asyncio.Event()
         refresh_release = asyncio.Event()
@@ -3355,7 +3278,7 @@ class TestMusicTokenCache:
 
     async def test_cache_lru_evicts_oldest_after_four_x_tokens(self) -> None:
         """When a 5th distinct x_token arrives, the oldest entry is evicted."""
-        provider = self._own_provider_with_x_token("xtok-1")
+        provider, owner = self._linked_provider_with_x_token("xtok-1")
 
         async def fake_refresh(x_token: SecretStr) -> SecretStr:
             return SecretStr(f"music-for-{x_token.get_secret()}")
@@ -3365,13 +3288,10 @@ class TestMusicTokenCache:
             side_effect=fake_refresh,
         ):
             for i in range(1, 6):
-                provider.config = _make_mock_config(
-                    {
-                        CONF_TOKEN: None,
-                        CONF_X_TOKEN: f"xtok-{i}",
-                        CONF_YM_INSTANCE: YM_INSTANCE_OWN,
-                    }
-                )
+                owner.get_setup_value.side_effect = {
+                    "token": None,
+                    "x_token": f"xtok-{i}",
+                }.get
                 await provider._resolve_token()
 
         import hashlib  # noqa: PLC0415 — test-local
@@ -3387,7 +3307,7 @@ class TestMusicTokenCache:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """No log record may contain the x_token, the music token, or its hash."""
-        provider = self._own_provider_with_x_token("xtok-secret")
+        provider, _owner = self._linked_provider_with_x_token("xtok-secret")
 
         with (
             caplog.at_level("DEBUG"),

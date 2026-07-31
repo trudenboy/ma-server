@@ -1,181 +1,272 @@
-"""Tests for the Yandex Ynison interactive setup flow (run_setup)."""
+"""Tests for the linked-only Ynison setup flow."""
 
 from __future__ import annotations
 
-import asyncio
-import time
+from types import SimpleNamespace
 from typing import Any
-from unittest import mock
+from unittest.mock import MagicMock
 
-from music_assistant_models.enums import FlowStepType
-from ya_passport_auth import Credentials, QrSession, SecretStr
+import pytest
 
-from music_assistant.models.setup_flow import SetupFlowContext, SetupSession
-from music_assistant.providers.yandex_ynison import setup_flow as yn_flow
+from music_assistant.models.setup_flow import AbortFlow, SetupFlowError
 from music_assistant.providers.yandex_ynison.constants import (
-    CONF_ACCOUNT_LOGIN,
     CONF_MASS_PLAYER_ID,
     CONF_PUBLISH_NAME,
-    CONF_REMEMBER_SESSION,
-    CONF_TOKEN,
-    CONF_X_TOKEN,
     CONF_YM_INSTANCE,
-    YM_INSTANCE_OWN,
+    DEFAULT_DISPLAY_NAME,
+    PLAYER_ID_AUTO,
 )
+from music_assistant.providers.yandex_ynison.setup_flow import run_setup
 
 
-class _FakeClient:
-    """Canned PassportClient that confirms a QR login."""
+class _SetupSession:
+    """Small setup-session fake retaining the form and persisted result."""
 
-    def __init__(self, creds: Credentials) -> None:
-        self._creds = creds
-        self.qr_starts = 0
+    def __init__(
+        self,
+        providers: dict[str, dict[str, Any]],
+        submitted: dict[str, Any],
+        *,
+        values: dict[str, Any] | None = None,
+        setup_data: dict[str, Any] | None = None,
+    ) -> None:
+        self.mass = MagicMock()
+        self.mass.config.get.return_value = providers
+        self.mass.players.all_players.return_value = []
+        self.context = SimpleNamespace(
+            values=values or {},
+            setup_data=setup_data or {},
+        )
+        self._submitted = submitted
+        self.entries: list[Any] = []
+        self.form_kwargs: dict[str, Any] = {}
+        self.shown_errors: list[dict[str, str] | None] = []
+        self.finished: dict[str, Any] | None = None
 
-    async def start_qr_login(self) -> QrSession:
-        self.qr_starts += 1
-        return QrSession(track_id="t", csrf_token="c", qr_url="https://passport.yandex.ru/qr/abc")
+    async def form(self, entries: list[Any], **kwargs: Any) -> dict[str, Any]:
+        """Capture the presented form and return the configured submission."""
+        self.entries = entries
+        self.form_kwargs = kwargs
+        self.shown_errors.append(kwargs.get("errors"))
+        return self._submitted
 
-    async def poll_qr_until_confirmed(self, _qr: QrSession, **_kwargs: Any) -> Credentials:
-        return self._creds
-
-
-def _async_cm(client: _FakeClient) -> mock.MagicMock:
-    """Wrap a fake client as the async context manager PassportClient.create returns."""
-    ctx = mock.MagicMock()
-    ctx.__aenter__ = mock.AsyncMock(return_value=client)
-    ctx.__aexit__ = mock.AsyncMock(return_value=False)
-    return ctx
+    async def finish(self, values: dict[str, Any]) -> dict[str, str]:
+        """Capture setup data as Music Assistant would persist it."""
+        self.finished = values
+        return {"instance_id": "ynison-test"}
 
 
-def _make_session(
-    finish_handler: Any, providers: dict[str, Any] | None = None
-) -> tuple[SetupSession, mock.Mock]:
-    """Build a real SetupSession backed by a Mock mass listing the given YM providers."""
-    mass = mock.Mock()
-    mass.config.get = mock.Mock(return_value=providers or {})
-    player = mock.Mock()
+def _entry(session: _SetupSession, key: str) -> Any:
+    return next(entry for entry in session.entries if entry.key == key)
+
+
+async def test_single_yandex_music_instance_is_preselected_and_persisted() -> None:
+    """Removing the single-account default must not make simple setup ambiguous."""
+    session = _SetupSession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {
+            CONF_YM_INSTANCE: "ym-main",
+            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+        },
+    )
+
+    await run_setup(session)
+
+    source = _entry(session, CONF_YM_INSTANCE)
+    assert source.default_value == "ym-main"
+    assert source.value == "ym-main"
+    assert [option.value for option in source.options] == ["ym-main"]
+    assert session.form_kwargs["last_step"] is True
+    assert session.finished == {
+        CONF_YM_INSTANCE: "ym-main",
+        CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+        CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+    }
+
+
+async def test_multiple_accounts_without_valid_prefill_require_explicit_selection() -> None:
+    """Defaulting to the first account must not silently switch a user's identity."""
+    session = _SetupSession(
+        {
+            "ym-a": {"domain": "yandex_music", "name": "A"},
+            "ym-b": {"domain": "yandex_music", "name": "B"},
+        },
+        {
+            CONF_YM_INSTANCE: "ym-b",
+            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+        },
+        setup_data={CONF_YM_INSTANCE: "__own__"},
+    )
+
+    await run_setup(session)
+
+    source = _entry(session, CONF_YM_INSTANCE)
+    assert source.default_value is None
+    assert source.value is None
+    assert [option.value for option in source.options] == ["ym-a", "ym-b"]
+    assert session.finished is not None
+    assert session.finished[CONF_YM_INSTANCE] == "ym-b"
+
+
+async def test_reconfigure_preserves_valid_identity_and_nulls_legacy_secrets() -> None:
+    """Leaving legacy values intact must not preserve a second credential owner."""
+    setup_data = {
+        CONF_YM_INSTANCE: "ym-main",
+        CONF_MASS_PLAYER_ID: "living-room",
+        CONF_PUBLISH_NAME: "Living room",
+        "token": "old-music-token",
+        "x_token": "old-x-token",
+        "account_login": "alice",
+        "remember_session": True,
+    }
+    session = _SetupSession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {
+            CONF_YM_INSTANCE: "ym-main",
+            CONF_MASS_PLAYER_ID: "living-room",
+            CONF_PUBLISH_NAME: "Living room",
+        },
+        setup_data=setup_data,
+    )
+    player = MagicMock()
+    player.player_id = "living-room"
+    player.display_name = "Living room"
+    session.mass.players.all_players.return_value = [player]
+
+    await run_setup(session)
+
+    assert _entry(session, CONF_YM_INSTANCE).value == "ym-main"
+    assert _entry(session, CONF_MASS_PLAYER_ID).value == "living-room"
+    assert _entry(session, CONF_PUBLISH_NAME).value == "Living room"
+    assert session.finished is not None
+    for key in ("token", "x_token", "account_login", "remember_session"):
+        assert session.finished[key] is None
+
+
+async def test_new_setup_does_not_persist_legacy_auth_keys() -> None:
+    """Always writing legacy nulls must not pollute setup data for new instances."""
+    session = _SetupSession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {
+            CONF_YM_INSTANCE: "ym-main",
+            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+        },
+    )
+
+    await run_setup(session)
+
+    assert session.finished is not None
+    assert not {"token", "x_token", "account_login", "remember_session"} & session.finished.keys()
+
+
+async def test_no_yandex_music_instance_aborts_as_missing_dependency() -> None:
+    """Rendering an empty account picker must not create an unusable Ynison instance."""
+    session = _SetupSession(
+        {},
+        {
+            CONF_YM_INSTANCE: "unused",
+            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+        },
+    )
+
+    with pytest.raises(AbortFlow) as err:
+        await run_setup(session)
+
+    assert err.value.reason == "missing_dependency"
+
+
+async def test_disabled_yandex_music_instances_are_not_linkable() -> None:
+    """A disabled credential owner cannot satisfy the runtime dependency."""
+    session = _SetupSession(
+        {
+            "ym-disabled": {
+                "domain": "yandex_music",
+                "name": "Disabled",
+                "enabled": False,
+            },
+            "ym-enabled": {
+                "domain": "yandex_music",
+                "name": "Enabled",
+                "enabled": True,
+            },
+        },
+        {
+            CONF_YM_INSTANCE: "ym-enabled",
+            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+            CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
+        },
+    )
+
+    await run_setup(session)
+
+    source = _entry(session, CONF_YM_INSTANCE)
+    assert [option.value for option in source.options] == ["ym-enabled"]
+    assert source.value == "ym-enabled"
+
+
+async def test_only_disabled_yandex_music_instances_abort_setup() -> None:
+    """Setup must stop when every possible credential owner is disabled."""
+    session = _SetupSession(
+        {"ym-disabled": {"domain": "yandex_music", "enabled": False}},
+        {},
+    )
+
+    with pytest.raises(AbortFlow) as err:
+        await run_setup(session)
+
+    assert err.value.reason == "missing_dependency"
+
+
+async def test_finish_error_reopens_form_with_preserved_values() -> None:
+    """Letting a load failure escape must not discard the user's linked-account choice."""
+
+    class RetrySession(_SetupSession):
+        attempts = 0
+
+        async def finish(self, values: dict[str, Any]) -> dict[str, str]:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise SetupFlowError("provider rejected setup", translation_key="invalid_auth")
+            return await super().finish(values)
+
+    session = RetrySession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {
+            CONF_YM_INSTANCE: "ym-main",
+            CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
+            CONF_PUBLISH_NAME: "Kitchen",
+        },
+    )
+
+    await run_setup(session)
+
+    assert session.attempts == 2
+    assert session.shown_errors == [None, {"base": "invalid_auth"}]
+    assert session.finished is not None
+    assert session.finished[CONF_PUBLISH_NAME] == "Kitchen"
+
+
+async def test_legacy_player_and_display_name_are_preserved() -> None:
+    """Removing the old aliases must not reset non-auth identity during reconfigure."""
+    session = _SetupSession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {
+            CONF_YM_INSTANCE: "ym-main",
+            CONF_MASS_PLAYER_ID: "kitchen",
+            CONF_PUBLISH_NAME: "Old kitchen",
+        },
+        values={"player": "kitchen", "display_name": "Old kitchen"},
+    )
+    player = MagicMock()
     player.player_id = "kitchen"
     player.display_name = "Kitchen"
-    mass.players.all_players.return_value = [player]
-    context = SetupFlowContext(kind="setup", reason="user", domain="yandex_ynison")
-    return SetupSession(mass, "flow-test", context, finish_handler), mass
+    session.mass.players.all_players.return_value = [player]
 
+    await run_setup(session)
 
-def _published_steps(mass: mock.Mock) -> list[Any]:
-    """Return the flow steps pushed through mass.signal_event, in order."""
-    return [call.kwargs["data"] for call in mass.signal_event.call_args_list]
-
-
-async def _wait_for(predicate: Any, timeout: float = 5.0) -> Any:
-    """Wait until the predicate returns truthy (or fail the test)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if result := predicate():
-            return result
-        await asyncio.sleep(0.01)
-    raise AssertionError("condition not met within timeout")
-
-
-async def _await_user_form(session: SetupSession) -> None:
-    """Wait until the user form is presented."""
-    await _wait_for(lambda: session.current_step and session.current_step.type == FlowStepType.FORM)
-
-
-async def test_borrow_mode_finishes_with_instance_only() -> None:
-    """Selecting a linked Yandex Music instance persists only that instance id."""
-    collected: dict[str, Any] = {}
-
-    async def finish(_s: SetupSession, values: dict[str, Any]) -> dict[str, str]:
-        collected.update(values)
-        return {"instance_id": "yandex_ynison--1"}
-
-    session, _mass = _make_session(
-        finish, providers={"ym-a": {"domain": "yandex_music", "name": "Main"}}
-    )
-    task = asyncio.create_task(yn_flow.run_setup(session))
-    await _await_user_form(session)
-    session.handle_submit(
-        {
-            CONF_YM_INSTANCE: "ym-a",
-            CONF_REMEMBER_SESSION: True,
-            CONF_MASS_PLAYER_ID: "kitchen",
-            CONF_PUBLISH_NAME: "Kitchen Yandex",
-        }
-    )
-    await _wait_for(lambda: session.finished)
-    await task
-
-    assert collected == {
-        CONF_YM_INSTANCE: "ym-a",
-        CONF_MASS_PLAYER_ID: "kitchen",
-        CONF_PUBLISH_NAME: "Kitchen Yandex",
-    }
-
-
-async def test_own_mode_qr_persists_tokens_and_login() -> None:
-    """Own-mode QR login persists music token, x_token (remember on) and display login."""
-    creds = Credentials(x_token=SecretStr("XT"), music_token=SecretStr("MT"), display_login="alice")
-    collected: dict[str, Any] = {}
-
-    async def finish(_s: SetupSession, values: dict[str, Any]) -> dict[str, str]:
-        collected.update(values)
-        return {"instance_id": "yandex_ynison--1"}
-
-    session, mass = _make_session(finish)
-    client = _FakeClient(creds)
-    with mock.patch.object(yn_flow, "PassportClient") as pc:
-        pc.create.return_value = _async_cm(client)
-        task = asyncio.create_task(yn_flow.run_setup(session))
-        await _await_user_form(session)
-        session.handle_submit(
-            {
-                CONF_YM_INSTANCE: YM_INSTANCE_OWN,
-                CONF_REMEMBER_SESSION: True,
-                CONF_MASS_PLAYER_ID: "kitchen",
-                CONF_PUBLISH_NAME: "Kitchen Yandex",
-            }
-        )
-        await _wait_for(lambda: session.finished)
-        await task
-
-    assert collected == {
-        CONF_YM_INSTANCE: YM_INSTANCE_OWN,
-        CONF_TOKEN: "MT",
-        CONF_X_TOKEN: "XT",
-        CONF_ACCOUNT_LOGIN: "alice",
-        CONF_MASS_PLAYER_ID: "kitchen",
-        CONF_PUBLISH_NAME: "Kitchen Yandex",
-    }
-    scan_steps = [s for s in _published_steps(mass) if s.step_id == "scan_qr"]
-    assert scan_steps
-    assert all(s.image and s.image.startswith("data:image/svg+xml") for s in scan_steps)
-
-
-async def test_own_mode_without_remember_clears_x_token() -> None:
-    """Own-mode QR login with remember off stores the music token but no x_token."""
-    creds = Credentials(x_token=SecretStr("XT"), music_token=SecretStr("MT"), display_login="bob")
-    collected: dict[str, Any] = {}
-
-    async def finish(_s: SetupSession, values: dict[str, Any]) -> dict[str, str]:
-        collected.update(values)
-        return {"instance_id": "yandex_ynison--1"}
-
-    session, _mass = _make_session(finish)
-    client = _FakeClient(creds)
-    with mock.patch.object(yn_flow, "PassportClient") as pc:
-        pc.create.return_value = _async_cm(client)
-        task = asyncio.create_task(yn_flow.run_setup(session))
-        await _await_user_form(session)
-        session.handle_submit(
-            {
-                CONF_YM_INSTANCE: YM_INSTANCE_OWN,
-                CONF_REMEMBER_SESSION: False,
-                CONF_MASS_PLAYER_ID: "kitchen",
-                CONF_PUBLISH_NAME: "Kitchen Yandex",
-            }
-        )
-        await _wait_for(lambda: session.finished)
-        await task
-
-    assert collected[CONF_TOKEN] == "MT"
-    assert collected[CONF_X_TOKEN] is None
+    assert _entry(session, CONF_MASS_PLAYER_ID).value == "kitchen"
+    assert _entry(session, CONF_PUBLISH_NAME).value == "Old kitchen"
