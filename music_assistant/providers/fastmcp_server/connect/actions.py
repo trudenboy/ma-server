@@ -1,11 +1,4 @@
-"""
-ACTION-handler: mints a bootstrap token and returns the wizard URL.
-
-Triggered by the ``open_connect`` ``ConfigEntryType.ACTION`` button defined in
-:mod:`provider.config`. The returned URL is delivered to the frontend as a
-``ConfigEntryType.URL`` entry in the ``invoke_action`` response, which opens
-it one-shot in a new tab (request-scoped, so no session correlation needed).
-"""
+"""ACTION-handler: mints a bootstrap token and returns the wizard URL."""
 
 from __future__ import annotations
 

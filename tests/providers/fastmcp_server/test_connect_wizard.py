@@ -1123,7 +1123,6 @@ async def test_dispatch_detects_ws_client_base_url(
         )
     ]
     mass.webserver.auth.create_token = AsyncMock(return_value="jwt-xyz")
-
     url = await _dispatch_open_connect(
         mass,
         {"mount_path": "/mcp/v1"},
@@ -1144,7 +1143,6 @@ async def test_dispatch_falls_back_to_config_override(
     mass = MagicMock()
     mass.webserver.clients = []
     mass.webserver.auth.create_token = AsyncMock(return_value="jwt-xyz")
-
     url = await _dispatch_open_connect(
         mass,
         {
@@ -1172,7 +1170,6 @@ async def test_dispatch_rejects_unsafe_override_and_falls_back(
     mass = MagicMock()
     mass.webserver.clients = []
     mass.webserver.auth.create_token = AsyncMock(return_value="jwt-xyz")
-
     url = await _dispatch_open_connect(
         mass,
         {
@@ -1196,7 +1193,6 @@ async def test_dispatch_falls_back_to_path_only_when_nothing_known(
     mass = MagicMock()
     mass.webserver.clients = []
     mass.webserver.auth.create_token = AsyncMock(return_value="jwt-xyz")
-
     url = await _dispatch_open_connect(
         mass,
         {"mount_path": "/mcp/v1"},

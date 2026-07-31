@@ -9,12 +9,13 @@ CONF_EXTRA_ALLOWED_ORIGINS = "extra_allowed_origins"
 CONF_ENFORCE_AUDIENCE = "enforce_audience"
 CONF_REQUIRE_CONFIRMATION = "require_confirmation"
 CONF_CONNECT_EXTERNAL_URL = "connect_external_url"
-# Read at sub-server build time (affects tool registration), so it is
-# deliberately NOT in PERMISSION_KEYS/RESOURCE_KEYS below — toggling it falls
-# through to a full runtime restart rather than a tag-filter hot-swap.
-CONF_LEAN_ADMIN_SCHEMA = "lean_admin_schema"
 CONF_TRUST_FORWARDED_PROTO = "trust_forwarded_proto"
-CONF_META_TOOL_DISCOVERY = "meta_tool_discovery"
+
+# ── Dynamic MA command catalog ────────────────────────────────────────────────
+CONF_DYNAMIC_API_READ = "dynamic_api_read"
+CONF_DYNAMIC_API_CONTROL = "dynamic_api_control"
+CONF_DYNAMIC_API_WRITE = "dynamic_api_write"
+CONF_DYNAMIC_API_SYSTEM = "dynamic_api_system"
 
 DEFAULT_MOUNT_PATH = "/mcp/v1"
 
@@ -52,7 +53,6 @@ CONF_DEBUG_INSPECT = "debug_inspect"
 CONF_DEBUG_LOGS = "debug_logs"
 CONF_DEBUG_EVENTS = "debug_events"
 CONF_DEBUG_PROVIDERS = "debug_providers"
-CONF_DEBUG_RELOAD = "debug_reload"
 CONF_DEBUG_EVENT_BUFFER_CAPACITY = "debug_event_buffer_capacity"
 
 # ── Config namespace permission flags (all off-by-default) ────────────────────
@@ -84,12 +84,20 @@ PERMISSION_KEYS: frozenset[str] = frozenset(
         CONF_DEBUG_LOGS,
         CONF_DEBUG_EVENTS,
         CONF_DEBUG_PROVIDERS,
-        CONF_DEBUG_RELOAD,
         CONF_CONFIG_READ,
         CONF_CONFIG_WRITE_PROVIDER,
         CONF_CONFIG_WRITE_CORE,
         CONF_CONFIG_WRITE_PLAYER,
         CONF_CONFIG_WRITE_SECRET,
+    }
+)
+
+DYNAMIC_API_KEYS: frozenset[str] = frozenset(
+    {
+        CONF_DYNAMIC_API_READ,
+        CONF_DYNAMIC_API_CONTROL,
+        CONF_DYNAMIC_API_WRITE,
+        CONF_DYNAMIC_API_SYSTEM,
     }
 )
 
@@ -101,7 +109,6 @@ RESOURCE_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Permission-only changes can be hot-swapped without remount; everything else triggers
-# a full restart of the runtime. The meta-discovery toggle qualifies because the
-# transform reads it through a closure on every request.
-HOT_SWAPPABLE_KEYS: frozenset[str] = PERMISSION_KEYS | RESOURCE_KEYS | {CONF_META_TOOL_DISCOVERY}
+# Permission-only changes can be hot-swapped without remount; everything else
+# triggers a full restart of the runtime.
+HOT_SWAPPABLE_KEYS: frozenset[str] = PERMISSION_KEYS | RESOURCE_KEYS | DYNAMIC_API_KEYS

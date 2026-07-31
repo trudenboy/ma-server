@@ -43,30 +43,6 @@ async def test_resource_toggle_triggers_full_restart(
 
 
 @pytest.mark.asyncio
-async def test_lean_admin_schema_toggle_triggers_full_restart(
-    mock_mass: MagicMock, mock_config: MagicMock
-) -> None:
-    """
-    Toggling ``lean_admin_schema`` must restart — it is read at build time.
-
-    The flag decides whether config/debug tools are registered with output
-    schemas, which happens once during :meth:`start`. If a future change
-    mis-files it under ``PERMISSION_KEYS`` it would route to the hot-swap path
-    and the toggle would silently have no effect until the next restart.
-    """
-    from music_assistant.providers.fastmcp_server.server import MCPServerRuntime  # noqa: PLC0415
-
-    runtime = MCPServerRuntime(mock_mass, mock_config, logging.getLogger("t"))
-    runtime.stop = AsyncMock()
-    runtime.start = AsyncMock()
-
-    await runtime.apply_permission_change(mock_config, changed_keys={"lean_admin_schema"})
-
-    runtime.stop.assert_awaited_once()
-    runtime.start.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_empty_changed_keys_does_not_restart(
     mock_mass: MagicMock, mock_config: MagicMock
 ) -> None:
@@ -131,15 +107,13 @@ async def test_permission_only_change_hot_swaps(
 
 
 @pytest.mark.asyncio
-async def test_meta_discovery_toggle_hot_swaps(
+async def test_dynamic_api_risk_gate_hot_swaps(
     mock_mass: MagicMock, mock_config: MagicMock
 ) -> None:
     """
-    Toggling meta_tool_discovery must NOT restart the runtime.
+    Toggling a dynamic API risk gate must not restart the runtime.
 
-    The transform reads the flag through a closure over ``_config``, so
-    assigning the new config is the whole hot-swap; a restart would drop
-    live client sessions for a listing-only change.
+    The adapter reads flags through a closure over ``_config`` on each request.
     """
     from music_assistant.providers.fastmcp_server.server import MCPServerRuntime  # noqa: PLC0415
 
@@ -148,7 +122,7 @@ async def test_meta_discovery_toggle_hot_swaps(
     runtime.stop = AsyncMock()
     runtime.start = AsyncMock()
 
-    await runtime.apply_permission_change(mock_config, changed_keys={"meta_tool_discovery"})
+    await runtime.apply_permission_change(mock_config, changed_keys={"dynamic_api_control"})
 
     runtime.stop.assert_not_awaited()
     runtime.start.assert_not_awaited()
@@ -196,6 +170,23 @@ async def test_start_rollback_swallows_stop_failure(
     runtime = MCPServerRuntime(mock_mass, mock_config, logging.getLogger("t"))
     runtime._start_impl = AsyncMock(side_effect=RuntimeError("primary failure"))
     runtime.stop = AsyncMock(side_effect=RuntimeError("rollback also failed"))
+
+    with pytest.raises(RuntimeError, match="primary failure"):
+        await runtime.start()
+
+    runtime.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_rollback_preserves_primary_error_when_stop_raises_base_exception(
+    mock_mass: MagicMock, mock_config: MagicMock
+) -> None:
+    """Interrupting teardown cannot replace the original mount failure."""
+    from music_assistant.providers.fastmcp_server.server import MCPServerRuntime  # noqa: PLC0415
+
+    runtime = MCPServerRuntime(mock_mass, mock_config, logging.getLogger("t"))
+    runtime._start_impl = AsyncMock(side_effect=RuntimeError("primary failure"))
+    runtime.stop = AsyncMock(side_effect=KeyboardInterrupt("rollback interrupted"))
 
     with pytest.raises(RuntimeError, match="primary failure"):
         await runtime.start()

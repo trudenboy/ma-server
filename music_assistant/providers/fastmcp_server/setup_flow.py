@@ -26,11 +26,7 @@ if TYPE_CHECKING:
 
 
 async def run_setup(session: SetupSession) -> None:
-    """
-    Open the Connect Wizard and finish after it generates a client configuration.
-
-    :param session: The setup session driving the flow.
-    """
+    """Open the Connect Wizard and finish after it generates a client configuration."""
     values = _effective_values(session)
     mount_path = str(values.get(CONF_MOUNT_PATH) or DEFAULT_MOUNT_PATH)
     unmount: Callable[[], None] | None = None
