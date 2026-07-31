@@ -1709,12 +1709,21 @@ class StreamsAudio:
         )
 
     async def get_queue_flow_stream(
-        self, queue: PlayerQueue, start_queue_item: QueueItem, pcm_format: AudioFormat
+        self,
+        queue: PlayerQueue,
+        start_queue_item: QueueItem,
+        pcm_format: AudioFormat,
+        protocol_player: Player | None = None,
     ) -> AsyncGenerator[bytes]:
         """
         Get a flow stream of all tracks in the queue as raw PCM audio.
 
         yields chunks of exactly 1 second of audio in the given pcm_format.
+
+        :param protocol_player: The protocol player actually consuming the flow stream.
+            Must be the same player that was used to select ``pcm_format`` so
+            restart decisions are made against the correct supported sample rates
+            and flow mode configuration. Falls back to the queue's player when omitted.
         """
         # ruff: noqa: PLR0915
         assert pcm_format.content_type.is_pcm()

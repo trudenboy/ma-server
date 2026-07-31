@@ -957,7 +957,10 @@ class StreamsController(CoreController):
                 )
                 assert start_queue_item
                 flow_stream = self.audio.get_queue_flow_stream(
-                    queue=queue, start_queue_item=start_queue_item, pcm_format=pcm_format
+                    queue=queue,
+                    start_queue_item=start_queue_item,
+                    pcm_format=pcm_format,
+                    protocol_player=protocol_player,
                 )
                 if use_flow_stream_buffering:
                     return buffered(flow_stream, buffer_size=30, min_buffer_before_yield=1)

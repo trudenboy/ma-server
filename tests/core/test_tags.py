@@ -7,6 +7,9 @@ from unittest.mock import MagicMock
 import mutagen
 import pytest
 
+# mutagen 1.47 does not re-export UFID explicitly (fixed in 1.48, which dev pins)
+from mutagen.id3 import ID3, UFID  # type: ignore[attr-defined]
+
 from music_assistant.constants import UNKNOWN_ARTIST
 from music_assistant.helpers import tags
 from music_assistant.helpers.tags import split_artists
