@@ -31,7 +31,26 @@ class AirPlayRemoteCommand(StrEnum):
     PREVIOUS = "previous"
 
 
-CONF_VOLUME_START: Final[str] = "volume_start"
+class ClockReadiness(StrEnum):
+    """
+    How a receiver's clock readiness resolved for an anchor decision.
+
+    Only PROJECTED carries an instant; the rest all mean "anchor on the lead
+    alone", but for very different reasons - one is a device that will not play
+    at all, and treating them alike hides it.
+    """
+
+    # The binary projected when the receiver's clock becomes usable.
+    PROJECTED = "projected"
+    # NTP timing: there is no receiver clock to wait for.
+    NOT_APPLICABLE = "not_applicable"
+    # The receiver never answered our PTP clock and will render silence.
+    STALLED = "stalled"
+    # Nothing arrived within the wait: a slow device (retryable) or a binary
+    # too old to report readiness at all.
+    UNREPORTED = "unreported"
+
+
 CONF_PASSWORD: Final[str] = "password"
 # Storage-only marker (no config entry) set when the device rejected the stored
 # password, so the player keeps asking for setup across restarts until a working
@@ -86,6 +105,11 @@ AIRPLAY_CLOCK_READY_TIMEOUT_MS: Final[int] = 2500
 # for the command reaching the binary and for the convergence error of a
 # projection made from the receiver's very first probe.
 AIRPLAY_CLOCK_READY_LEAD_MS: Final[int] = 500
+# How long a plain (non-join) START waits for the binary's [STATUS] started ack.
+# Nothing holds that ack back, so the window only has to cover the command's trip
+# down the pipe and the answer coming back - unlike a join's ack below, which is
+# withheld until the receiver clock verification resolves.
+AIRPLAY_START_ACK_TIMEOUT_MS: Final[int] = 2000
 # How long a join START waits for the binary's [STATUS] started ack. That ack is
 # held back until the clock verification above resolves, so the window must
 # cover the verification arm window plus a poll round on top of the commanded
@@ -191,8 +215,6 @@ CONF_PAIRING_PASSWORD: Final[str] = "pairing_password"
 CONF_COMPANION_PAIRING_PIN: Final[str] = "companion_pairing_pin"
 CONF_MRP_PAIRING_PIN: Final[str] = "mrp_pairing_pin"
 CONF_PAIR_NOW: Final[str] = "pair_now"
-BACKOFF_TIME_LOWER_LIMIT: Final[int] = 15  # seconds
-BACKOFF_TIME_UPPER_LIMIT: Final[int] = 300  # Five minutes
 
 FALLBACK_VOLUME: Final[int] = 20
 AIRPLAY_VOLUME_MUTE: Final[float] = -144.0
