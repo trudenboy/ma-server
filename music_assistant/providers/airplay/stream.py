@@ -30,12 +30,14 @@ from music_assistant.providers.airplay.constants import (
     AIRPLAY_CONTENT_CUT_TOLERANCE_MS,
     AIRPLAY_JOIN_START_ACK_TIMEOUT_MS,
     AIRPLAY_PCM_FORMAT,
+    AIRPLAY_START_ACK_TIMEOUT_MS,
     CLI_PROBLEM_MARKERS,
     CONF_AIRPLAY_CREDENTIALS,
     CONF_ENCRYPTION,
     CONF_PASSWORD,
     CONF_RAOP_CREDENTIALS,
     AirPlayRemoteCommand,
+    ClockReadiness,
     StreamingProtocol,
 )
 from music_assistant.providers.airplay.helpers import (
@@ -96,7 +98,6 @@ class AirPlayStream:
         self.mass = player.provider.mass
         self.player = player
         self.pcm_format = pcm_format or AIRPLAY_PCM_FORMAT
-        self.logger = player.provider.logger.getChild("stream")
         mac_address = self.player.device_info.mac_address or self.player.player_id
         self.active_remote_id: str = generate_active_remote_id(mac_address)
         self._stream_id = uuid4().hex
@@ -148,9 +149,11 @@ class AirPlayStream:
         # Set once the binary settled the receiver's clock readiness ([STATUS]
         # clock_ready): either it projected when the clock becomes usable, or it
         # reported that there is nothing to wait for. The projected instant
-        # (unix ms) stays 0 in the latter case.
+        # (unix ms) stays 0 in the latter case, and the readiness below says
+        # which of the reasons it was.
         self._clock_ready = asyncio.Event()
         self._clock_ready_at_unix_ms: int = 0
+        self._clock_readiness: ClockReadiness = ClockReadiness.UNREPORTED
         self._metadata_text_checksum = ""
         # Artwork identity (the source image url) whose rendered bytes were
         # last delivered to the binary. Settles on the first successful
@@ -410,7 +413,7 @@ class AirPlayStream:
             return False
         return True
 
-    async def wait_clock_ready(self, timeout: float = 2.5) -> int | None:
+    async def wait_clock_ready(self, timeout: float = 2.5) -> tuple[ClockReadiness, int]:
         """
         Wait for the binary to project when the receiver's clock becomes usable.
 
@@ -419,16 +422,19 @@ class AirPlayStream:
         from the receiver's first probe rather than from its full servo lock.
 
         :param timeout: Seconds to wait for the projection.
-        :return: The projected instant (unix ms) at which the receiver's clock
-            is usable — possibly already in the past when it is locked — or None
-            when there is nothing to wait for (NTP timing, a receiver that never
-            probed within the timeout, or a binary that does not report it).
+        :return: How the readiness resolved, and the projected instant (unix ms)
+            at which the receiver's clock is usable — possibly already in the
+            past when it is locked. Only :attr:`ClockReadiness.PROJECTED` carries
+            an instant; every other outcome pairs with 0 and leaves the caller
+            anchoring on its lead alone, but for reasons that differ enough to
+            act on: a stalled receiver will render silence, NTP timing has no
+            clock to wait for, and an unreported one is worth retrying.
         """
         try:
             await asyncio.wait_for(self._clock_ready.wait(), timeout)
         except TimeoutError:
-            return None
-        return self._clock_ready_at_unix_ms or None
+            return (ClockReadiness.UNREPORTED, 0)
+        return (self._clock_readiness, self._clock_ready_at_unix_ms)
 
     async def start(
         self, start_unix_ms: int = 0, position_ms: int = 0, *, join: bool = False
@@ -510,7 +516,9 @@ class AirPlayStream:
         # failure answers the wait immediately; no ack within the timeout means
         # an older binary, so fall back to trusting the commanded instant
         # (legacy clamp semantics).
-        ack_timeout = AIRPLAY_JOIN_START_ACK_TIMEOUT_MS / 1000 if join else 2.0
+        ack_timeout = (
+            AIRPLAY_JOIN_START_ACK_TIMEOUT_MS if join else AIRPLAY_START_ACK_TIMEOUT_MS
+        ) / 1000
         try:
             await asyncio.wait_for(self._started.wait(), ack_timeout)
         except TimeoutError:
@@ -883,7 +891,9 @@ class AirPlayStream:
                     self._parse_capabilities_status(line)
                 elif line.startswith("[EVENT] remote command="):
                     self._parse_remote_event(line)
-                self.player.logger.log(VERBOSE_LOG_LEVEL, line)
+                self.player.logger.log(
+                    VERBOSE_LOG_LEVEL, "cliairplay for %s: %s", self.player.display_name, line
+                )
 
     def _parse_remote_event(self, line: str) -> None:
         """Dispatch a normalized remote command reported by cliairplay."""
@@ -1069,13 +1079,17 @@ class AirPlayStream:
             # Routine binary output is verbose-only so it never floods a user's log, but
             # its own diagnostics (a failed socket bind, a missing receiver clock) are the
             # first thing needed when triaging silent playback, so those stay visible.
-            if any(marker in line.lower() for marker in CLI_PROBLEM_MARKERS):
-                logger.warning("cliairplay for %s: %s", player.display_name, line)
-            else:
-                logger.log(VERBOSE_LOG_LEVEL, line)
+            # Every line names its speaker: the provider logger is shared, so the output
+            # of several concurrent streams is otherwise impossible to tell apart.
+            level = (
+                logging.WARNING
+                if any(marker in line.lower() for marker in CLI_PROBLEM_MARKERS)
+                else VERBOSE_LOG_LEVEL
+            )
+            logger.log(level, "cliairplay for %s: %s", player.display_name, line)
             await asyncio.sleep(0)
 
-        logger.debug("cliairplay stderr reader ended")
+        logger.debug("cliairplay stderr reader ended for %s", player.display_name)
         self._process_ended.set()
         if not self._stopped and not self._stopping:
             self._stopped = True
@@ -1649,14 +1663,25 @@ class AirPlayStream:
         # NTP timing has no receiver clock to wait for, and a state without a
         # projection resolves the wait with nothing so a caller falls back
         # instead of blocking on evidence that will not arrive. A stalled clock
-        # is one of those states however the line is numbered.
-        self._clock_ready_at_unix_ms = 0 if mode == "ntp" or stalled else ready_at_unix_ms
+        # is one of those states however the line is numbered — but the caller
+        # has to be able to tell the three apart, so each carries its own
+        # readiness rather than a bare missing instant.
+        if mode == "ntp":
+            self._clock_readiness = ClockReadiness.NOT_APPLICABLE
+        elif stalled:
+            self._clock_readiness = ClockReadiness.STALLED
+        else:
+            self._clock_readiness = ClockReadiness.PROJECTED
+        self._clock_ready_at_unix_ms = (
+            ready_at_unix_ms if self._clock_readiness is ClockReadiness.PROJECTED else 0
+        )
         self._clock_ready.set()
         self.player.logger.debug(
-            "cliairplay reports the clock for %s as %s (mode=%s, usable at %d)",
+            "cliairplay reports the clock for %s as %s (mode=%s, readiness=%s, usable at %d)",
             self.player.display_name,
             state,
             mode,
+            self._clock_readiness,
             self._clock_ready_at_unix_ms,
         )
 

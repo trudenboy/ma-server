@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from music_assistant_models.enums import PlaybackState
 from music_assistant_models.errors import PlayerCommandFailed
 
 from music_assistant.providers.airplay.constants import (
@@ -19,7 +20,9 @@ from music_assistant.providers.airplay.constants import (
     AIRPLAY_LATE_JOIN_RING_MARGIN_SECONDS,
     AIRPLAY_LATE_JOIN_RING_MAX_BYTES,
     AIRPLAY_LATE_JOIN_RING_MIN_SECONDS,
+    AIRPLAY_SPLICE_LEAD_MARGIN_MS,
     AIRPLAY_START_LEAD_MS,
+    ClockReadiness,
     StreamingProtocol,
 )
 from music_assistant.providers.airplay.stream_session import AirPlayStreamSession
@@ -35,7 +38,7 @@ def _stream_defaults(stream: MagicMock) -> MagicMock:
     matching an older binary, so the tests assert the commanded values directly.
     """
     stream.start = AsyncMock(return_value=None)
-    stream.wait_clock_ready = AsyncMock(return_value=None)
+    stream.wait_clock_ready = AsyncMock(return_value=(ClockReadiness.UNREPORTED, 0))
     stream.warm_lead_ms = 0
     stream.flushed_head_unix_ms = 0
     return stream
@@ -202,7 +205,7 @@ async def test_initial_group_waits_for_every_member_before_shared_start(
     last_connected = max(i for i, op in enumerate(operations) if op.startswith("connected:"))
     first_start = min(i for i, op in enumerate(operations) if op.startswith("started:"))
     assert last_connected < first_start
-    # start = now (100_000 ms) + the group start lead (500 ms), one shared instant
+    # start = now (100_000 ms) + the cold group start lead, one shared instant
     starts = {int(op.rsplit(":", 1)[1]) for op in operations if op.startswith("started:")}
     assert starts == {100_000 + AIRPLAY_COLD_GROUP_START_LEAD_MS}
 
@@ -227,7 +230,10 @@ async def test_group_start_never_anchors_before_every_receiver_clock_is_usable()
         stream.wait_for_connection = AsyncMock()
         stream.wait_audio_present = AsyncMock(return_value=True)
         stream.wait_clock_ready = AsyncMock(
-            return_value=ready_at if player is second else int(now * 1000)
+            return_value=(
+                ClockReadiness.PROJECTED,
+                ready_at if player is second else int(now * 1000),
+            )
         )
         player.stream = stream
 
@@ -258,7 +264,9 @@ async def test_solo_start_does_not_wait_for_a_clock_projection() -> None:
         stream.wait_for_connection = AsyncMock()
         stream.wait_audio_present = AsyncMock(return_value=True)
         # A projection far in the future must not delay a solo start.
-        stream.wait_clock_ready = AsyncMock(return_value=int(now * 1000) + 5_000)
+        stream.wait_clock_ready = AsyncMock(
+            return_value=(ClockReadiness.PROJECTED, int(now * 1000) + 5_000)
+        )
         player.stream = stream
 
     with (
@@ -511,7 +519,9 @@ async def test_standby_supports_every_connected_streaming_protocol(
     assert await session.standby()
     for player in players:
         player.stream.send_cli_command.assert_awaited_once_with("ACTION=STANDBY")
-        player.set_state_from_stream.assert_called_once()
+        player.set_state_from_stream.assert_called_once_with(
+            state=PlaybackState.PAUSED, stream=player.stream
+        )
 
 
 @pytest.mark.asyncio
@@ -608,7 +618,7 @@ async def test_warm_replace_flushes_all_before_starting_any() -> None:
     for player in players:
         player.stream.flush.assert_awaited_once_with()
         # start = now (100_000 ms) + the group start lead (500 ms), position 0
-        player.stream.start.assert_awaited_once_with(100_500, 0)
+        player.stream.start.assert_awaited_once_with(100_000 + AIRPLAY_GROUP_START_LEAD_MS, 0)
 
 
 @pytest.mark.asyncio
@@ -706,6 +716,70 @@ async def test_warm_replace_start_failure_falls_back_to_cold() -> None:
         assert await session.replace(MagicMock(), MagicMock(elapsed_time=0)) is False
 
 
+@pytest.mark.parametrize(
+    ("member_specs", "expected_requirement_ms"),
+    [
+        # the largest member requirement wins, wherever that member sits
+        (((4000, 0), (1500, 0)), 4000),
+        (((1500, 0), (4000, 0)), 4000),
+        # a negative sync_adjust widens that member's own requirement by exactly
+        # the amount it moves that member's commanded instant earlier
+        (((4000, 0), (3600, -600)), 4200),
+    ],
+)
+def test_warm_anchor_clears_the_receivers_queued_audio(
+    member_specs: tuple[tuple[int, int], ...],
+    expected_requirement_ms: int,
+) -> None:
+    """
+    A warm re-anchor lands beyond the audio the receivers still have queued.
+
+    A splice-timeline member honors the commanded instant only when it lands
+    past that member's own queued audio, so the shared anchor has to clear the
+    largest member requirement: anchoring short leaves that member behind the
+    group and every warm start pays a corrective round.
+    """
+    session = _make_session(0, 0)
+    members: list[Any] = [session.sync_clients[0]]
+    second = MagicMock(player_id="second", protocol=StreamingProtocol.AIRPLAY2)
+    second.stream = _stream_defaults(MagicMock(running=True, connected=True))
+    session.sync_clients.append(second)
+    members.append(second)
+    for player, (warm_lead_ms, adjust_ms) in zip(members, member_specs, strict=True):
+        player.stream.warm_lead_ms = warm_lead_ms
+        player.config.get_value = MagicMock(return_value=adjust_ms)
+
+    with patch("music_assistant.providers.airplay.stream_session.time.time", return_value=100.0):
+        anchor = session._anchor_start_unix_ms(warm=True)
+
+    assert anchor == 100_000 + expected_requirement_ms + AIRPLAY_SPLICE_LEAD_MARGIN_MS
+
+
+def test_warm_anchor_clears_the_head_every_flushed_member_froze() -> None:
+    """
+    A warm re-anchor lands beyond the frozen head the flushed members reported.
+
+    A member renders from its own commanded instant (the anchor plus its
+    sync_adjust), so it is that instant, not the bare anchor, that has to clear
+    the head the member froze at flush, with margin for the command round-trip.
+    """
+    session = _make_session(0, 0)
+    first: Any = session.sync_clients[0]
+    first.stream.flushed_head_unix_ms = 102_000
+    first.config.get_value = MagicMock(return_value=0)
+    second = MagicMock(player_id="second", protocol=StreamingProtocol.AIRPLAY2)
+    second.stream = _stream_defaults(MagicMock(running=True, connected=True))
+    second.stream.flushed_head_unix_ms = 105_000
+    second.config.get_value = MagicMock(return_value=300)
+    session.sync_clients.append(second)
+
+    with patch("music_assistant.providers.airplay.stream_session.time.time", return_value=100.0):
+        anchor = session._anchor_start_unix_ms(warm=True)
+
+    # the later head wins, and the offset its member adds comes back out of it
+    assert anchor == 105_000 - 300 + AIRPLAY_SPLICE_LEAD_MARGIN_MS
+
+
 @pytest.mark.asyncio
 async def test_start_player_ffmpeg_wires_persistent_cli_stdin() -> None:
     """The per-seek ffmpeg is wired to the member's persistent cli stdin fd and tracked."""
@@ -794,7 +868,9 @@ async def test_standby_returns_false_when_command_is_not_delivered() -> None:
 
     assert await session.standby() is False
     delivered_player.stream.send_cli_command.assert_awaited_once_with("ACTION=STANDBY")
-    delivered_player.set_state_from_stream.assert_called_once()
+    delivered_player.set_state_from_stream.assert_called_once_with(
+        state=PlaybackState.PAUSED, stream=delivered_player.stream
+    )
     dropped_player.stream.send_cli_command.assert_awaited_once_with("ACTION=STANDBY")
     dropped_player.set_state_from_stream.assert_not_called()
     pending_player.stream.send_cli_command.assert_not_awaited()
@@ -1057,7 +1133,9 @@ async def test_late_join_anchors_on_the_reported_clock_readiness() -> None:
 
     def setup_with_projection(*_args: Any, **_kwargs: Any) -> None:
         _setup_stream(player)()
-        player.stream.wait_clock_ready = AsyncMock(return_value=ready_at_unix_ms)
+        player.stream.wait_clock_ready = AsyncMock(
+            return_value=(ClockReadiness.PROJECTED, ready_at_unix_ms)
+        )
 
     with (
         patch.object(session, "_start_client", side_effect=setup_with_projection),
@@ -1086,7 +1164,9 @@ async def test_late_join_floor_wins_over_a_clock_that_is_already_ready() -> None
 
     def setup_with_projection(*_args: Any, **_kwargs: Any) -> None:
         _setup_stream(player)()
-        player.stream.wait_clock_ready = AsyncMock(return_value=ready_at_unix_ms)
+        player.stream.wait_clock_ready = AsyncMock(
+            return_value=(ClockReadiness.PROJECTED, ready_at_unix_ms)
+        )
 
     with (
         patch.object(session, "_start_client", side_effect=setup_with_projection),
@@ -1126,6 +1206,58 @@ async def test_late_join_falls_back_to_the_floor_without_a_clock_projection() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "readiness",
+    [ClockReadiness.UNREPORTED, ClockReadiness.NOT_APPLICABLE],
+    ids=["unreported", "ntp"],
+)
+async def test_late_join_without_a_projection_still_joins(readiness: ClockReadiness) -> None:
+    """A device with no clock to wait for is a fallback, not a reason to refuse it."""
+    now = 1_000_000.0
+    session = _make_session(now - 5.0, 5.0)
+    session._pcm_buffer = bytearray(b"\x01" * PCM_SAMPLE_SIZE * 5)
+    player = _make_late_joiner()
+
+    def setup_without_projection(*_args: Any, **_kwargs: Any) -> None:
+        _setup_stream(player)()
+        player.stream.wait_clock_ready = AsyncMock(return_value=(readiness, 0))
+
+    with (
+        patch.object(session, "_start_client", side_effect=setup_without_projection),
+        patch.object(session, "_write_chunk_to_player", new_callable=AsyncMock),
+        patch("music_assistant.providers.airplay.stream_session.time.time", return_value=now),
+    ):
+        await session.add_client(player)
+
+    assert player in session.sync_clients
+
+
+@pytest.mark.asyncio
+async def test_late_joiner_with_a_stalled_clock_is_not_added() -> None:
+    """A receiver that never answered our clock renders silence, so keep it out of the group."""
+    now = 1_000_000.0
+    session = _make_session(now - 5.0, 5.0)
+    session._pcm_buffer = bytearray(b"\x01" * PCM_SAMPLE_SIZE * 5)
+    player = _make_late_joiner()
+
+    def setup_stalled(*_args: Any, **_kwargs: Any) -> None:
+        _setup_stream(player)()
+        player.stream.wait_clock_ready = AsyncMock(return_value=(ClockReadiness.STALLED, 0))
+
+    with (
+        patch.object(session, "_start_client", side_effect=setup_stalled),
+        patch.object(session, "_write_chunk_to_player", new_callable=AsyncMock),
+        patch.object(session, "stop_client", new_callable=AsyncMock) as stop_client,
+        patch("music_assistant.providers.airplay.stream_session.time.time", return_value=now),
+    ):
+        await session.add_client(player)
+
+    player.stream.start.assert_not_awaited()
+    assert player not in session.sync_clients
+    stop_client.assert_awaited_once_with(player, reason="receiver clock stalled")
+
+
+@pytest.mark.asyncio
 async def test_late_join_feed_keeps_flowing_while_waiting_for_clock_readiness() -> None:
     """The group keeps being fed while a joiner's receiver clock projection is pending."""
     session = _make_session(time.time() - 5, 5.0)
@@ -1136,9 +1268,10 @@ async def test_late_join_feed_keeps_flowing_while_waiting_for_clock_readiness() 
     def setup_pending_projection(*_args: Any, **_kwargs: Any) -> None:
         _setup_stream(player)()
 
-        async def wait_clock_ready(*_args: Any, **_kwargs: Any) -> None:
+        async def wait_clock_ready(*_args: Any, **_kwargs: Any) -> tuple[ClockReadiness, int]:
             readiness_pending.set()
             await readiness_released.wait()
+            return (ClockReadiness.UNREPORTED, 0)
 
         player.stream.wait_clock_ready = AsyncMock(side_effect=wait_clock_ready)
 
