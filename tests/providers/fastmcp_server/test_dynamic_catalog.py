@@ -19,6 +19,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_REQUEST, METHOD_NOT_FOUND, ErrorData
+from music_assistant_models.auth import Scope
 from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ConfigEntryType
 
@@ -957,12 +958,12 @@ async def test_cancelled_snapshot_builder_and_waiter_leave_later_reads_usable(
     compile_snapshot = adapter._compile_snapshot
     attempts = 0
 
-    def cancel_once(fingerprint: Any) -> Any:
+    def cancel_once(capture: Any) -> Any:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise asyncio.CancelledError
-        return compile_snapshot(fingerprint)
+        return compile_snapshot(capture)
 
     monkeypatch.setattr(adapter, "_compile_snapshot", cancel_once)
     with pytest.raises(asyncio.CancelledError):
@@ -1120,6 +1121,73 @@ def test_nested_response_lists_are_bounded_deterministically() -> None:
     assert len(first["data"]["groups"][0]["items"]) == 25
     assert first == second
     assert first["truncated"] is True
+
+
+def test_deep_response_is_truncated_before_python_recursion_limit() -> None:
+    """Depth limiting happens before recursive normalization can exhaust Python."""
+    payload: Any = "leaf"
+    for _index in range(sys.getrecursionlimit() + 100):
+        payload = [payload]
+
+    result = DynamicAPIAdapter._bounded_envelope(
+        "ma_api:test", payload, response_mode="compact", fields=None, max_items=None
+    )
+
+    nested = result["data"]
+    for _index in range(6):
+        assert isinstance(nested, list)
+        nested = nested[0]
+    assert nested == "[truncated]"
+    assert result["truncated"] is True
+    assert result["bytes"] <= 12_288
+
+
+def test_response_normalization_stops_at_each_list_item_cap() -> None:
+    """Discarded list suffixes are never serialized before item limiting."""
+    serialized: list[int] = []
+
+    @dataclass
+    class Row:
+        index: int
+
+        def model_dump(self, *, mode: str) -> dict[str, int]:
+            assert mode == "json"
+            serialized.append(self.index)
+            return {"index": self.index}
+
+    payload = [Row(index) for index in range(100)]
+    result = DynamicAPIAdapter._bounded_envelope(
+        "ma_api:test", payload, response_mode="compact", fields=None, max_items=3
+    )
+
+    assert result["data"] == [{"index": 0}, {"index": 1}, {"index": 2}]
+    assert result["total_count"] == 100
+    assert result["truncated"] is True
+    assert serialized == [0, 1, 2]
+
+
+def test_response_normalization_emits_strict_json_scalars() -> None:
+    """Surrogates and non-finite floats cannot escape into MCP JSON output."""
+    result = DynamicAPIAdapter._bounded_envelope(
+        "ma_api:test",
+        {"text": "left\ud800right", "numbers": [float("nan"), float("inf"), -float("inf")]},
+        response_mode="full",
+        fields=None,
+        max_items=None,
+    )
+
+    assert result["data"] == {
+        "text": "left\ufffdright",
+        "numbers": [None, None, None],
+    }
+    assert result["truncated"] is True
+    encoded = json.dumps(
+        result,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode()
+    assert result["bytes"] == len(encoded)
 
 
 def test_large_search_envelope_keeps_mapping_shape_within_byte_budget() -> None:
@@ -1362,6 +1430,93 @@ async def test_denied_handlers_are_omitted_from_dynamic_health_diagnostics(comma
     assert await adapter.visible_entries() == []
     assert adapter.diagnostics()["incompatible_handlers"] == ("broken",)
     assert adapter.diagnostics()["last_error"] == "1 incompatible handler(s) skipped"
+
+
+async def test_hidden_auth_registry_churn_keeps_catalog_state_stable() -> None:
+    """Hidden-only registry changes cannot affect diagnostics, revisions, or cursors."""
+
+    async def first() -> None:
+        return None
+
+    async def second() -> None:
+        return None
+
+    async def hidden() -> None:
+        return None
+
+    adapter = _real_adapter(_handler("music/first", first))
+    adapter.mass.command_handlers["music/second"] = _handler("music/second", second)
+    service = meta_discovery.MetaDiscoveryService(adapter)
+    initial_view = await adapter.visible_catalog()
+    initial_page = await service.discover("", limit=1)
+    initial_diagnostics = adapter.diagnostics()
+    assert initial_page["next_cursor"] is not None
+
+    for hidden_handler in (
+        _handler("auth/token/create", hidden, scope="admin"),
+        _handler("auth/token/create", lambda: None, scope="admin"),
+        None,
+    ):
+        if hidden_handler is None:
+            adapter.mass.command_handlers.pop("auth/token/create")
+        else:
+            adapter.mass.command_handlers["auth/token/create"] = hidden_handler
+        current_view = await adapter.visible_catalog()
+        continued = await service.discover(cursor=initial_page["next_cursor"], limit=1)
+        assert current_view.fingerprint == initial_view.fingerprint
+        assert continued["catalog_revision"] == initial_page["catalog_revision"]
+        assert adapter.diagnostics() == initial_diagnostics
+
+
+@pytest.mark.parametrize("scope", [Scope.UNKNOWN, "future.scope", object()])
+async def test_dynamic_catalog_rejects_unknown_scopes_before_ma_checker(scope: object) -> None:
+    """Unknown scopes are neither visible nor executable, even for a permissive checker."""
+    checked: list[object] = []
+    called = False
+
+    async def search() -> None:
+        nonlocal called
+        called = True
+
+    def scope_checker(_user: Any, required_scope: object) -> bool:
+        checked.append(required_scope)
+        return True
+
+    handler = _handler("music/search", search, cast("Any", scope))
+    adapter = _real_adapter(handler, scope_checker=scope_checker)
+
+    assert await adapter.visible_entries() == []
+    with pytest.raises(ToolError, match="not found or not permitted"):
+        await adapter.call(
+            "ma_api:music/search",
+            {},
+            response_mode="compact",
+            fields=None,
+            max_items=None,
+            ctx=MagicMock(),
+        )
+    assert checked == []
+    assert called is False
+
+
+async def test_dynamic_catalog_passes_normalized_scope_to_ma_checker() -> None:
+    """Known string scopes are normalized before MA authorization is delegated."""
+    checked: list[Scope] = []
+
+    async def search() -> None:
+        return None
+
+    def scope_checker(_user: Any, required_scope: Scope) -> bool:
+        checked.append(required_scope)
+        return True
+
+    adapter = _real_adapter(
+        _handler("music/search", search, "library.read"),
+        scope_checker=scope_checker,
+    )
+
+    assert [entry.name for entry in await adapter.visible_entries()] == ["ma_api:music/search"]
+    assert checked == [Scope.LIBRARY_READ]
 
 
 @pytest.mark.parametrize(
@@ -2220,7 +2375,15 @@ async def test_secure_config_value_is_reclassified_after_confirmation_before_ser
         return raw_secret
 
     adapter = _real_adapter(
-        _handler(command, get_value, "config.read"),
+        _handler(
+            command,
+            get_value,
+            {
+                "providers": "config.providers.read",
+                "core": "config.core.read",
+                "players": "config.players.read",
+            }[command.split("/")[1]],
+        ),
         allowed_tags={str(Tag.CONFIG_READ)},
     )
     schema_getter = AsyncMock(
@@ -2251,8 +2414,131 @@ async def test_secure_config_value_is_reclassified_after_confirmation_before_ser
 
     assert result["data"] == "this_value_is_encrypted"
     assert raw_secret not in json.dumps(result)
-    assert schema_getter.await_count == 2
-    schema_getter.assert_has_awaits([call(*getter_arguments), call(*getter_arguments)])
+    assert schema_getter.await_count == 3
+    schema_getter.assert_has_awaits(
+        [call(*getter_arguments), call(*getter_arguments), call(*getter_arguments)]
+    )
+
+
+async def test_secure_config_value_is_reclassified_after_execution_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value made secure during execution is masked before serialization."""
+    _bypass_ma_argument_parser(monkeypatch)
+    raw_secret = "secret-created-during-execution"
+    secure = False
+
+    async def get_value(key: str, instance_id: str) -> str:
+        nonlocal secure
+        assert key == "token"
+        assert instance_id == "demo--1"
+        secure = True
+        await asyncio.sleep(0)
+        return raw_secret
+
+    adapter = _real_adapter(
+        _handler("config/providers/get_value", get_value, "config.providers.read"),
+        allowed_tags={str(Tag.CONFIG_READ)},
+    )
+    schema_getter = AsyncMock(
+        side_effect=lambda *_args: [
+            ConfigEntry(
+                key="token",
+                type=ConfigEntryType.SECURE_STRING if secure else ConfigEntryType.STRING,
+                label="Token",
+            )
+        ]
+    )
+    adapter.mass.config.get_provider_config_entries = schema_getter
+
+    result = await adapter.call(
+        "ma_api:config/providers/get_value",
+        {"instance_id": "demo--1", "key": "token"},
+        response_mode="full",
+        fields=None,
+        max_items=None,
+        ctx=MagicMock(),
+    )
+
+    assert result["data"] == "this_value_is_encrypted"
+    assert raw_secret not in json.dumps(result)
+    assert schema_getter.await_count == 3
+
+
+async def test_config_value_that_stops_being_secure_during_execution_stays_masked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result classified secure before execution remains masked afterward."""
+    _bypass_ma_argument_parser(monkeypatch)
+    raw_secret = "secret-before-schema-change"
+    secure = True
+
+    async def get_value(key: str, domain: str) -> str:
+        nonlocal secure
+        assert key == "token"
+        assert domain == "webserver"
+        secure = False
+        return raw_secret
+
+    adapter = _real_adapter(
+        _handler("config/core/get_value", get_value, "config.core.read"),
+        allowed_tags={str(Tag.CONFIG_READ)},
+    )
+    adapter.mass.config.get_core_config_entries = AsyncMock(
+        side_effect=lambda *_args: [
+            ConfigEntry(
+                key="token",
+                type=ConfigEntryType.SECURE_STRING if secure else ConfigEntryType.STRING,
+                label="Token",
+            )
+        ]
+    )
+
+    result = await adapter.call(
+        "ma_api:config/core/get_value",
+        {"domain": "webserver", "key": "token"},
+        response_mode="full",
+        fields=None,
+        max_items=None,
+        ctx=MagicMock(),
+    )
+
+    assert result["data"] == "this_value_is_encrypted"
+    assert raw_secret not in json.dumps(result)
+
+
+async def test_config_value_postflight_schema_failure_never_serializes_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed postflight classification rejects the result without exposing it."""
+    _bypass_ma_argument_parser(monkeypatch)
+    raw_secret = "secret-with-missing-postflight-schema"
+
+    async def get_value(key: str, player_id: str) -> str:
+        assert key == "token"
+        assert player_id == "kitchen"
+        return raw_secret
+
+    adapter = _real_adapter(
+        _handler("config/players/get_value", get_value, "config.players.read"),
+        allowed_tags={str(Tag.CONFIG_READ)},
+    )
+    visible_entry = ConfigEntry(key="token", type=ConfigEntryType.STRING, label="Token")
+    adapter.mass.config.get_player_config_entries = AsyncMock(
+        side_effect=[[visible_entry], [visible_entry], RuntimeError("schema disappeared")]
+    )
+
+    with pytest.raises(ToolError, match="Unable to classify config value") as error:
+        await adapter.call(
+            "ma_api:config/players/get_value",
+            {"player_id": "kitchen", "key": "token"},
+            response_mode="full",
+            fields=None,
+            max_items=None,
+            ctx=MagicMock(),
+        )
+
+    assert raw_secret not in str(error.value)
 
 
 async def test_flow_category_revoked_during_confirmation_prevents_execution(

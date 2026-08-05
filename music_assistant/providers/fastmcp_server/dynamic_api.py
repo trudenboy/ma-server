@@ -19,11 +19,12 @@ from mcp.types import INVALID_REQUEST, METHOD_NOT_FOUND
 
 from .command_policy import (
     CommandDecision,
+    CommandPreflight,
     Confirmation,
     DynamicPolicy,
     DynamicRisk,
-    ResultProjector,
     command_tags_visible,
+    postflight_command,
     preflight_command,
     resolve_command_policy,
 )
@@ -34,7 +35,8 @@ from .command_profiles import (
     LegacyMigration,
     aliases_by_command,
 )
-from .dynamic_serialization import json_value
+from .commands.authorization import normalize_scope
+from .dynamic_serialization import bounded_json_value
 from .dynamic_signatures import (
     CompiledSignature,
     UnsupportedSignatureError,
@@ -110,6 +112,17 @@ class DynamicEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class AuthorizedInvocation:
+    """One fully authorized native invocation ready for execution."""
+
+    entry: DynamicEntry
+    arguments: dict[str, Any]
+    auth: tuple[AccessToken, Any] | None
+    impersonated_user: Any | None
+    preflight: CommandPreflight
+
+
+@dataclass(frozen=True, slots=True)
 class CatalogSnapshot:
     """Compiled descriptors for one live command-registry generation."""
 
@@ -147,6 +160,15 @@ class _SnapshotDiagnostics:
     handlers_visible: int
     incompatible_handlers: tuple[str, ...]
     last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RegistryCapture:
+    """One immutable caller-safe view of the live MA command registry."""
+
+    fingerprint: CatalogFingerprint
+    registry_type: str
+    items: tuple[tuple[str, Any], ...] | None
 
 
 @dataclass(slots=True)
@@ -193,13 +215,13 @@ class DynamicAPIAdapter:
 
     async def base_snapshot(self) -> CatalogSnapshot:
         """Return the compiled snapshot for the current live command registry."""
-        fingerprint = self._registry_fingerprint()
-        if self._snapshot is not None and self._snapshot.fingerprint == fingerprint:
+        capture = self._capture_registry()
+        if self._snapshot is not None and self._snapshot.fingerprint == capture.fingerprint:
             return self._snapshot
         async with self._snapshot_lock:
-            fingerprint = self._registry_fingerprint()
-            if self._snapshot is None or self._snapshot.fingerprint != fingerprint:
-                snapshot, diagnostics = self._compile_snapshot(fingerprint)
+            capture = self._capture_registry()
+            if self._snapshot is None or self._snapshot.fingerprint != capture.fingerprint:
+                snapshot, diagnostics = self._compile_snapshot(capture)
                 self._snapshot = snapshot
                 self._snapshot_diagnostics = diagnostics
                 self._publish_snapshot_diagnostics()
@@ -220,7 +242,7 @@ class DynamicAPIAdapter:
             for entry in snapshot.entries
             if (
                 entry.required_scope is None
-                or self._scope_checker(user, getattr(entry.handler, "required_scope", None))
+                or self._scope_is_allowed(user, getattr(entry.handler, "required_scope", None))
             )
             and policy.allows(entry.risk)
             and entry.decision is not None
@@ -275,18 +297,18 @@ class DynamicAPIAdapter:
         except (KeyError, TypeError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
-        entry, impersonated_user, _result_projector = await self._authorize_call(
+        initial_invocation = await self._authorize_call(
             entry,
             auth,
             parsed,
             impersonated=impersonated,
         )
-        await self._confirm(entry, ctx, impersonating=impersonating)
+        await self._confirm(initial_invocation.entry, ctx, impersonating=impersonating)
         auth = await self._authentication(revalidate=True)
         if auth is None and self._auth_required_provider():
             raise ToolError("Authentication is required")
-        entry, impersonated_user, result_projector = await self._authorize_call(
-            entry,
+        invocation = await self._authorize_call(
+            initial_invocation.entry,
             auth,
             parsed,
             impersonated=impersonated,
@@ -294,26 +316,30 @@ class DynamicAPIAdapter:
 
         try:
             async with asyncio.timeout(_CALL_TIMEOUT_SECONDS):
-                result = await self._execute(entry, parsed, auth, impersonated_user)
-                if result_projector is not None:
-                    result = result_projector(result)
+                result = await self._execute(
+                    invocation.entry,
+                    invocation.arguments,
+                    invocation.auth,
+                    invocation.impersonated_user,
+                )
+                result = await self._postflight(invocation, result)
         except TimeoutError as exc:
-            raise ToolError(f"Command {entry.command!r} timed out") from exc
+            raise ToolError(f"Command {invocation.entry.command!r} timed out") from exc
         except ToolError:
             raise
         except Exception as exc:
-            raise _command_error(entry.command, exc) from exc
+            raise _command_error(invocation.entry.command, exc) from exc
         return self._bounded_envelope(
             name,
             result,
             response_mode=response_mode,
             fields=fields,
             max_items=max_items,
-            profile=entry.profile,
+            profile=invocation.entry.profile,
         )
 
-    def _registry_fingerprint(self) -> CatalogFingerprint:
-        """Fingerprint the actual live command-handler registry."""
+    def _capture_registry(self) -> _RegistryCapture:
+        """Capture the caller-safe subset used by compilation and diagnostics."""
         handlers = getattr(self.mass, "command_handlers", {})
         registry_type = type(handlers)
         registry_kind = (
@@ -321,22 +347,36 @@ class DynamicAPIAdapter:
             f"{registry_type.__module__}.{registry_type.__qualname__}"
         )
         if not isinstance(handlers, Mapping):
-            return CATALOG_REVISION, registry_kind, ()
-        return (
-            CATALOG_REVISION,
-            registry_kind,
-            tuple(sorted((command, id(handler)) for command, handler in handlers.items())),
+            return _RegistryCapture(
+                fingerprint=(CATALOG_REVISION, registry_kind, ()),
+                registry_type=registry_type.__name__,
+                items=None,
+            )
+        items = tuple(
+            sorted(
+                (command, handler)
+                for command, handler in handlers.items()
+                if not self._command_is_denied(command)
+            )
+        )
+        return _RegistryCapture(
+            fingerprint=(
+                CATALOG_REVISION,
+                registry_kind,
+                tuple((command, id(handler)) for command, handler in items),
+            ),
+            registry_type=registry_type.__name__,
+            items=items,
         )
 
     def _compile_snapshot(
-        self, fingerprint: CatalogFingerprint
+        self, capture: _RegistryCapture
     ) -> tuple[CatalogSnapshot, _SnapshotDiagnostics]:
         """Compile the base descriptors and compatibility errors atomically."""
-        handlers = getattr(self.mass, "command_handlers", {})
-        if not isinstance(handlers, Mapping):
-            return CatalogSnapshot(fingerprint, ()), _SnapshotDiagnostics(
+        if capture.items is None:
+            return CatalogSnapshot(capture.fingerprint, ()), _SnapshotDiagnostics(
                 available=False,
-                registry_type=type(handlers).__name__,
+                registry_type=capture.registry_type,
                 handlers_seen=0,
                 handlers_visible=0,
                 incompatible_handlers=(),
@@ -345,9 +385,7 @@ class DynamicAPIAdapter:
 
         entries: list[DynamicEntry] = []
         incompatible: list[str] = []
-        for command, handler in sorted(handlers.items()):
-            if self._command_is_denied(command):
-                continue
+        for command, handler in capture.items:
             if not self._handler_is_discoverable(command, handler):
                 incompatible.append(str(command))
                 continue
@@ -361,8 +399,8 @@ class DynamicAPIAdapter:
         incompatible_handlers = tuple(sorted(incompatible))
         diagnostics = _SnapshotDiagnostics(
             available=True,
-            registry_type=type(handlers).__name__,
-            handlers_seen=len(handlers),
+            registry_type=capture.registry_type,
+            handlers_seen=len(capture.items),
             handlers_visible=len(entries),
             incompatible_handlers=incompatible_handlers,
             last_error=(
@@ -370,7 +408,7 @@ class DynamicAPIAdapter:
             ),
         )
         return CatalogSnapshot(
-            fingerprint,
+            capture.fingerprint,
             tuple(sorted(entries, key=lambda entry: entry.name)),
         ), diagnostics
 
@@ -578,7 +616,7 @@ class DynamicAPIAdapter:
         if auth is None:
             raise ToolError("Authentication is required")
         scope = getattr(handler, "required_scope", None)
-        if scope is not None and not self._scope_checker(auth[1], scope):
+        if scope is not None and not self._scope_is_allowed(auth[1], scope):
             raise ToolError(f"Tool {entry.name!r} not found or not permitted")
         profile = COMMAND_PROFILES.get(entry.command)
         decision = resolve_command_policy(entry.command, scope, profile)
@@ -598,7 +636,7 @@ class DynamicAPIAdapter:
         decision: CommandDecision,
         arguments: Mapping[str, Any],
         auth: tuple[AccessToken, Any] | None,
-    ) -> ResultProjector | None:
+    ) -> CommandPreflight:
         """Run request-dependent policy checks under the current MA auth context."""
         context_tokens = self._set_auth_context(auth)
         try:
@@ -612,6 +650,24 @@ class DynamicAPIAdapter:
             for variable, token in reversed(context_tokens):
                 variable.reset(token)
 
+    async def _postflight(self, invocation: AuthorizedInvocation, result: Any) -> Any:
+        """Sanitize a native result under the final authorized request context."""
+        decision = invocation.entry.decision
+        if decision is None:
+            raise ToolError(f"Tool {invocation.entry.name!r} not found or not permitted")
+        context_tokens = self._set_auth_context(invocation.auth)
+        try:
+            return await postflight_command(
+                self.mass,
+                decision,
+                invocation.arguments,
+                invocation.preflight,
+                result,
+            )
+        finally:
+            for variable, token in reversed(context_tokens):
+                variable.reset(token)
+
     async def _authorize_call(
         self,
         entry: DynamicEntry,
@@ -619,7 +675,7 @@ class DynamicAPIAdapter:
         arguments: Mapping[str, Any],
         *,
         impersonated: Any,
-    ) -> tuple[DynamicEntry, Any | None, ResultProjector | None]:
+    ) -> AuthorizedInvocation:
         """Refresh authorization, impersonation, target filters and request preflight."""
         entry = self._reauthorize_entry(entry, auth)
         impersonated_user = (
@@ -632,8 +688,14 @@ class DynamicAPIAdapter:
         decision = entry.decision
         if decision is None:
             decision = resolve_command_policy(entry.command, entry.required_scope, entry.profile)
-        result_projector = await self._preflight(decision, arguments, auth)
-        return entry, impersonated_user, result_projector
+        preflight = await self._preflight(decision, arguments, auth)
+        return AuthorizedInvocation(
+            entry=entry,
+            arguments=dict(arguments),
+            auth=auth,
+            impersonated_user=impersonated_user,
+            preflight=preflight,
+        )
 
     async def _resolve_impersonated_user(
         self,
@@ -747,23 +809,40 @@ class DynamicAPIAdapter:
             item_cap = max(1, min(item_cap, int(max_items)))
         byte_cap = _COMPACT_BYTES if compact else _FULL_BYTES
         string_cap = _COMPACT_STRING if compact else _FULL_STRING
-        raw = json_value(result)
-        total_count = len(raw) if isinstance(raw, list) else None
+        normalized = bounded_json_value(
+            result,
+            item_cap=item_cap,
+            string_cap=string_cap,
+            max_depth=6 if compact else 12,
+        )
+        raw = normalized.value
+        total_count = normalized.total_count
         if compact and profile is not None:
             raw = profile.project_compact(raw)
-        data = cls._project_fields(raw, fields)
-        data, truncated = cls._limit_nested_items(data, item_cap)
-        data, value_truncated = cls._truncate_value(data, string_cap, depth=6 if compact else 12)
-        truncated |= value_truncated
+        field_string_cap = max(
+            [string_cap, *(len(field) for field in fields or [] if isinstance(field, str))]
+        )
+        normalized_fields = bounded_json_value(
+            fields or [],
+            item_cap=len(fields) if fields else 1,
+            string_cap=field_string_cap,
+            max_depth=1,
+        ).value
+        safe_fields = (
+            [field for field in normalized_fields if isinstance(field, str)]
+            if isinstance(normalized_fields, list)
+            else []
+        )
+        data = cls._project_fields(raw, safe_fields)
         envelope: dict[str, Any] = {
             "command": name,
             "data": data,
-            "truncated": truncated,
+            "truncated": normalized.truncated,
             "returned_count": len(data) if isinstance(data, list) else (0 if data is None else 1),
             "bytes": 0,
             "applied": {
                 "mode": response_mode,
-                "fields": fields or [],
+                "fields": safe_fields,
                 "max_items": item_cap,
             },
         }
@@ -775,25 +854,6 @@ class DynamicAPIAdapter:
             mode = str(envelope["applied"]["mode"])
             raise ToolError(f"Response exceeds the {mode} byte budget")
         return envelope
-
-    @classmethod
-    def _limit_nested_items(cls, value: Any, item_cap: int) -> tuple[Any, bool]:
-        """Apply the mode item cap to every nested list, not only the root."""
-        if isinstance(value, list):
-            kept = value[:item_cap]
-            list_nested = [cls._limit_nested_items(item, item_cap) for item in kept]
-            return [item for item, _changed in list_nested], len(value) > item_cap or any(
-                changed for _item, changed in list_nested
-            )
-        if isinstance(value, dict):
-            dict_nested = {
-                key: cls._limit_nested_items(item, item_cap) for key, item in value.items()
-            }
-            return (
-                {key: item for key, (item, _changed) in dict_nested.items()},
-                any(changed for _item, changed in dict_nested.values()),
-            )
-        return value, False
 
     @staticmethod
     def _project_fields(value: Any, fields: list[str] | None) -> Any:
@@ -811,29 +871,6 @@ class DynamicAPIAdapter:
                 for row in value
             ]
         return value
-
-    @classmethod
-    def _truncate_value(cls, value: Any, string_cap: int, *, depth: int) -> tuple[Any, bool]:
-        """Bound nested depth and leaf strings while preserving JSON shape."""
-        if depth <= 0 and isinstance(value, dict | list):
-            return "[truncated]", True
-        if isinstance(value, str) and len(value) > string_cap:
-            return value[:string_cap] + "…", True
-        if isinstance(value, list):
-            list_items = [cls._truncate_value(item, string_cap, depth=depth - 1) for item in value]
-            return [item for item, _changed in list_items], any(
-                changed for _item, changed in list_items
-            )
-        if isinstance(value, dict):
-            dict_items = {
-                key: cls._truncate_value(item, string_cap, depth=depth - 1)
-                for key, item in value.items()
-            }
-            return (
-                {key: item for key, (item, _changed) in dict_items.items()},
-                any(changed for _item, changed in dict_items.values()),
-            )
-        return value, False
 
     @classmethod
     def _fit_bytes(cls, envelope: dict[str, Any], byte_cap: int) -> None:
@@ -979,7 +1016,14 @@ class DynamicAPIAdapter:
     @staticmethod
     def _encoded_size(value: Any) -> int:
         """Measure the compact UTF-8 JSON representation."""
-        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+        return len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode()
+        )
 
     @classmethod
     def _set_measured_bytes(cls, envelope: dict[str, Any]) -> None:
@@ -989,6 +1033,11 @@ class DynamicAPIAdapter:
             if envelope["bytes"] == measured:
                 return
             envelope["bytes"] = measured
+
+    def _scope_is_allowed(self, user: Any, scope: Any) -> bool:
+        """Normalize one MA scope before delegating its authorization decision."""
+        normalized = normalize_scope(scope)
+        return normalized is not None and bool(self._scope_checker(user, normalized))
 
     @staticmethod
     def _default_scope_checker(user: Any, scope: Any) -> bool:
