@@ -21,7 +21,6 @@ from music_assistant.providers.fastmcp_server.catalog_pagination import (
     normalize_query,
     resolve_limit,
 )
-from music_assistant.providers.fastmcp_server.command_policy import DynamicRisk
 from music_assistant.providers.fastmcp_server.dynamic_api import DynamicEntry
 
 
@@ -36,7 +35,6 @@ def _entry(
         command=name.removeprefix("ma_api:"),
         description=description,
         input_schema={"type": "object", "properties": {}},
-        risk=DynamicRisk.READ,
         required_scope=None,
         allow_impersonation=False,
         handler=object(),
