@@ -14,19 +14,19 @@ from music_assistant_models.enums import ConfigEntryType
 
 from music_assistant.models.plugin import PluginProvider
 from music_assistant.providers.fastmcp_server import _init_helpers, server
+from music_assistant.providers.fastmcp_server.capabilities import Capability
 from music_assistant.providers.fastmcp_server.commands import ProviderCommandSet
-from music_assistant.providers.fastmcp_server.config import (
-    policy_mode_key,
-    policy_token_suffix,
-    token_policy_key,
-)
 from music_assistant.providers.fastmcp_server.constants import (
     CONF_DEFAULT_POLICY,
     CONF_POLICY_TOKEN_SUFFIXES,
 )
+from music_assistant.providers.fastmcp_server.policy_config import (
+    policy_mode_key,
+    policy_token_suffix,
+    token_policy_key,
+)
 from music_assistant.providers.fastmcp_server.provider import MCPServerProvider
 from music_assistant.providers.fastmcp_server.server import MCPServerRuntime
-from music_assistant.providers.fastmcp_server.tags import Tag
 
 
 class _LifecycleMass:
@@ -74,7 +74,7 @@ def _config(*, debug_events: bool = False) -> MagicMock:
     config = MagicMock()
     config.get_value.side_effect = lambda key, default=None: {
         CONF_DEFAULT_POLICY: "Custom",
-        policy_mode_key(Tag.DEBUG_EVENTS): "allow" if debug_events else "deny",
+        policy_mode_key(Capability.DEBUG_EVENTS): "allow" if debug_events else "deny",
         "debug_event_buffer_capacity": 100,
     }.get(key, default)
     return config
@@ -264,7 +264,7 @@ async def test_auto_discovered_debug_override_activates_buffer_before_authentica
         CONF_DEFAULT_POLICY: "Read-only",
         CONF_POLICY_TOKEN_SUFFIXES: [policy_token_suffix(token_id)],
         token_policy_key(token_id): "Custom",
-        policy_mode_key(Tag.DEBUG_EVENTS, token_id): "allow",
+        policy_mode_key(Capability.DEBUG_EVENTS, token_id): "allow",
         "debug_event_buffer_capacity": 100,
     }
     config = MagicMock()

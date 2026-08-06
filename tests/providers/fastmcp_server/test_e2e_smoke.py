@@ -67,8 +67,8 @@ async def test_runtime_metadata_advertises_all_stable_capabilities(
 ) -> None:
     """Protected-resource metadata is complete and never request-policy filtered."""
     from music_assistant.providers.fastmcp_server import http_bridge  # noqa: PLC0415
+    from music_assistant.providers.fastmcp_server.capabilities import Capability  # noqa: PLC0415
     from music_assistant.providers.fastmcp_server.server import MCPServerRuntime  # noqa: PLC0415
-    from music_assistant.providers.fastmcp_server.tags import Tag  # noqa: PLC0415
 
     async def unmount() -> None:
         return None
@@ -84,7 +84,7 @@ async def test_runtime_metadata_advertises_all_stable_capabilities(
         await_args = well_known.await_args
         assert await_args is not None
         kwargs = await_args.kwargs
-        assert set(kwargs["scopes_supported"]()) == {str(capability) for capability in Tag}
+        assert set(kwargs["scopes_supported"]()) == {str(capability) for capability in Capability}
         assert len(kwargs["scopes_supported"]()) == 26
     finally:
         await runtime.stop()

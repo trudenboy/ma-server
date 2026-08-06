@@ -17,6 +17,7 @@ from music_assistant_models.auth import Scope, User, UserRole
 from music_assistant_models.errors import AuthenticationRequired, InsufficientPermissions
 
 from music_assistant.helpers.api import APICommandHandler, parse_arguments
+from music_assistant.providers.fastmcp_server.capabilities import Capability
 from music_assistant.providers.fastmcp_server.commands import ProviderCommandSet, authorization
 from music_assistant.providers.fastmcp_server.commands import debug as debug_commands
 from music_assistant.providers.fastmcp_server.commands import queue as queue_commands
@@ -24,11 +25,6 @@ from music_assistant.providers.fastmcp_server.commands import registry as comman
 from music_assistant.providers.fastmcp_server.commands.authorization import (
     authorize_extension,
     scope_allowed,
-)
-from music_assistant.providers.fastmcp_server.config import (
-    policy_mode_key,
-    policy_token_suffix,
-    token_policy_key,
 )
 from music_assistant.providers.fastmcp_server.constants import (
     CONF_DEFAULT_POLICY,
@@ -54,7 +50,11 @@ from music_assistant.providers.fastmcp_server.policy import (
     PolicySnapshot,
     policy_snapshot,
 )
-from music_assistant.providers.fastmcp_server.tags import Tag
+from music_assistant.providers.fastmcp_server.policy_config import (
+    policy_mode_key,
+    policy_token_suffix,
+    token_policy_key,
+)
 from music_assistant.providers.fastmcp_server.token_identity import TokenIdentity
 
 if TYPE_CHECKING:
@@ -131,10 +131,10 @@ class CommandRegistry:
         return unsubscribe
 
 
-def _config(*enabled: Tag) -> MagicMock:
+def _config(*enabled: Capability) -> MagicMock:
     config = MagicMock()
     values: dict[str, object] = {CONF_DEFAULT_POLICY: "Custom"}
-    values.update({policy_mode_key(tag): "allow" for tag in enabled})
+    values.update({policy_mode_key(capability): "allow" for capability in enabled})
     config.get_value.side_effect = lambda key, default=None: values.get(key, default)
     return config
 
@@ -147,14 +147,18 @@ def test_authorization_rejects_missing_and_disabled_users(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every native handler requires a present, enabled MA user."""
-    config = _config(Tag.DEBUG_LOGS)
+    config = _config(Capability.DEBUG_LOGS)
     monkeypatch.setattr(authorization, "get_current_user", lambda: None)
     with pytest.raises(AuthenticationRequired, match="enabled Music Assistant user"):
-        authorize_extension(config, required_scope="system.read", required_tag=str(Tag.DEBUG_LOGS))
+        authorize_extension(
+            config, required_scope="system.read", required_capability=str(Capability.DEBUG_LOGS)
+        )
 
     monkeypatch.setattr(authorization, "get_current_user", lambda: _user(enabled=False))
     with pytest.raises(AuthenticationRequired, match="enabled Music Assistant user"):
-        authorize_extension(config, required_scope="system.read", required_tag=str(Tag.DEBUG_LOGS))
+        authorize_extension(
+            config, required_scope="system.read", required_capability=str(Capability.DEBUG_LOGS)
+        )
 
 
 def test_authorization_rejects_wrong_scope_and_disabled_provider_tag(
@@ -165,9 +169,9 @@ def test_authorization_rejects_wrong_scope_and_disabled_provider_tag(
     monkeypatch.setattr(authorization, "get_current_user", lambda: _user(UserRole.USER))
     with pytest.raises(InsufficientPermissions, match=r"system\.read"):
         authorize_extension(
-            _config(Tag.DEBUG_LOGS),
+            _config(Capability.DEBUG_LOGS),
             required_scope="system.read",
-            required_tag=str(Tag.DEBUG_LOGS),
+            required_capability=str(Capability.DEBUG_LOGS),
         )
 
     monkeypatch.setattr(authorization, "get_current_user", lambda: _user())
@@ -176,7 +180,8 @@ def test_authorization_rejects_wrong_scope_and_disabled_provider_tag(
         authorize_extension(
             _config(),
             required_scope="system.read",
-            required_tag=str(Tag.DEBUG_LOGS),
+            required_capability=str(Capability.DEBUG_LOGS),
+            policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.CUSTOM),
         )
 
 
@@ -220,7 +225,14 @@ def test_scope_allowed_rejects_unknown_scopes_without_calling_ma(
 def test_start_registers_exact_command_set_with_native_scopes() -> None:
     """No legacy or duplicate command leaks into MA's registry."""
     mass = CommandRegistry()
-    command_set = ProviderCommandSet(mass, _config(*Tag))
+    command_set = ProviderCommandSet(
+        mass,
+        _config(*Capability),
+        policy_provider=lambda _bearer: policy_snapshot(
+            PolicyProfile.CUSTOM,
+            dict.fromkeys(Capability, PolicyMode.ALLOW),
+        ),
+    )
 
     command_set.start()
 
@@ -239,7 +251,11 @@ def test_registration_uses_current_ma_contract_without_signature_reflection(
     monkeypatch.setattr(command_registry, "inspect", reflection, raising=False)
     mass = CommandRegistry()
 
-    ProviderCommandSet(mass, _config(*Tag)).start()
+    ProviderCommandSet(
+        mass,
+        _config(*Capability),
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    ).start()
 
     assert all(options["required_scope"] is not None for options in mass.options.values())
 
@@ -249,7 +265,14 @@ async def test_registered_handlers_keep_native_parseable_signatures_and_result_t
 ) -> None:
     """MA's command parser and catalog compiler retain all native command contracts."""
     mass = CommandRegistry()
-    command_set = ProviderCommandSet(mass, _config(*Tag))
+    command_set = ProviderCommandSet(
+        mass,
+        _config(*Capability),
+        policy_provider=lambda _bearer: policy_snapshot(
+            PolicyProfile.CUSTOM,
+            dict.fromkeys(Capability, PolicyMode.ALLOW),
+        ),
+    )
     command_set.start()
 
     expected_returns = {
@@ -331,6 +354,7 @@ async def test_registered_handlers_keep_native_parseable_signatures_and_result_t
 
     monkeypatch.setattr(authorization, "has_scope", lambda _user, _scope: True, raising=False)
     monkeypatch.setattr(authorization, "get_current_user", lambda: _user())
+    monkeypatch.setattr(authorization, "get_current_token", lambda: "request-token")
     plain_tail = AsyncMock(
         return_value=LogTailResult(log_path="x", lines=[], bytes_scanned=0, truncated=False)
     )
@@ -343,7 +367,11 @@ async def test_registered_handlers_keep_native_parseable_signatures_and_result_t
 def test_partial_start_rolls_back_in_reverse_and_can_retry() -> None:
     """A failed start leaves no duplicates and unregisters in LIFO order."""
     mass = CommandRegistry(fail_at=3)
-    command_set = ProviderCommandSet(mass, _config(*Tag))
+    command_set = ProviderCommandSet(
+        mass,
+        _config(*Capability),
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
 
     with pytest.raises(RuntimeError, match="registration failed"):
         command_set.start()
@@ -362,7 +390,11 @@ def test_partial_start_rolls_back_in_reverse_and_can_retry() -> None:
 def test_subscription_failure_rolls_back_commands_and_allows_retry() -> None:
     """Event capture is part of the same all-or-nothing startup transaction."""
     mass = CommandRegistry(subscribe_error=RuntimeError("event bus offline"))
-    command_set = ProviderCommandSet(mass, _config(*Tag))
+    command_set = ProviderCommandSet(
+        mass,
+        _config(*Capability),
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
 
     with pytest.raises(RuntimeError, match="event bus offline"):
         command_set.start()
@@ -384,7 +416,7 @@ async def test_provider_debug_guard_uses_exact_request_policy_not_global_config(
         "deny": policy_snapshot(PolicyProfile.READ_ONLY),
         "allow": policy_snapshot(
             PolicyProfile.CUSTOM,
-            {Tag.DEBUG_PROVIDERS: PolicyMode.ALLOW},
+            {Capability.DEBUG_PROVIDERS: PolicyMode.ALLOW},
         ),
     }
     current = ["deny"]
@@ -395,7 +427,7 @@ async def test_provider_debug_guard_uses_exact_request_policy_not_global_config(
 
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DEBUG_PROVIDERS),
+        _config(Capability.DEBUG_PROVIDERS),
         policy_provider=request_policy,
     )
     command_set.start()
@@ -428,11 +460,11 @@ async def test_provider_owned_privileged_execution_audits_once_without_payloads(
     records: list[Any] = []
     policy = policy_snapshot(
         PolicyProfile.CUSTOM,
-        {Tag.DELETE_QUEUE: PolicyMode.ALLOW},
+        {Capability.DELETE_QUEUE: PolicyMode.ALLOW},
     )
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DELETE_QUEUE),
+        _config(Capability.DELETE_QUEUE),
         policy_provider=lambda _bearer: policy,
         audit_sink=records.append,
         audit_client_id_provider=lambda _bearer: "exact-token-id",
@@ -511,11 +543,11 @@ async def test_dynamic_provider_execution_is_not_double_counted(
     user = _user()
     policy = policy_snapshot(
         PolicyProfile.CUSTOM,
-        {Tag.DELETE_QUEUE: PolicyMode.ALLOW},
+        {Capability.DELETE_QUEUE: PolicyMode.ALLOW},
     )
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DELETE_QUEUE),
+        _config(Capability.DELETE_QUEUE),
         policy_provider=lambda _bearer: policy,
         audit_sink=records.append,
         audit_client_id_provider=lambda _bearer: "token-id",
@@ -540,6 +572,7 @@ async def test_dynamic_provider_execution_is_not_double_counted(
         auth_required_provider=lambda: True,
         token_provider=lambda: AccessToken(token="bearer", client_id="token-id", scopes=[]),
         policy_provider=lambda _bearer: policy,
+        default_policy_provider=lambda: policy,
         identity_provider=lambda _bearer: TokenIdentity("u1", "token-id"),
         audit_sink=records.append,
     )
@@ -563,11 +596,11 @@ async def test_debug_health_uses_request_policy_for_optional_log_diagnostics(
     mass = CommandRegistry()
     policy = policy_snapshot(
         PolicyProfile.CUSTOM,
-        {Tag.DEBUG_PROVIDERS: PolicyMode.ALLOW},
+        {Capability.DEBUG_PROVIDERS: PolicyMode.ALLOW},
     )
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DEBUG_PROVIDERS, Tag.DEBUG_LOGS),
+        _config(Capability.DEBUG_PROVIDERS, Capability.DEBUG_LOGS),
         policy_provider=lambda _bearer: policy,
     )
     command_set.start()
@@ -592,11 +625,11 @@ async def test_direct_provider_confirm_requires_dispatcher_confirmation_context(
     mass = CommandRegistry()
     policy = policy_snapshot(
         PolicyProfile.CUSTOM,
-        {Tag.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
+        {Capability.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
     )
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DEBUG_PROVIDERS),
+        _config(Capability.DEBUG_PROVIDERS),
         policy_provider=lambda _bearer: policy,
     )
     command_set.start()
@@ -625,7 +658,7 @@ async def test_auth_off_provider_command_uses_global_default_without_request_ide
     policies = [
         policy_snapshot(
             PolicyProfile.CUSTOM,
-            {Tag.DEBUG_PROVIDERS: PolicyMode.ALLOW},
+            {Capability.DEBUG_PROVIDERS: PolicyMode.ALLOW},
         )
     ]
     command_set = ProviderCommandSet(
@@ -655,11 +688,11 @@ async def test_dispatcher_confirmation_context_is_scoped_and_not_remembered(
     user = _user()
     policy = policy_snapshot(
         PolicyProfile.CUSTOM,
-        {Tag.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
+        {Capability.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
     )
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DEBUG_PROVIDERS),
+        _config(Capability.DEBUG_PROVIDERS),
         policy_provider=lambda _bearer: policy,
     )
     command_set.start()
@@ -678,6 +711,7 @@ async def test_dispatcher_confirmation_context_is_scoped_and_not_remembered(
         auth_required_provider=lambda: True,
         token_provider=lambda: token,
         policy_provider=lambda _bearer: policy,
+        default_policy_provider=lambda: policy,
         identity_provider=lambda _bearer: TokenIdentity("u1", "token-id"),
     )
     ctx = SimpleNamespace(
@@ -709,11 +743,11 @@ async def test_dispatcher_confirmation_rejects_copied_child_tasks(
     user = _user()
     policy = policy_snapshot(
         PolicyProfile.CUSTOM,
-        {Tag.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
+        {Capability.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
     )
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DEBUG_PROVIDERS),
+        _config(Capability.DEBUG_PROVIDERS),
         policy_provider=lambda _bearer: policy,
     )
     command_set.start()
@@ -731,6 +765,7 @@ async def test_dispatcher_confirmation_rejects_copied_child_tasks(
         auth_required_provider=lambda: True,
         token_provider=lambda: AccessToken(token="bearer", client_id="token-id", scopes=[]),
         policy_provider=lambda _bearer: policy,
+        default_policy_provider=lambda: policy,
         identity_provider=lambda _bearer: TokenIdentity("u1", "token-id"),
     )
     release_delayed = asyncio.Event()
@@ -781,11 +816,11 @@ async def test_dispatcher_confirmation_revokes_copied_context_when_handler_raise
     user = _user()
     policy = policy_snapshot(
         PolicyProfile.CUSTOM,
-        {Tag.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
+        {Capability.DEBUG_PROVIDERS: PolicyMode.CONFIRM},
     )
     command_set = ProviderCommandSet(
         mass,
-        _config(Tag.DEBUG_PROVIDERS),
+        _config(Capability.DEBUG_PROVIDERS),
         policy_provider=lambda _bearer: policy,
     )
     command_set.start()
@@ -803,6 +838,7 @@ async def test_dispatcher_confirmation_revokes_copied_context_when_handler_raise
         auth_required_provider=lambda: True,
         token_provider=lambda: AccessToken(token="bearer", client_id="token-id", scopes=[]),
         policy_provider=lambda _bearer: policy,
+        default_policy_provider=lambda: policy,
         identity_provider=lambda _bearer: TokenIdentity("u1", "token-id"),
     )
     release_child = asyncio.Event()
@@ -825,7 +861,7 @@ async def test_dispatcher_confirmation_revokes_copied_context_when_handler_raise
         elicit=AsyncMock(return_value=SimpleNamespace(action="accept", data=True))
     )
 
-    with pytest.raises(ToolError, match="provider handler failed"):
+    with pytest.raises(ToolError, match=r"\[execution_failed\]"):
         await adapter.call(
             f"ma_api:{command}",
             {},
@@ -844,14 +880,18 @@ def test_event_buffer_survives_event_hot_toggles_and_resizes_before_restart() ->
     """The command owner retains one buffer until a non-hot capacity change replaces it."""
     mass = CommandRegistry()
     disabled = _config()
-    command_set = ProviderCommandSet(mass, disabled)
+    command_set = ProviderCommandSet(
+        mass,
+        disabled,
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
 
     command_set.start()
     buffer = command_set.event_buffer
     assert buffer is not None
     assert mass.subscribed == 0
 
-    command_set.update_config(_config(Tag.DEBUG_EVENTS))
+    command_set.update_config(_config(Capability.DEBUG_EVENTS))
     assert command_set.event_buffer is buffer
     assert mass.subscribed == 1
 
@@ -859,14 +899,14 @@ def test_event_buffer_survives_event_hot_toggles_and_resizes_before_restart() ->
     assert command_set.event_buffer is buffer
     assert mass.unsubscribed == 1
 
-    command_set.update_config(_config(Tag.DEBUG_EVENTS))
+    command_set.update_config(_config(Capability.DEBUG_EVENTS))
     assert command_set.event_buffer is buffer
     assert mass.subscribed == 2
 
-    resized = _config(Tag.DEBUG_EVENTS)
+    resized = _config(Capability.DEBUG_EVENTS)
     resized.get_value.side_effect = lambda key, default=None: {
         CONF_DEFAULT_POLICY: "Custom",
-        policy_mode_key(Tag.DEBUG_EVENTS): "allow",
+        policy_mode_key(Capability.DEBUG_EVENTS): "allow",
         "debug_event_buffer_capacity": 250,
     }.get(key, default)
     command_set.update_config(resized)
@@ -889,12 +929,16 @@ def test_manual_token_policy_activates_event_buffer() -> None:
         CONF_DEFAULT_POLICY: "Read-only",
         CONF_MANUAL_TOKEN_IDS: [token_id],
         token_policy_key(token_id): "Custom",
-        policy_mode_key(Tag.DEBUG_EVENTS, token_id): "confirm",
+        policy_mode_key(Capability.DEBUG_EVENTS, token_id): "confirm",
         "debug_event_buffer_capacity": 100,
     }
     config = MagicMock()
     config.get_value.side_effect = lambda key, default=None: values.get(key, default)
-    command_set = ProviderCommandSet(mass, config)
+    command_set = ProviderCommandSet(
+        mass,
+        config,
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
 
     command_set.start()
 
@@ -908,12 +952,16 @@ def test_authenticated_discovered_token_policy_activates_event_buffer() -> None:
     values = {
         CONF_DEFAULT_POLICY: "Read-only",
         token_policy_key(token_id): "Custom",
-        policy_mode_key(Tag.DEBUG_EVENTS, token_id): "allow",
+        policy_mode_key(Capability.DEBUG_EVENTS, token_id): "allow",
         "debug_event_buffer_capacity": 100,
     }
     config = MagicMock()
     config.get_value.side_effect = lambda key, default=None: values.get(key, default)
-    command_set = ProviderCommandSet(mass, config)
+    command_set = ProviderCommandSet(
+        mass,
+        config,
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
     command_set.start()
 
     command_set.update_config(config, active_token_ids={token_id})
@@ -938,14 +986,18 @@ def test_hashed_token_override_hot_update_activates_event_buffer_without_identit
         if debug_mode is not None:
             values[CONF_POLICY_TOKEN_SUFFIXES] = [policy_token_suffix(token_id)]
             values[token_policy_key(token_id)] = "Custom"
-            values[policy_mode_key(Tag.DEBUG_EVENTS, token_id)] = debug_mode
+            values[policy_mode_key(Capability.DEBUG_EVENTS, token_id)] = debug_mode
         config = MagicMock()
         config.get_value.side_effect = lambda key, default=None: values.get(key, default)
         config.values = {key: SimpleNamespace(value=value) for key, value in values.items()}
         return config
 
     disabled = configured(None)
-    command_set = ProviderCommandSet(mass, disabled)
+    command_set = ProviderCommandSet(
+        mass,
+        disabled,
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
     command_set.start()
     assert mass.subscribed == 0
 
@@ -957,7 +1009,11 @@ def test_hashed_token_override_hot_update_activates_event_buffer_without_identit
 def test_stop_attempts_all_unregistrations_then_raises_first_error() -> None:
     """A bad unregister callback cannot leave later commands registered forever."""
     mass = CommandRegistry()
-    command_set = ProviderCommandSet(mass, _config(*Tag))
+    command_set = ProviderCommandSet(
+        mass,
+        _config(*Capability),
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
     command_set.start()
     original = command_set._unregister[-2]
 

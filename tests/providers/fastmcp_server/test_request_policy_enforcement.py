@@ -19,6 +19,7 @@ from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ConfigEntryType
 
 from music_assistant.providers.fastmcp_server.auth import LOOKUP_FAILURE_CLIENT_ID
+from music_assistant.providers.fastmcp_server.capabilities import Capability
 from music_assistant.providers.fastmcp_server.dynamic_api import DynamicAPIAdapter
 from music_assistant.providers.fastmcp_server.meta_discovery import MetaDiscoveryService
 from music_assistant.providers.fastmcp_server.middleware import TagFilterMiddleware
@@ -29,7 +30,6 @@ from music_assistant.providers.fastmcp_server.policy import (
     policy_snapshot,
 )
 from music_assistant.providers.fastmcp_server.server import build_tag_lookup
-from music_assistant.providers.fastmcp_server.tags import Tag
 from music_assistant.providers.fastmcp_server.token_identity import TokenIdentity
 
 
@@ -89,6 +89,7 @@ def _adapter(
         token_provider=lambda: current_token[0],
         scope_checker=lambda _user, _scope: True,
         policy_provider=lambda bearer: policies[bearer],
+        default_policy_provider=lambda: next(iter(policies.values())),
         identity_provider=lambda _bearer: TokenIdentity("same-user", current_token[0].client_id),
         audit_sink=audit_sink,
     )
@@ -384,7 +385,7 @@ async def test_confirmation_decline_and_unsupported_errors_are_exact_and_actiona
     declined = SimpleNamespace(
         elicit=AsyncMock(return_value=SimpleNamespace(action="decline", data=False))
     )
-    with pytest.raises(ToolError, match=r"^Operation cancelled by user$"):
+    with pytest.raises(ToolError, match=r"\[operation_cancelled\]"):
         await adapter.call(
             "ma_api:music/search",
             {},
@@ -497,13 +498,12 @@ async def test_resource_confirm_is_hidden_and_direct_reads_follow_policy_changes
     policy = [_custom(query__library=PolicyMode.ALLOW)]
     mcp: FastMCP = FastMCP(name="resource-policy")
 
-    @mcp.resource("library://track/{track_id}", tags={Tag.QUERY_LIBRARY})  # type: ignore[untyped-decorator, unused-ignore]
+    @mcp.resource("library://track/{track_id}", tags={Capability.QUERY_LIBRARY})  # type: ignore[untyped-decorator, unused-ignore]
     async def track(track_id: str) -> str:
         return track_id
 
     mcp.add_middleware(
         TagFilterMiddleware(
-            lambda: {str(Tag.QUERY_LIBRARY)},
             build_tag_lookup(mcp),
             policy_provider=lambda: policy[0],
         )
@@ -620,7 +620,7 @@ async def test_policy_revoked_during_preflight_is_rechecked_before_confirmation(
         )
     assert called is False
     assert len(records) == 1
-    assert records[0].capability == str(Tag.CONFIG_WRITE_SECRET)
+    assert records[0].capability == str(Capability.CONFIG_WRITE_SECRET)
     assert records[0].mode == "deny"
 
 
@@ -673,7 +673,7 @@ async def test_secure_category_changed_during_final_auth_is_recomputed_and_audit
         ]
 
     adapter.mass.config.get_provider_config_entries = live_entries
-    with pytest.raises(ToolError, match="config:write:secret"):
+    with pytest.raises(ToolError, match=r"\[not_found_or_forbidden\]"):
         await adapter.call(
             "ma_api:config/providers/save",
             {
@@ -688,7 +688,7 @@ async def test_secure_category_changed_during_final_auth_is_recomputed_and_audit
         )
     assert called is False
     assert len(records) == 1
-    assert records[0].capability == str(Tag.CONFIG_WRITE_SECRET)
+    assert records[0].capability == str(Capability.CONFIG_WRITE_SECRET)
     assert records[0].mode == "deny"
     assert "must-not-appear" not in repr(records)
 
@@ -730,7 +730,7 @@ async def test_setup_flow_category_changed_during_final_auth_is_recomputed() -> 
     adapter.mass.config.get_setup_flow_required_scope = lambda _flow_id: flow_scope
     adapter.mass.config.get_setup_flow = lambda _flow_id: SimpleNamespace(entries=[])
 
-    with pytest.raises(ToolError, match="config:write:player"):
+    with pytest.raises(ToolError, match=r"\[not_found_or_forbidden\]"):
         await adapter.call(
             "ma_api:config/flows/submit",
             {"flow_id": "flow-secret", "values": {}},
@@ -741,7 +741,7 @@ async def test_setup_flow_category_changed_during_final_auth_is_recomputed() -> 
         )
     assert called is False
     assert len(records) == 1
-    assert records[0].capability == str(Tag.CONFIG_WRITE_PLAYER)
+    assert records[0].capability == str(Capability.CONFIG_WRITE_PLAYER)
     assert "flow-secret" not in repr(records)
 
 
@@ -956,7 +956,7 @@ async def test_impersonation_target_is_fresh_after_final_preflight(
     if permitted:
         await call
     else:
-        with pytest.raises(ToolError, match="Unable to impersonate requested user"):
+        with pytest.raises(ToolError, match=r"\[execution_failed\]"):
             await call
     assert inspections == 3
     assert resolutions == 3
@@ -1236,7 +1236,7 @@ async def test_final_impersonation_authority_uses_final_caller_and_target_identi
     if permitted:
         await call
     else:
-        with pytest.raises(ToolError, match="Unable to impersonate requested user"):
+        with pytest.raises(ToolError, match=r"\[execution_failed\]"):
             await call
     assert resolutions == 3
     assert called is permitted
@@ -1288,7 +1288,7 @@ async def test_final_revalidation_cannot_reuse_confirmation_for_a_new_capability
         elicit=AsyncMock(return_value=SimpleNamespace(action="accept", data=True))
     )
 
-    with pytest.raises(ToolError, match="retry the operation"):
+    with pytest.raises(ToolError, match=r"\[confirmation_required\]"):
         await adapter.call(
             "ma_api:config/providers/save",
             {
@@ -1310,20 +1310,20 @@ async def test_final_revalidation_cannot_reuse_confirmation_for_a_new_capability
     [
         (
             "config.providers.write",
-            Tag.CONFIG_WRITE_PLAYER,
-            Tag.CONFIG_WRITE_PROVIDER,
+            Capability.CONFIG_WRITE_PLAYER,
+            Capability.CONFIG_WRITE_PROVIDER,
         ),
         (
             "config.players.write",
-            Tag.CONFIG_WRITE_PROVIDER,
-            Tag.CONFIG_WRITE_PLAYER,
+            Capability.CONFIG_WRITE_PROVIDER,
+            Capability.CONFIG_WRITE_PLAYER,
         ),
     ],
 )
 async def test_flow_abort_requires_its_exact_category(
     flow_scope: str,
-    allowed_capability: Tag,
-    denied_capability: Tag,
+    allowed_capability: Capability,
+    denied_capability: Capability,
 ) -> None:
     """One allowed config category cannot abort a flow owned by the other."""
     called = False
@@ -1348,7 +1348,7 @@ async def test_flow_abort_requires_its_exact_category(
     )
     adapter.mass.config.get_setup_flow_required_scope = lambda _flow_id: flow_scope
 
-    with pytest.raises(ToolError, match=str(denied_capability)):
+    with pytest.raises(ToolError, match=r"\[not_found_or_forbidden\]"):
         await adapter.call(
             "ma_api:config/flows/abort",
             {"flow_id": "flow-1"},
@@ -1381,6 +1381,7 @@ async def test_auth_off_uses_global_default_for_discovery_schema_and_execution()
         auth_required_provider=lambda: False,
         token_provider=lambda: None,
         scope_checker=lambda _user, _scope: True,
+        policy_provider=lambda _bearer: default[0],
         default_policy_provider=lambda: default[0],
     )
     service = MetaDiscoveryService(adapter)

@@ -17,7 +17,7 @@ from music_assistant.providers.fastmcp_server.dynamic_signatures import (
     UnsupportedSignatureError,
     compile_signature,
 )
-from music_assistant.providers.fastmcp_server.tags import Tag
+from music_assistant.providers.fastmcp_server.policy import PolicyProfile, policy_snapshot
 
 
 async def library_items(
@@ -75,7 +75,8 @@ def _adapter(handler: Any) -> DynamicAPIAdapter:
         auth_required_provider=lambda: True,
         token_provider=lambda: AccessToken(token="secret", client_id="u1", scopes=[]),
         scope_checker=lambda _user, _scope: True,
-        allowed_tags_provider=lambda: {str(Tag.QUERY_LIBRARY)},
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.READ_ONLY),
+        default_policy_provider=lambda: policy_snapshot(PolicyProfile.READ_ONLY),
     )
 
 

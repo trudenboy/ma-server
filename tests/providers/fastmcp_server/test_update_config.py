@@ -26,17 +26,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from music_assistant.providers.fastmcp_server.capabilities import Capability
 from music_assistant.providers.fastmcp_server.commands import ProviderCommandSet
-from music_assistant.providers.fastmcp_server.config import (
-    policy_mode_key,
-    policy_token_suffix,
-    token_policy_key,
-)
 from music_assistant.providers.fastmcp_server.constants import (
     CONF_DEFAULT_POLICY,
     CONF_POLICY_TOKEN_SUFFIXES,
 )
-from music_assistant.providers.fastmcp_server.tags import Tag
+from music_assistant.providers.fastmcp_server.policy import PolicyProfile, policy_snapshot
+from music_assistant.providers.fastmcp_server.policy_config import (
+    policy_mode_key,
+    policy_token_suffix,
+    token_policy_key,
+)
 
 
 # Install the stub BEFORE the ``provider.provider`` import below. ``setdefault``
@@ -117,7 +118,7 @@ def _provider_with_mock_runtime(mock_mass: MagicMock, mock_config: MagicMock) ->
     provider.config = mock_config
     provider.logger = logging.getLogger("t")
     provider._runtime = MagicMock()
-    provider._runtime.apply_permission_change = AsyncMock()
+    provider._runtime.apply_config_change = AsyncMock()
     provider._runtime.stop = AsyncMock()
     provider._runtime.start = AsyncMock()
     return provider
@@ -159,14 +160,14 @@ async def test_token_policy_hot_update_persists_non_secret_suffix_index(
 async def test_hot_swappable_change_takes_hot_swap_path(
     mock_mass: MagicMock, mock_config: MagicMock
 ) -> None:
-    """All-permission changed_keys → ``apply_permission_change`` path."""
+    """All-permission changed_keys → ``apply_config_change`` path."""
     provider = _provider_with_mock_runtime(mock_mass, mock_config)
     new_config = MagicMock()
 
     await provider.update_config(new_config, changed_keys={"values/policy_default"})
 
-    provider._runtime.apply_permission_change.assert_awaited_once()
-    args, _ = provider._runtime.apply_permission_change.call_args
+    provider._runtime.apply_config_change.assert_awaited_once()
+    args, _ = provider._runtime.apply_config_change.call_args
     assert args[0] is new_config
     # The provider strips the ``values/`` prefix before forwarding.
     assert args[1] == {"policy_default"}
@@ -196,7 +197,7 @@ async def test_non_hot_swappable_change_triggers_full_restart(
 
     # Old runtime stopped, new one built + started, hot-swap NOT called.
     original_runtime.stop.assert_awaited_once()
-    original_runtime.apply_permission_change.assert_not_awaited()
+    original_runtime.apply_config_change.assert_not_awaited()
     factory.assert_called_once_with(
         mock_mass,
         new_config,
@@ -219,7 +220,7 @@ async def test_runtime_replacement_preserves_raw_event_buffer_override(
         CONF_DEFAULT_POLICY: "Read-only",
         CONF_POLICY_TOKEN_SUFFIXES: [policy_token_suffix(token_id)],
         token_policy_key(token_id): "Custom",
-        policy_mode_key(Tag.DEBUG_EVENTS, token_id): "allow",
+        policy_mode_key(Capability.DEBUG_EVENTS, token_id): "allow",
         "debug_event_buffer_capacity": 100,
     }
 
@@ -234,7 +235,11 @@ async def test_runtime_replacement_preserves_raw_event_buffer_override(
     unsubscribe = MagicMock()
     mock_mass.subscribe = MagicMock(return_value=unsubscribe)
     mock_mass.register_api_command = MagicMock(return_value=MagicMock())
-    commands = ProviderCommandSet(mock_mass, old_config)
+    commands = ProviderCommandSet(
+        mock_mass,
+        old_config,
+        policy_provider=lambda _bearer: policy_snapshot(PolicyProfile.TRUSTED),
+    )
     commands.start()
     commands.update_config(old_config, active_token_ids={token_id})
     assert mock_mass.subscribe.call_count == 1
@@ -293,8 +298,8 @@ async def test_values_prefix_stripped_off_every_key(
         },
     )
 
-    provider._runtime.apply_permission_change.assert_awaited_once()
-    forwarded_keys = provider._runtime.apply_permission_change.call_args.args[1]
+    provider._runtime.apply_config_change.assert_awaited_once()
+    forwarded_keys = provider._runtime.apply_config_change.call_args.args[1]
     assert forwarded_keys == {
         "policy_default",
         "policy_mode_edit_queue",

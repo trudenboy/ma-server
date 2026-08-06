@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 
+from music_assistant.providers.fastmcp_server.capabilities import Capability
 from music_assistant.providers.fastmcp_server.policy import (
     PolicyMode,
     PolicyProfile,
@@ -14,7 +15,6 @@ from music_assistant.providers.fastmcp_server.policy import (
     combine_policy_modes,
     policy_snapshot,
 )
-from music_assistant.providers.fastmcp_server.tags import Tag
 
 _CAPABILITIES = (
     "query:library",
@@ -48,7 +48,7 @@ _CAPABILITIES = (
 
 def test_capability_vocabulary_is_the_stable_26_value_snapshot() -> None:
     """A missing, renamed, or reordered public capability breaks the v2 schema."""
-    assert tuple(map(str, Tag)) == _CAPABILITIES
+    assert tuple(map(str, Capability)) == _CAPABILITIES
 
 
 @pytest.mark.parametrize(

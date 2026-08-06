@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from music_assistant.providers.fastmcp_server.auth import LOOKUP_FAILURE_CLIENT_ID, MASTokenVerifier
+from music_assistant.providers.fastmcp_server.capabilities import Capability
 from music_assistant.providers.fastmcp_server.policy import (
     PolicyMode,
     PolicyProfile,
     PolicyResolver,
     PolicySelection,
 )
-from music_assistant.providers.fastmcp_server.tags import Tag
 from music_assistant.providers.fastmcp_server.token_identity import (
     AuthenticatedPolicyResolver,
     TokenIdentityRegistry,
@@ -150,5 +150,5 @@ def test_authenticated_policy_resolution_distinguishes_legacy_and_lookup_failure
     assert resolver.resolve("known").profile is PolicyProfile.HOME_CONTROL
     failed = resolver.resolve("lookup-failed")
     assert failed.profile is PolicyProfile.READ_ONLY
-    assert failed.mode(Tag.QUERY_LIBRARY) is PolicyMode.ALLOW
-    assert failed.mode(Tag.CONTROL_PLAYBACK) is PolicyMode.DENY
+    assert failed.mode(Capability.QUERY_LIBRARY) is PolicyMode.ALLOW
+    assert failed.mode(Capability.CONTROL_PLAYBACK) is PolicyMode.DENY

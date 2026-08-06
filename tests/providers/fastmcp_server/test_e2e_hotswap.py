@@ -11,15 +11,14 @@ import pytest
 from fastmcp import Client, FastMCP
 from mcp.shared.exceptions import McpError
 
-from music_assistant.providers.fastmcp_server.config import policy_mode_key
+from music_assistant.providers.fastmcp_server.capabilities import Capability
 from music_assistant.providers.fastmcp_server.constants import (
     CONF_DEFAULT_POLICY,
     CONF_REQUIRE_AUTH,
 )
-from music_assistant.providers.fastmcp_server.middleware import TagFilterMiddleware
+from music_assistant.providers.fastmcp_server.policy_config import policy_mode_key
 from music_assistant.providers.fastmcp_server.resources import register_resources
-from music_assistant.providers.fastmcp_server.server import MCPServerRuntime, build_tag_lookup
-from music_assistant.providers.fastmcp_server.tags import Tag, enabled_tags
+from music_assistant.providers.fastmcp_server.server import MCPServerRuntime
 
 
 def _build_runtime_with_resources(
@@ -30,8 +29,7 @@ def _build_runtime_with_resources(
     mcp = FastMCP(name="hotswap-test")
     register_resources(mcp, mock_mass, mock_config)
     runtime._mcp = mcp
-    runtime._allowed_tags = {str(tag) for tag in enabled_tags(mock_config)}
-    mcp.add_middleware(TagFilterMiddleware(lambda: runtime._allowed_tags, build_tag_lookup(mcp)))
+    runtime._apply_tag_filter(mcp)
     return runtime, mcp
 
 
@@ -48,7 +46,7 @@ async def test_hot_swap_makes_disabled_resource_visible_without_restart(
         mock_config,
         **{
             CONF_DEFAULT_POLICY: "Custom",
-            policy_mode_key(Tag.QUERY_LIBRARY): "allow",
+            policy_mode_key(Capability.QUERY_LIBRARY): "allow",
         },
     )
     runtime, mcp = _build_runtime_with_resources(mock_mass, mock_config)
@@ -57,10 +55,10 @@ async def test_hot_swap_makes_disabled_resource_visible_without_restart(
         before = {template.uriTemplate for template in await client.list_resource_templates()}
     assert "player://{player_id}" not in before
 
-    _set_config_values(mock_config, **{policy_mode_key(Tag.QUERY_PLAYERS): "allow"})
-    await runtime.apply_permission_change(
+    _set_config_values(mock_config, **{policy_mode_key(Capability.QUERY_PLAYERS): "allow"})
+    await runtime.apply_config_change(
         mock_config,
-        changed_keys={policy_mode_key(Tag.QUERY_PLAYERS)},
+        changed_keys={policy_mode_key(Capability.QUERY_PLAYERS)},
     )
 
     async with Client(mcp) as client:
@@ -82,12 +80,12 @@ async def test_hot_swap_hides_previously_visible_resource(
         mock_config,
         **{
             CONF_DEFAULT_POLICY: "Custom",
-            policy_mode_key(Tag.QUERY_LIBRARY): "deny",
+            policy_mode_key(Capability.QUERY_LIBRARY): "deny",
         },
     )
-    await runtime.apply_permission_change(
+    await runtime.apply_config_change(
         mock_config,
-        changed_keys={policy_mode_key(Tag.QUERY_LIBRARY)},
+        changed_keys={policy_mode_key(Capability.QUERY_LIBRARY)},
     )
 
     async with Client(mcp) as client:
@@ -105,14 +103,14 @@ async def test_auth_off_runtime_resources_use_global_default_policy(
         **{
             CONF_REQUIRE_AUTH: False,
             CONF_DEFAULT_POLICY: "Custom",
-            policy_mode_key(Tag.QUERY_LIBRARY): "allow",
+            policy_mode_key(Capability.QUERY_LIBRARY): "allow",
         },
     )
     runtime = MCPServerRuntime(mock_mass, mock_config, logging.getLogger("t"))
     mcp = FastMCP(name="auth-off-resource-policy")
     register_resources(mcp, mock_mass, mock_config)
     runtime._mcp = mcp
-    runtime._apply_tag_filter(mcp, {Tag.QUERY_LIBRARY})
+    runtime._apply_tag_filter(mcp)
 
     async with Client(mcp) as client:
         await client.read_resource("library://track/17")
@@ -120,7 +118,7 @@ async def test_auth_off_runtime_resources_use_global_default_policy(
         for mode in ("deny", "confirm"):
             _set_config_values(
                 mock_config,
-                **{policy_mode_key(Tag.QUERY_LIBRARY): mode},
+                **{policy_mode_key(Capability.QUERY_LIBRARY): mode},
             )
             runtime._refresh_policy_resolver()
             templates = {
