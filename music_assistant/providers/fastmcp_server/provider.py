@@ -46,7 +46,16 @@ class MCPServerProvider(PluginProvider):  # type: ignore[misc, unused-ignore]
             DEFAULT_MOUNT_PATH,
         )
 
-    async def handle_config_action(self, action: str) -> tuple[ConfigEntry, ...] | None:
+        tokens = await current_user_mcp_tokens(self.mass)
+        return build_config_entries(
+            self.mass,
+            str(self.get_config_value(CONF_MOUNT_PATH, DEFAULT_MOUNT_PATH)),
+            tokens=tokens,
+            manual_token_ids=self.get_config_value(CONF_MANUAL_TOKEN_IDS, []) or (),
+            stored_value_provider=self._raw_policy_value,
+        )
+
+    async def handle_config_action(self, action: str) -> tuple[ConfigEntry, ...]:
         """Handle a one-shot config action button press and re-render the entries."""
         if action == "open_connect":
             from ._init_helpers import _dispatch_open_connect  # noqa: PLC0415
@@ -71,7 +80,7 @@ class MCPServerProvider(PluginProvider):  # type: ignore[misc, unused-ignore]
                     value=url,
                 ),
             )
-        return await super().handle_config_action(action)
+        return await super().handle_config_action(action) or ()
 
     async def handle_async_init(self) -> None:
         """Register MA commands, then build and start the FastMCP runtime."""
