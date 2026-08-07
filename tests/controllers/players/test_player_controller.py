@@ -367,6 +367,35 @@ class TestStateForwarding:
         )
         on_sync_parent_updated.assert_not_called()
 
+    def test_sync_leader_updates_also_reach_its_group_player(self, mock_mass: MagicMock) -> None:
+        """A sync leader must notify its group player as well as its own sync children."""
+        controller = PlayerController(mock_mass)
+        provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
+
+        group_player = MockPlayer(provider, "group", "Group", player_type=PlayerType.GROUP)
+        leader = MockPlayer(provider, "leader", "Leader")
+        follower = MockPlayer(provider, "follower", "Follower")
+
+        controller._players = {"group": group_player, "leader": leader, "follower": follower}
+        mock_mass.players = controller
+
+        group_player._attr_group_members = ["leader", "follower"]
+        leader._attr_group_members = ["leader", "follower"]
+        for player in (group_player, leader, follower):
+            # _get_player_groups only considers players the controller finished registering
+            player.initialized.set()
+            player.update_state(signal_event=False)
+
+        with (
+            patch.object(group_player, "on_group_member_updated") as on_group_member_updated,
+            patch.object(follower, "on_sync_parent_updated") as on_sync_parent_updated,
+        ):
+            changed_values = {"playback_state": (PlaybackState.IDLE, PlaybackState.PLAYING)}
+            controller._forward_state_update(leader, changed_values)
+
+        on_group_member_updated.assert_called_once_with(leader, changed_values)
+        on_sync_parent_updated.assert_called_once_with(leader, changed_values)
+
 
 class TestSleepTimer:
     """Test native sleep timer handling."""
@@ -1768,6 +1797,7 @@ class TestGroupMuteOnNonGroupPlayer:
                 PlayerFeature.VOLUME_SET,
                 PlayerFeature.VOLUME_MUTE,
             }
+            player._attr_volume_level = 50
             players[player_id] = player
         if members:
             # the leader is not listed as its own member here, so the tests also cover
@@ -1850,6 +1880,34 @@ class TestGroupMuteOnNonGroupPlayer:
         mutes["leader"].assert_awaited_once_with(False)
         mutes["member"].assert_awaited_once_with(False)
         assert ATTR_MUTE_LOCK not in players["member"].extra_data
+
+    async def test_group_mute_locks_the_sync_leader_too(self, mock_mass: MagicMock) -> None:
+        """A sync leader is as much part of the group as its members, so it is locked too."""
+        controller, players = self._setup(mock_mass, "member")
+        self._stub_mutes(players)
+
+        await controller.cmd_group_volume_mute("leader", True)
+
+        assert ATTR_MUTE_LOCK in players["leader"].extra_data
+        assert ATTR_MUTE_LOCK in players["member"].extra_data
+
+    async def test_group_volume_keeps_a_muted_sync_pair_muted(self, mock_mass: MagicMock) -> None:
+        """A group volume change may not half-unmute a muted pair of directly synced players."""
+        controller, players = self._setup(mock_mass, "member")
+        self._stub_mutes(players)
+        await controller.cmd_group_volume_mute("leader", True)
+        # the mock players do not act on the mute command, so reflect it in their state
+        for player in players.values():
+            player._attr_volume_muted = True
+            player.update_state(signal_event=False)
+            player.volume_set = AsyncMock()  # type: ignore[method-assign]
+        # re-stub so only the mute commands of the group volume change are counted
+        mutes = self._stub_mutes(players)
+
+        await controller.cmd_group_volume("leader", 30)
+
+        for mute in mutes.values():
+            mute.assert_not_awaited()
 
 
 class TestCurrentMediaTimeUpdates:
@@ -2337,6 +2395,32 @@ class TestRemovePlayerControl:
 
         assert controller.player_controls() == []
         mock_mass.loop.call_soon.assert_called_once_with(using_control.refresh_state)
+
+    async def test_a_returning_control_is_picked_back_up(self, mock_mass: MagicMock) -> None:
+        """Test that a control removed and registered again re-attaches to its player."""
+        # run the scheduled refresh straight away so each step is observable
+        mock_mass.loop = MagicMock()
+        mock_mass.loop.call_soon.side_effect = lambda callback, *args: callback(*args)
+        mock_mass.config.get_raw_player_config_value.side_effect = _player_config_stub(
+            {CONF_POWER_CONTROL: "switch.amp"}
+        )
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+        provider = MockProvider("test_provider", instance_id="test_prov", mass=mock_mass)
+        mock_mass.get_provider.return_value = provider
+        player = MockPlayer(provider, "player", "Player")
+        controller._players = {"player": player}
+        control = PlayerControl(id="switch.amp", provider="test_prov", name="Amp")
+
+        await controller.register_or_update_player_control(control)
+        assert player.state.power_control == "switch.amp"
+
+        # the Home Assistant plugin drops and re-registers its controls around a reload
+        controller.remove_player_control(control.id)
+        assert player.state.power_control == PLAYER_CONTROL_NONE
+
+        await controller.register_or_update_player_control(control)
+        assert player.state.power_control == "switch.amp"
 
     def test_removing_an_unknown_control_does_nothing(self, mock_mass: MagicMock) -> None:
         """Test that removing a control that was never registered is a no-op."""
