@@ -3501,7 +3501,149 @@ class YandexMusicProvider(MusicProvider):
                 self.logger.debug("Error parsing similar track: %s", err)
         return similar_tracks
 
-    @use_cache(600, allow_expired_cache=True)
+    @use_cache(3600 * 3, allow_expired_cache=True)
+    async def get_similar_artists(self, prov_artist_id: str, limit: int = 25) -> list[Artist]:
+        """
+        Get artists similar to the given one via Yandex artists/similar endpoint.
+
+        :param prov_artist_id: Provider artist ID.
+        :param limit: Maximum number of artists to return.
+        :return: List of similar Artist objects.
+        """
+        yandex_artists = await self.client.get_similar_artists(prov_artist_id, limit=limit)
+        artists: list[Artist] = []
+        for ya in yandex_artists:
+            try:
+                artists.append(parse_artist(self, ya))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing similar artist: %s", err)
+        return artists
+
+    async def get_recommendations(self) -> list[RecommendationFolder]:
+        """
+        Get the available recommendation rows, without items.
+
+        Returns My Wave, Made for You, Chart, New Releases, New Playlists,
+        Top Picks, Mood Mix, Activity Mix and Seasonal Mix rows.
+        """
+        # The seasonal row title carries the current season, derived locally from the month.
+        seasonal_tag = TAG_SEASONAL_MAP.get(utc().month, "autumn")
+        seasonal_name, _ = self._media_label(
+            "folder", _media_label_key(seasonal_tag), seasonal_tag.title()
+        )
+        return [
+            RecommendationFolder(
+                item_id=MY_WAVE_PLAYLIST_ID,
+                provider=self.instance_id,
+                name="My Wave",
+                translation_key=MY_WAVE_PLAYLIST_ID,
+                icon="mdi-waveform",
+            ),
+            RecommendationFolder(
+                item_id="feed",
+                provider=self.instance_id,
+                name="Made for You",
+                translation_key="feed",
+                icon="mdi-account-music",
+            ),
+            RecommendationFolder(
+                item_id="chart",
+                provider=self.instance_id,
+                name="Chart",
+                translation_key="chart",
+                icon="mdi-chart-line",
+            ),
+            RecommendationFolder(
+                item_id="new_releases",
+                provider=self.instance_id,
+                name="New Releases",
+                translation_key="new_releases",
+                icon="mdi-new-box",
+            ),
+            RecommendationFolder(
+                item_id="new_playlists",
+                provider=self.instance_id,
+                name="New Playlists",
+                translation_key="new_playlists",
+                icon="mdi-playlist-star",
+            ),
+            RecommendationFolder(
+                item_id="top_picks",
+                provider=self.instance_id,
+                name="Top Picks",
+                translation_key="top_picks",
+                icon="mdi-star",
+            ),
+            # Mood/Activity rows have a static title; the hourly rotating tag - derived
+            # deterministically, so the items call independently computes the same one -
+            # shows as the row subtitle (cache-only tag-list read, no backend I/O).
+            RecommendationFolder(
+                item_id="mood_mix",
+                provider=self.instance_id,
+                name="Mood Mix",
+                translation_key="mood_mix",
+                subtitle=await self._rotating_row_tag_subtitle("mood"),
+                icon="mdi-emoticon-outline",
+            ),
+            RecommendationFolder(
+                item_id="activity_mix",
+                provider=self.instance_id,
+                name="Activity Mix",
+                translation_key="activity_mix",
+                subtitle=await self._rotating_row_tag_subtitle("activity"),
+                icon="mdi-run",
+            ),
+            RecommendationFolder(
+                item_id="seasonal_mix",
+                provider=self.instance_id,
+                name=f"Seasonal: {seasonal_name}",
+                translation_key="seasonal_mix",
+                translation_params=[seasonal_name],
+                icon="mdi-weather-sunny",
+            ),
+        ]
+
+    async def get_recommendation_items(
+        self, item_id: str
+    ) -> UniqueList[MediaItemType | ItemMapping | BrowseFolder]:
+        """
+        Get the items for a single recommendation row.
+
+        :param item_id: The item_id of the row, as returned by get_recommendations.
+        """
+        folder: RecommendationFolder | None = None
+        if item_id == MY_WAVE_PLAYLIST_ID:
+            folder = await self._get_my_wave_recommendations()
+        elif item_id == "feed":
+            folder = await self._get_feed_recommendations()
+        elif item_id == "chart":
+            folder = await self._get_chart_recommendations()
+        elif item_id == "new_releases":
+            folder = await self._get_new_releases_recommendations()
+        elif item_id == "new_playlists":
+            folder = await self._get_new_playlists_recommendations()
+        elif item_id == "top_picks":
+            folder = await self._get_top_picks_recommendations()
+        elif item_id == "mood_mix":
+            # the deterministic hourly tag keeps the served items matching the row subtitle
+            if mood_tags := await self._get_valid_tags_for_category("mood"):
+                folder = await self._get_mood_mix_recommendations(
+                    self._rotating_row_tag("mood", mood_tags)
+                )
+        elif item_id == "activity_mix":
+            if activity_tags := await self._get_valid_tags_for_category("activity"):
+                folder = await self._get_activity_mix_recommendations(
+                    self._rotating_row_tag("activity", activity_tags)
+                )
+        elif item_id == "seasonal_mix":
+            folder = await self._get_seasonal_mix_recommendations()
+        if folder is None:
+            return UniqueList()
+        return folder.items
+
+    # single_flight=False: this advances the rotor cursor and establishes session state,
+    # so concurrent callers must each get their own batch instead of sharing one
+    @use_cache(600, allow_expired_cache=True, single_flight=False)
     async def _get_my_wave_recommendations(self) -> RecommendationFolder | None:
         """
         Get My Wave recommendation folder with personalized tracks.
@@ -3844,6 +3986,158 @@ class YandexMusicProvider(MusicProvider):
             items=UniqueList(items),
             icon="mdi-weather-sunny",
         )
+
+    # single_flight=False: the My Wave branch advances the rotor cursor and sends a one-shot
+    # "radioStarted" feedback, which must happen once per call. The cache sits on this
+    # method, so the flag covers the other playlist kinds along with it
+    @use_cache(3600 * 3, allow_expired_cache=True, single_flight=False)
+    async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
+        """
+        Get playlist tracks.
+
+        :param prov_playlist_id: The provider playlist ID (format: "owner_id:kind",
+            my_wave, or liked_tracks).
+        :param page: Page number for pagination.
+        :return: List of Track objects.
+        """
+        self.logger.debug(
+            "get_playlist_tracks called: prov_playlist_id=%s, page=%s", prov_playlist_id, page
+        )
+
+        if prov_playlist_id == MY_WAVE_PLAYLIST_ID:
+            self.logger.debug("Fetching My Wave tracks")
+            return await self._get_my_wave_playlist_tracks(page)
+
+        if prov_playlist_id == LIKED_TRACKS_PLAYLIST_ID:
+            self.logger.debug("Fetching Liked Tracks for virtual playlist")
+            result = await self._get_liked_tracks_playlist_tracks(page)
+            self.logger.debug("Liked Tracks playlist returned %s tracks", len(result))
+            return result
+
+        # Yandex Music API returns all playlist tracks in one call (no server-side pagination).
+        # Return empty list for page > 0 so the controller pagination loop terminates.
+        if page > 0:
+            return []
+
+        # Parse the playlist ID (format: owner_id:kind)
+        if PLAYLIST_ID_SPLITTER in prov_playlist_id:
+            owner_id, kind = prov_playlist_id.split(PLAYLIST_ID_SPLITTER, 1)
+        else:
+            owner_id = str(self.client.user_id)
+            kind = prov_playlist_id
+
+        playlist = await self.client.get_playlist(owner_id, kind)
+        if not playlist:
+            return []
+
+        # API sometimes returns playlist without tracks; fetch them explicitly if needed
+        tracks_list = playlist.tracks or []
+        track_count = getattr(playlist, "track_count", None) or 0
+        if not tracks_list and track_count > 0:
+            self.logger.debug(
+                "Playlist %s/%s: track_count=%s but no tracks in response, "
+                "calling fetch_tracks_async",
+                owner_id,
+                kind,
+                track_count,
+            )
+            try:
+                tracks_list = await playlist.fetch_tracks_async()
+            except Exception as err:
+                self.logger.warning("fetch_tracks_async failed for %s/%s: %s", owner_id, kind, err)
+            if not tracks_list:
+                raise ResourceTemporarilyUnavailable(
+                    "Playlist tracks not available; try again later"
+                )
+
+        if not tracks_list:
+            return []
+
+        # Yandex returns TrackShort objects, we need to fetch full track info
+        track_ids = [
+            str(track.track_id) if hasattr(track, "track_id") else str(track.id)
+            for track in tracks_list
+            if track
+        ]
+        if not track_ids:
+            return []
+
+        # Fetch full track details in batches to avoid timeouts
+        batch_size = TRACK_BATCH_SIZE
+        full_tracks = []
+        for i in range(0, len(track_ids), batch_size):
+            batch = track_ids[i : i + batch_size]
+            batch_result = await self.client.get_tracks(batch)
+            if not batch_result:
+                # Skip this batch but keep going — the terminal guard below
+                # raises if every batch comes back empty. Aborting on a single
+                # empty batch threw away tracks already fetched from earlier
+                # batches and forced a full retry hours later (under the
+                # @use_cache TTL above).
+                self.logger.warning(
+                    "Empty batch %s-%s for playlist %s, skipping",
+                    i,
+                    i + len(batch) - 1,
+                    prov_playlist_id,
+                )
+                continue
+            full_tracks.extend(batch_result)
+
+        if track_ids and not full_tracks:
+            raise ResourceTemporarilyUnavailable("Failed to load track details; try again later")
+
+        tracks = []
+        for track in full_tracks:
+            try:
+                tracks.append(parse_track(self, track))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing playlist track: %s", err)
+        return tracks
+
+    @use_cache(3600 * 24 * 7, allow_expired_cache=True)
+    async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
+        """
+        Get artist's albums.
+
+        :param prov_artist_id: The provider artist ID.
+        :return: List of Album objects.
+        """
+        albums = await self.client.get_artist_albums(prov_artist_id)
+        result = []
+        for album in albums:
+            try:
+                result.append(parse_album(self, album))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing artist album: %s", err)
+        return result
+
+    @use_cache(3600 * 24 * 7, allow_expired_cache=True)
+    async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
+        """
+        Get artist's top tracks.
+
+        :param prov_artist_id: The provider artist ID.
+        :return: List of Track objects.
+        """
+        tracks = await self.client.get_artist_tracks(prov_artist_id)
+        result = []
+        for track in tracks:
+            try:
+                result.append(parse_track(self, track))
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing artist track: %s", err)
+        return result
+
+    # Library methods
+
+    async def get_library_artists(self) -> AsyncGenerator[Artist]:
+        """Retrieve library artists from Yandex Music."""
+        artists = await self.client.get_liked_artists()
+        for artist in artists:
+            try:
+                yield parse_artist(self, artist)
+            except InvalidDataError as err:
+                self.logger.debug("Error parsing library artist: %s", err)
 
     async def _get_liked_albums_cached(self, ttl: float = 30.0) -> list[YandexAlbum]:
         """
