@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import pathlib
+import threading
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
 from music_assistant_models.enums import MediaType
 from music_assistant_models.media_items import ItemMapping
+
+from music_assistant.controllers.cache import CacheController
+from music_assistant.controllers.config import ConfigController
+from music_assistant.mass import MusicAssistant
 
 
 class ProviderStub:
@@ -138,3 +146,24 @@ def streaming_provider_stub() -> StreamingProviderStub:
 def streaming_provider_stub_with_tracking() -> StreamingProviderStubWithTracking:
     """Return a streaming provider stub with tracking logger."""
     return StreamingProviderStubWithTracking()
+
+
+@pytest.fixture
+async def mass_minimal(tmp_path: pathlib.Path) -> AsyncGenerator[MusicAssistant]:
+    """Create a minimal Music Assistant instance with real config and cache controllers."""
+    storage_path = tmp_path / "data"
+    cache_path = tmp_path / "cache"
+    storage_path.mkdir(parents=True)
+    cache_path.mkdir(parents=True)
+
+    mass = MusicAssistant(str(storage_path), str(cache_path))
+    mass.loop = asyncio.get_running_loop()
+    mass.loop_thread_id = threading.get_ident()
+    mass.config = ConfigController(mass)
+    await mass.config.setup()
+    mass.cache = CacheController(mass)
+    try:
+        yield mass
+    finally:
+        await mass.cache.close()
+        await mass.config.close()
