@@ -45,15 +45,18 @@ from .constants import (
     CONF_OUTPUT_BIT_DEPTH,
     CONF_OUTPUT_SAMPLE_RATE,
     CONF_PUBLISH_NAME,
+    CONF_STREAM_MODE,
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
     LEGACY_YM_INSTANCE_OWN,
     OUTPUT_AUTO,
     PLAYER_ID_AUTO,
-    YANDEX_MUSIC_CONF_QUALITY,
+    STREAM_MODE_MAX_QUALITY,
+    STREAM_MODE_STABLE,
     YANDEX_MUSIC_LOSSLESS_QUALITIES,
 )
 from .credential_source import YandexMusicCredentialSource
+from .format_policy import PcmSignature, select_effective_pcm
 from .protocols import YandexMusicProviderLike
 from .streaming import (
     PCM_LOSSLESS_PARAMS,
@@ -150,6 +153,17 @@ class YandexYnisonProvider(PluginProvider):
     # an explicit opt-out. Analysing transient external-source tracks
     # buys nothing.
     is_streaming_provider: bool = False
+    _prefetched_stream_details: dict[str, StreamDetails]
+    _dynamic_generation: int
+    _dynamic_task: asyncio.Task[Any] | None
+    _dynamic_prefetch_task: asyncio.Task[Any] | None
+    _dynamic_prefetch_track_id: str | None
+    _dynamic_target_track_id: str | None
+    _dynamic_session_signature: PcmSignature | None
+    _pending_restart_track_id: str | None
+    _format_restart_requested: bool
+    _dynamic_session_ended_event: asyncio.Event
+    _dynamic_session_ended_at: float | None
 
     @property
     def instance_name_postfix(self) -> str | None:
@@ -181,6 +195,10 @@ class YandexYnisonProvider(PluginProvider):
         self._cfg_bit_depth: str = (
             cast("str", self.config.get_value(CONF_OUTPUT_BIT_DEPTH)) or OUTPUT_AUTO
         )
+        requested_stream_mode = cast("str | None", self.config.get_value(CONF_STREAM_MODE))
+        self._requested_stream_mode: str = requested_stream_mode or STREAM_MODE_STABLE
+        self._effective_stream_mode: str = STREAM_MODE_STABLE
+        self._stream_mode_warning_emitted = False
         self._display_name: str = (
             cast("str", self.get_setup_value(CONF_PUBLISH_NAME)) or DEFAULT_DISPLAY_NAME
         )
@@ -221,6 +239,7 @@ class YandexYnisonProvider(PluginProvider):
         self._prefetch_task: asyncio.Task[Any] | None = None
         self._normalized_params: dict[str, Any] = PCM_LOSSY_PARAMS
         self._normalized_format: AudioFormat = make_pcm_format(PCM_LOSSY_PARAMS)
+        self._init_dynamic_state()
 
         # Rate limiter for Yandex API calls (max 2 req/s)
         self._api_throttler = ThrottlerManager(rate_limit=2, period=1.0)
@@ -293,6 +312,16 @@ class YandexYnisonProvider(PluginProvider):
                 default_value=True,
             ),
             ConfigEntry(
+                key=CONF_STREAM_MODE,
+                type=ConfigEntryType.STRING,
+                default_value=STREAM_MODE_STABLE,
+                options=[
+                    ConfigValueOption(STREAM_MODE_STABLE),
+                    ConfigValueOption(STREAM_MODE_MAX_QUALITY),
+                ],
+                advanced=True,
+            ),
+            ConfigEntry(
                 key=CONF_OUTPUT_SAMPLE_RATE,
                 type=ConfigEntryType.STRING,
                 default_value=OUTPUT_AUTO,
@@ -363,6 +392,7 @@ class YandexYnisonProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        await self._cancel_dynamic_task(clear_prefetch=True)
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -444,6 +474,11 @@ class YandexYnisonProvider(PluginProvider):
         preventing bit-depth/sample-rate mismatches that cause noise.
         """
         self._stream_stop_event.clear()
+        dynamic_session = self._effective_stream_mode == STREAM_MODE_MAX_QUALITY
+        dynamic_session_ended_event: asyncio.Event | None = None
+        if dynamic_session:
+            dynamic_session_ended_event = asyncio.Event()
+            self._dynamic_session_ended_event = dynamic_session_ended_event
         # snapshot the consumer at session start; the rest of this generator
         # treats the queue_id as the player_id (they are the same by convention).
         # The lock may legitimately be empty here — MA's `_load_item` preload
@@ -475,6 +510,9 @@ class YandexYnisonProvider(PluginProvider):
         session_fmt: AudioFormat = make_pcm_format(session_params)
 
         try:
+            if dynamic_session and self._format_restart_requested:
+                self.logger.debug("Dynamic generator joined pending format restart")
+                return
             while not self._stream_stop_event.is_set() and (
                 # Preload path: no claim was active at entry — drive the
                 # loop purely off Ynison state and the stop event.
@@ -541,11 +579,40 @@ class YandexYnisonProvider(PluginProvider):
                     if excess:
                         yield b"\x00" * (frame_size - excess)
 
+                dynamic_track_boundary = (
+                    dynamic_session
+                    and self._ynison is not None
+                    and self._ynison.state.current_track_id != track_id
+                )
+                while (
+                    dynamic_track_boundary
+                    and not self._track_changed_event.is_set()
+                    and not self._stream_stop_event.is_set()
+                    and not (had_claim and self._session_lost(player_id, captured_session_id))
+                ):
+                    try:
+                        await asyncio.wait_for(self._track_changed_event.wait(), timeout=0.5)
+                    except TimeoutError:
+                        continue
+
                 # Don't clear _current_streaming_track_id yet — keep it set
                 # during advance/wait so Ynison echo of the same track doesn't
                 # trigger a false track-change detection in _activate_playback.
 
                 if self._stream_stop_event.is_set():
+                    break
+
+                format_restart = (
+                    dynamic_session
+                    and self._format_restart_requested
+                    and self._pending_restart_track_id
+                    == (self._ynison.state.current_track_id if self._ynison else None)
+                )
+                if format_restart:
+                    self.logger.info(
+                        "Dynamic format restart requested for track %s",
+                        self._pending_restart_track_id,
+                    )
                     break
 
                 # Differentiate "track finished naturally" from "inner loop
@@ -561,6 +628,7 @@ class YandexYnisonProvider(PluginProvider):
                     and not broke_for_pause
                     and not broke_for_session_change
                     and self._ynison is not None
+                    and self._ynison.state.current_track_id == track_id
                 )
                 if natural_end:
                     self.logger.info("Track %s finished, advancing to next", track_id)
@@ -580,9 +648,18 @@ class YandexYnisonProvider(PluginProvider):
             # generator's teardown would otherwise clobber the new session's
             # claim. `had_claim` keeps the preload path from touching the lock
             # at all (no claim ever existed to release).
-            if had_claim and not self._session_lost(player_id, captured_session_id):
+            format_restart = dynamic_session and self._format_restart_requested
+            if (
+                had_claim
+                and not format_restart
+                and not self._session_lost(player_id, captured_session_id)
+            ):
                 self._in_use_by_queue = None
             self._current_streaming_track_id = None
+            if dynamic_session_ended_event is not None:
+                if self._dynamic_session_ended_event is dynamic_session_ended_event:
+                    self._dynamic_session_ended_at = time.monotonic()
+                dynamic_session_ended_event.set()
 
     async def on_source_selected(
         self,
@@ -618,10 +695,32 @@ class YandexYnisonProvider(PluginProvider):
                 msg = f"Player switching is disabled; source must remain on {current_target}"
                 raise RuntimeError(msg)
 
+        if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
+            track_id = self._pending_restart_track_id or (
+                self._ynison.state.current_track_id if self._ynison else None
+            )
+            details = self._prefetched_stream_details.get(track_id or "")
+            if details is not None:
+                signature = self._effective_signature_for_player(details, player_id)
+                self._apply_dynamic_signature(signature)
+                self._dynamic_session_signature = signature
+                self.logger.info(
+                    "Dynamic source selected on %s: source=%s effective=%s/%dHz/%dbit/%dch",
+                    player_id,
+                    details.audio_format,
+                    signature[0].value,
+                    signature[1],
+                    signature[2],
+                    signature[3],
+                )
+            if not self._format_restart_requested:
+                self._pending_restart_track_id = None
+                self._dynamic_target_track_id = None
+
         # Stop previous player if switching. The lock claim a few lines below
         # replaces the previous queue's claim; the previous stream loop notices
         # the queue change and exits cleanly.
-        if self._active_player_id and self._active_player_id != player_id:
+        if self._active_player_id and self._active_player_id not in (player_id, queue_id):
             prev_player_id = self._active_player_id
             self.logger.info(
                 "Source selected on %s, stopping %s",
@@ -838,7 +937,7 @@ class YandexYnisonProvider(PluginProvider):
                         "get_stream_details attempt %d/%d failed: %s, retrying in %.1fs",
                         attempt + 1,
                         _API_MAX_RETRIES,
-                        err,
+                        type(err).__name__,
                         jitter,
                     )
                     await asyncio.sleep(jitter)
@@ -1008,6 +1107,8 @@ class YandexYnisonProvider(PluginProvider):
             # Pre-fetch next batch when playing second-to-last track
             self._maybe_prefetch(current_index, playable_list, entity_id, entity_type)
             await self._activate_playback(state)
+            if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
+                self._schedule_dynamic_next_prefetch(current_index, playable_list)
         elif is_our_device and state.is_paused:
             self.logger.info(
                 "Ynison → paused (track=%s progress=%dms)", track_id, state.progress_ms
@@ -1048,20 +1149,43 @@ class YandexYnisonProvider(PluginProvider):
             upcoming = state.current_track_id
             switching_player = self._active_player_id != target_player_id
             self._active_player_id = target_player_id
-            if upcoming and (switching_player or upcoming != self._current_streaming_track_id):
+            if (
+                self._effective_stream_mode == STREAM_MODE_MAX_QUALITY
+                and upcoming
+                and self._dynamic_target_track_id != upcoming
+            ):
+                self._schedule_dynamic_launch(upcoming, state.progress_ms, target_player_id)
+            elif upcoming and (switching_player or upcoming != self._current_streaming_track_id):
                 await self._prefetch_format_for_track(upcoming)
-            self.mass.create_task(
-                self.mass.player_queues.play_media(target_player_id, str(self._audio_source.uri))
-            )
+            if self._effective_stream_mode != STREAM_MODE_MAX_QUALITY:
+                self.mass.create_task(
+                    self.mass.player_queues.play_media(
+                        target_player_id, str(self._audio_source.uri)
+                    )
+                )
 
         # Signal track change if track_id changed
         significant_change = False
         new_track = state.current_track_id
         if new_track and new_track != self._current_streaming_track_id:
             self.logger.info("Track changed: %s -> %s", self._current_streaming_track_id, new_track)
-            self._current_streaming_track_id = new_track
-            self._seek_position_ms = state.progress_ms
-            self._track_changed_event.set()
+            if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
+                if new_track not in (
+                    self._dynamic_target_track_id,
+                    self._pending_restart_track_id,
+                ):
+                    if self._current_streaming_track_id is None:
+                        self._schedule_dynamic_launch(
+                            new_track, state.progress_ms, target_player_id
+                        )
+                    else:
+                        self._schedule_dynamic_transition(
+                            new_track, state.progress_ms, target_player_id
+                        )
+            else:
+                self._current_streaming_track_id = new_track
+                self._seek_position_ms = state.progress_ms
+                self._track_changed_event.set()
             significant_change = True
             # Grace period: ignore seek detection for a few seconds after
             # track change — Ynison echoes can report stale progress that
@@ -1070,7 +1194,7 @@ class YandexYnisonProvider(PluginProvider):
         elif new_track and new_track == self._current_streaming_track_id:
             # Same-track resume after pause: explicitly seek to the Ynison position
             # so the new stream starts at the right offset.
-            if needs_reselect:
+            if needs_reselect and self._effective_stream_mode != STREAM_MODE_MAX_QUALITY:
                 self._seek_position_ms = state.progress_ms
                 self._track_changed_event.set()
                 self._seek_grace_until = time.monotonic() + _ECHO_GRACE_PERIOD
@@ -1267,8 +1391,13 @@ class YandexYnisonProvider(PluginProvider):
         a few seconds — the alternative kept resume instant but left
         MA's UI stuck on PLAYING.
         """
+        if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
+            await self._cancel_dynamic_task(clear_prefetch=False)
         target = self._in_use_by_queue
         if not target:
+            if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
+                self._active_player_id = None
+                self._externally_paused = True
             self.logger.info("Pause requested but no active queue (_in_use_by_queue is None)")
             return
         self.logger.info("Pause: cmd_stop(%s)", target)
@@ -1438,6 +1567,7 @@ class YandexYnisonProvider(PluginProvider):
 
     def _clear_active_player(self) -> None:
         """Clear the active player and reset plugin state."""
+        self._invalidate_dynamic_tasks(clear_prefetch=True)
         prev_player_id = self._active_player_id
         was_in_use = self._in_use_by_queue == prev_player_id
         self._active_player_id = None
@@ -1482,6 +1612,7 @@ class YandexYnisonProvider(PluginProvider):
                 continue
             self.logger.debug("Found Yandex Music provider — enabling playback control")
             self._yandex_provider = cast("YandexMusicProviderLike", provider)
+            self._resolve_stream_mode()
             self._update_normalized_format()
             self._update_source_capabilities()
             return
@@ -1490,6 +1621,7 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.debug(
                 "Yandex Music provider no longer available — disabling playback control"
             )
+            self._invalidate_dynamic_tasks(clear_prefetch=True)
             self._yandex_provider = None
             self._update_source_capabilities()
 
@@ -1548,15 +1680,12 @@ class YandexYnisonProvider(PluginProvider):
             pre-fetch). Lifts auto mode from the quality-based default to the
             track's actual sample rate and bit depth.
         """
-        # Start with auto-detected base from YM quality config
-        # (yandex_music does not expose get_quality(); read from its ProviderConfig instead)
+        # Start with auto-detected base from the linked provider's public API.
         quality = ""
         if self._yandex_provider is not None:
-            provider_config = getattr(self._yandex_provider, "config", None)
-            if provider_config is not None and hasattr(provider_config, "get_value"):
-                config_quality = provider_config.get_value(YANDEX_MUSIC_CONF_QUALITY)
-                if isinstance(config_quality, str):
-                    quality = config_quality
+            provider_quality = self._yandex_provider.get_quality()
+            if isinstance(provider_quality, str):
+                quality = provider_quality.lower()
         is_lossless = quality in YANDEX_MUSIC_LOSSLESS_QUALITIES
         base = dict(PCM_LOSSLESS_PARAMS if is_lossless else PCM_LOSSY_PARAMS)
         # Promote auto-base from the real stream details when available.
@@ -1641,6 +1770,328 @@ class YandexYnisonProvider(PluginProvider):
             self._normalized_format.sample_rate,
             self._normalized_format.bit_depth,
         )
+
+    def _resolve_stream_mode(self) -> None:
+        """Resolve requested stream mode against linked quality and output settings."""
+        requested = self._requested_stream_mode
+        reason: str | None = None
+        if requested != STREAM_MODE_MAX_QUALITY:
+            self._effective_stream_mode = STREAM_MODE_STABLE
+            if requested != STREAM_MODE_STABLE:
+                reason = f"unsupported stream mode {requested!r}"
+        elif self._cfg_sample_rate != OUTPUT_AUTO or self._cfg_bit_depth != OUTPUT_AUTO:
+            reason = "output sample rate and bit depth must both be Auto"
+        else:
+            quality = self._yandex_provider.get_quality() if self._yandex_provider else ""
+            if not isinstance(quality, str) or quality.lower() != "superb":
+                reason = "Yandex Music quality must be Superb"
+
+        if reason is None and requested == STREAM_MODE_MAX_QUALITY:
+            self._effective_stream_mode = STREAM_MODE_MAX_QUALITY
+        elif reason is not None:
+            self._effective_stream_mode = STREAM_MODE_STABLE
+            if not self._stream_mode_warning_emitted:
+                self.logger.warning(
+                    "Requested stream mode %s is unavailable (%s); falling back to stable",
+                    requested,
+                    reason,
+                )
+                self._stream_mode_warning_emitted = True
+        self.logger.info(
+            "Stream mode requested=%s effective=%s%s",
+            requested,
+            self._effective_stream_mode,
+            f" reason={reason}" if reason else "",
+        )
+
+    async def _handle_dynamic_track_transition(
+        self,
+        track_id: str,
+        progress_ms: int,
+        queue_id: str,
+        generation: int,
+    ) -> None:
+        """Continue or restart a dynamic session for a changed track."""
+        if generation != self._dynamic_generation:
+            self.logger.debug(
+                "Discarding stale dynamic transition for %s (generation %d != %d)",
+                track_id,
+                generation,
+                self._dynamic_generation,
+            )
+            return
+        if self._pending_restart_track_id == track_id:
+            return
+
+        details = await self._get_dynamic_stream_details(track_id, generation)
+        if generation != self._dynamic_generation:
+            self.logger.debug("Discarding stale prefetched format for %s", track_id)
+            return
+        signature = self._effective_signature_for_player(details, queue_id)
+        self._remember_stream_details(track_id, details)
+        current = self._dynamic_session_signature
+        if signature == current:
+            self.logger.info(
+                "Dynamic track %s continues current session with %s/%dHz/%dbit/%dch",
+                track_id,
+                signature[0].value,
+                signature[1],
+                signature[2],
+                signature[3],
+            )
+            self._track_changed_event.set()
+            return
+
+        self._pending_restart_track_id = track_id
+        self._seek_position_ms = progress_ms
+        self._format_restart_requested = True
+        self._track_changed_event.set()
+        while True:
+            session_ended_event = self._dynamic_session_ended_event
+            await session_ended_event.wait()
+            if session_ended_event is self._dynamic_session_ended_event:
+                break
+        if generation != self._dynamic_generation or self._pending_restart_track_id != track_id:
+            self.logger.debug("Cancelled stale dynamic restart for %s", track_id)
+            return
+
+        self._apply_dynamic_signature(signature)
+        self._dynamic_session_signature = signature
+        self._format_restart_requested = False
+        if self._ynison and self._ynison.state.current_track_id == track_id:
+            self._seek_position_ms = self._ynison.state.progress_ms
+        ended_at = self._dynamic_session_ended_at
+        self.logger.info(
+            "Dynamic format restart for %s: source=%s effective=%s/%dHz/%dbit/%dch",
+            track_id,
+            details.audio_format,
+            signature[0].value,
+            signature[1],
+            signature[2],
+            signature[3],
+        )
+        await self.mass.player_queues.play_media(queue_id, str(self._audio_source.uri))
+        if ended_at is not None:
+            self.logger.info(
+                "Dynamic PCM restart gap before play_media: %.1fms",
+                (time.monotonic() - ended_at) * 1000,
+            )
+
+    async def _launch_dynamic_session(
+        self,
+        track_id: str,
+        progress_ms: int,
+        queue_id: str,
+        generation: int,
+    ) -> None:
+        """Launch a dynamic session only after resolving the real source format."""
+        details = await self._get_dynamic_stream_details(track_id, generation)
+        if generation != self._dynamic_generation:
+            self.logger.debug("Discarding stale dynamic launch for %s", track_id)
+            return
+        if self._ynison and (
+            self._ynison.state.is_paused or self._ynison.state.current_track_id != track_id
+        ):
+            self.logger.debug("Cancelling obsolete dynamic launch for %s", track_id)
+            return
+
+        self._remember_stream_details(track_id, details)
+        signature = self._effective_signature_for_player(details, queue_id)
+        self._apply_dynamic_signature(signature)
+        self._dynamic_session_signature = signature
+        latest_progress = progress_ms
+        if self._ynison and self._ynison.state.current_track_id == track_id:
+            latest_progress = self._ynison.state.progress_ms
+        self._seek_position_ms = latest_progress
+        self.logger.info(
+            "Starting dynamic session for %s: source=%s effective=%s/%dHz/%dbit/%dch",
+            track_id,
+            details.audio_format,
+            signature[0].value,
+            signature[1],
+            signature[2],
+            signature[3],
+        )
+        await self.mass.player_queues.play_media(queue_id, str(self._audio_source.uri))
+
+    async def _prefetch_next_dynamic_track(
+        self,
+        current_index: int,
+        playable_list: list[dict[str, Any]],
+        generation: int,
+    ) -> None:
+        """Prefetch the immediate playable successor without blocking state handling."""
+        next_index = current_index + 1
+        if next_index < 0 or next_index >= len(playable_list):
+            return
+        next_id = playable_list[next_index].get("playable_id")
+        if not isinstance(next_id, str) or not next_id:
+            return
+        try:
+            details = await self._get_dynamic_stream_details(next_id, generation)
+        except asyncio.CancelledError:
+            self.logger.debug("Next-track prefetch cancelled for %s", next_id)
+            raise
+        if generation != self._dynamic_generation:
+            self.logger.debug("Discarding stale next-track prefetch for %s", next_id)
+            return
+        self._remember_stream_details(next_id, details)
+
+    def _schedule_dynamic_launch(self, track_id: str, progress_ms: int, queue_id: str) -> None:
+        """Schedule one initial/resume launch for the current track generation."""
+        if self._dynamic_target_track_id == track_id:
+            return
+        self._invalidate_dynamic_tasks(clear_prefetch=False)
+        self._dynamic_target_track_id = track_id
+        generation = self._dynamic_generation
+        self._dynamic_task = self.mass.create_task(
+            self._launch_dynamic_session(track_id, progress_ms, queue_id, generation)
+        )
+
+    def _schedule_dynamic_transition(self, track_id: str, progress_ms: int, queue_id: str) -> None:
+        """Schedule one background same-format/restart decision for a track change."""
+        if track_id in (self._dynamic_target_track_id, self._pending_restart_track_id):
+            return
+        self._invalidate_dynamic_tasks(clear_prefetch=False)
+        self._dynamic_target_track_id = track_id
+        generation = self._dynamic_generation
+        self._dynamic_task = self.mass.create_task(
+            self._handle_dynamic_track_transition(track_id, progress_ms, queue_id, generation)
+        )
+
+    def _schedule_dynamic_next_prefetch(
+        self, current_index: int, playable_list: list[dict[str, Any]]
+    ) -> None:
+        """Schedule background prefetch for ``playable_list[current_index + 1]``."""
+        next_index = current_index + 1
+        if next_index < 0 or next_index >= len(playable_list):
+            return
+        next_id = playable_list[next_index].get("playable_id")
+        if not isinstance(next_id, str) or not next_id:
+            return
+        if next_id in self._prefetched_stream_details or self._dynamic_prefetch_track_id == next_id:
+            return
+        if self._dynamic_prefetch_task and not self._dynamic_prefetch_task.done():
+            self._dynamic_prefetch_task.cancel()
+        self._dynamic_prefetch_track_id = next_id
+        generation = self._dynamic_generation
+        self._dynamic_prefetch_task = self.mass.create_task(
+            self._prefetch_next_dynamic_track(current_index, playable_list, generation)
+        )
+
+    async def _get_dynamic_stream_details(self, track_id: str, generation: int) -> StreamDetails:
+        """Fetch a real dynamic format until success or generation cancellation."""
+        cached = self._prefetched_stream_details.get(track_id)
+        if cached is not None:
+            return cached
+        backoff = _API_INITIAL_BACKOFF
+        while generation == self._dynamic_generation:
+            started = time.monotonic()
+            try:
+                details = await self._get_stream_details_with_retry(track_id)
+                try:
+                    select_effective_pcm(details.audio_format, [])
+                except ValueError:
+                    await self._invalidate_stream_cache(track_id)
+                    raise
+                self.logger.debug(
+                    "Dynamic prefetch for %s completed in %.1fms",
+                    track_id,
+                    (time.monotonic() - started) * 1000,
+                )
+                return details
+            except asyncio.CancelledError:
+                self.logger.debug("Dynamic prefetch cancelled for %s", track_id)
+                raise
+            except Exception as err:
+                self.logger.warning(
+                    "Dynamic prefetch for %s failed (%s); retrying in %.1fs",
+                    track_id,
+                    type(err).__name__,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _API_MAX_BACKOFF)
+        raise asyncio.CancelledError
+
+    async def _cancel_dynamic_task(self, *, clear_prefetch: bool) -> None:
+        """Invalidate and cancel dynamic work, optionally dropping ready details."""
+        task = self._dynamic_task
+        prefetch_task = self._dynamic_prefetch_task
+        self._invalidate_dynamic_tasks(clear_prefetch=clear_prefetch)
+        if task and not task.done():
+            with suppress(asyncio.CancelledError):
+                await task
+        if prefetch_task and not prefetch_task.done():
+            with suppress(asyncio.CancelledError):
+                await prefetch_task
+
+    def _invalidate_dynamic_tasks(self, *, clear_prefetch: bool) -> None:
+        """Invalidate dynamic tasks synchronously for skip, handoff, or unload."""
+        self._dynamic_generation += 1
+        for task in (self._dynamic_task, self._dynamic_prefetch_task):
+            if task and not task.done():
+                task.cancel()
+        self._dynamic_task = None
+        self._dynamic_prefetch_task = None
+        self._dynamic_target_track_id = None
+        self._dynamic_prefetch_track_id = None
+        self._pending_restart_track_id = None
+        self._format_restart_requested = False
+        if clear_prefetch:
+            self._prefetched_stream_details.clear()
+
+    def _init_dynamic_state(self) -> None:
+        """Initialize dynamic-session coordinator state."""
+        self._prefetched_stream_details = {}
+        self._dynamic_generation = 0
+        self._dynamic_task = None
+        self._dynamic_prefetch_task = None
+        self._dynamic_prefetch_track_id = None
+        self._dynamic_target_track_id = None
+        self._dynamic_session_signature = None
+        self._pending_restart_track_id = None
+        self._format_restart_requested = False
+        self._dynamic_session_ended_event = asyncio.Event()
+        self._dynamic_session_ended_event.set()
+        self._dynamic_session_ended_at = None
+
+    def _effective_signature_for_player(
+        self, details: StreamDetails, player_id: str
+    ) -> PcmSignature:
+        """Resolve dynamic PCM for the actual MA player, bridge, or group."""
+        supported: list[tuple[int, int]] = []
+        try:
+            player = self.mass.players.get_player(player_id)
+            if player is not None:
+                supported = list(player.get_supported_sample_rates())
+        except Exception:
+            self.logger.debug(
+                "Could not resolve supported formats for %s; using source PCM",
+                player_id,
+                exc_info=True,
+            )
+        return select_effective_pcm(details.audio_format, supported)
+
+    def _apply_dynamic_signature(self, signature: PcmSignature) -> None:
+        """Apply a dynamic PCM signature to future AudioSource requests."""
+        content_type, sample_rate, bit_depth, channels = signature
+        self._normalized_params = {
+            "content_type": content_type,
+            "sample_rate": sample_rate,
+            "bit_depth": bit_depth,
+            "channels": channels,
+        }
+        self._normalized_format = make_pcm_format(self._normalized_params)
+        self._audio_source = self._build_audio_source()
+
+    def _remember_stream_details(self, track_id: str, details: StreamDetails) -> None:
+        """Keep real stream details for only the current and upcoming tracks."""
+        self._prefetched_stream_details.pop(track_id, None)
+        self._prefetched_stream_details[track_id] = details
+        while len(self._prefetched_stream_details) > 2:
+            oldest = next(iter(self._prefetched_stream_details))
+            self._prefetched_stream_details.pop(oldest)
 
     def _update_source_capabilities(self) -> None:
         """Rebuild AudioSource so capability flags reflect linked provider availability."""
