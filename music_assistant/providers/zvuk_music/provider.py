@@ -124,6 +124,8 @@ class ZvukMusicProvider(MusicProvider):
             name=name,
         )
 
+    # Search
+
     @use_cache(3600 * 24 * 14)
     async def search(
         self, search_query: str, media_types: list[MediaType], limit: int = 5
@@ -183,6 +185,8 @@ class ZvukMusicProvider(MusicProvider):
 
         return result
 
+    # Get single items
+
     @use_cache(3600 * 24 * 30)
     async def get_artist(self, prov_artist_id: str) -> Artist:
         """
@@ -238,6 +242,8 @@ class ZvukMusicProvider(MusicProvider):
         if not playlist:
             raise MediaNotFoundError(f"Playlist {prov_playlist_id} not found")
         return parse_playlist(self, playlist)
+
+    # Get related items
 
     @use_cache(3600 * 24 * 30, allow_expired_cache=True)
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
@@ -373,6 +379,8 @@ class ZvukMusicProvider(MusicProvider):
 
         return result[:limit]
 
+    # Library methods
+
     async def get_library_artists(self) -> AsyncGenerator[Artist]:
         """Retrieve library artists from Zvuk Music."""
         collection = await self.client.get_collection()
@@ -424,31 +432,6 @@ class ZvukMusicProvider(MusicProvider):
                 yield parse_playlist(self, simple_pl)
             except InvalidDataError as err:
                 self.logger.debug("Error parsing synthesis playlist: %s", err)
-
-    async def _get_for_you_playlists(self) -> list[Playlist]:
-        """Fetch and parse Zvuk's personalized synthesis playlists («Плейлисты для вас»)."""
-        synthesis_playlists = await self.client.get_short_playlists(SYNTHESIS_PLAYLIST_IDS)
-        result: list[Playlist] = []
-        for simple_pl in synthesis_playlists:
-            try:
-                result.append(parse_playlist(self, simple_pl))
-            except InvalidDataError as err:
-                self.logger.debug("Error parsing synthesis playlist: %s", err)
-        return result
-
-    async def _get_editorial_playlists(self) -> list[Playlist]:
-        """Fetch and parse Zvuk's editorial curated playlists («Подборки»)."""
-        editorial_ids = await self.client.get_editorial_playlist_ids()
-        if not editorial_ids:
-            return []
-        full_playlists = await self.client.get_playlists(editorial_ids[:DEFAULT_LIMIT])
-        result: list[Playlist] = []
-        for full_pl in full_playlists:
-            try:
-                result.append(parse_playlist(self, full_pl))
-            except InvalidDataError as err:
-                self.logger.debug("Error parsing editorial playlist: %s", err)
-        return result
 
     async def get_recommendations(self) -> list[RecommendationFolder]:
         """
@@ -618,6 +601,8 @@ class ZvukMusicProvider(MusicProvider):
             self.logger.debug("Failed to resolve image %s: %s", path, err)
         return str(path)
 
+    # Library edit methods
+
     async def library_add(self, item: MediaItemType) -> bool:
         """
         Add item to library.
@@ -656,6 +641,8 @@ class ZvukMusicProvider(MusicProvider):
         if media_type == MediaType.PLAYLIST:
             return await self.client.unlike_playlist(prov_item_id)
         return False
+
+    # Playlist management
 
     async def create_playlist(self, name: str, media_types: set[MediaType]) -> Playlist:
         """
@@ -698,6 +685,8 @@ class ZvukMusicProvider(MusicProvider):
             str(t.id) for i, t in enumerate(simple_tracks) if t.id and i not in remove_positions
         ]
         await self.client.update_playlist(prov_playlist_id, remaining_ids)
+
+    # Streaming
 
     async def get_stream_details(
         self, item_id: str, media_type: MediaType = MediaType.TRACK
