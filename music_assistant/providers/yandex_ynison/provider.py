@@ -345,6 +345,7 @@ class YandexYnisonProvider(PluginProvider):
             device_info=device_info,
             on_state_update=self._handle_ynison_state,
             logger=self.logger,
+            http_session=self.mass.http_session,
             on_auth_failure=self._refresh_ynison_token,
         )
 

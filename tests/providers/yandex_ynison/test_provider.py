@@ -246,6 +246,36 @@ class TestProviderInit:
 
         assert provider._device_id == "existing-uuid"
 
+    async def test_handle_async_init_uses_mass_http_session(self) -> None:
+        """Ynison must reuse Music Assistant's managed HTTP session."""
+        provider = _make_provider()
+        shared_session = MagicMock()
+        shared_session.closed = False
+        _stub_attr(provider.mass, "http_session", shared_session)
+        _stub_attr(
+            provider,
+            "_resolve_token",
+            AsyncMock(return_value=SecretStr("test-token")),
+        )
+
+        await provider.handle_async_init()
+        assert provider._ynison is not None
+
+        with (
+            patch(
+                "music_assistant.providers.yandex_ynison.ynison_client.aiohttp.ClientSession",
+                side_effect=AssertionError("private HTTP session created"),
+            ),
+            patch.object(
+                provider._ynison,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=LoginFailed("controlled stop"),
+            ),
+            pytest.raises(LoginFailed, match="controlled stop"),
+        ):
+            await provider._ynison.connect()
+
 
 # ------------------------------------------------------------------
 # Player selection

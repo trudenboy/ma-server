@@ -17,7 +17,7 @@
     },
     "output_sample_rate": {
       "label": "Output sample rate",
-      "description": "Sample rate for PCM output to the player. 'Auto' selects 44.1 kHz for lossy or 48 kHz for lossless sources.",
+      "description": "Sample rate for PCM output to the player. 'Auto' starts at 44.1 kHz and adapts to the real track format and target player when available.",
       "options": {
         "auto": "Auto (from source quality)",
         "44100": "44100 Hz (CD)",

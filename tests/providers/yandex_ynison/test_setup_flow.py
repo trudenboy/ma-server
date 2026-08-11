@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
 
-from music_assistant.models.setup_flow import AbortFlow, SetupFlowError
+from music_assistant.models.setup_flow import (
+    AbortFlow,
+    SetupFlowContext,
+    SetupFlowError,
+    SetupSession,
+)
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_MASS_PLAYER_ID,
     CONF_PUBLISH_NAME,
@@ -18,42 +22,67 @@ from music_assistant.providers.yandex_ynison.constants import (
 )
 from music_assistant.providers.yandex_ynison.setup_flow import run_setup
 
+if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
 
-class _SetupSession:
+
+class _SetupSession(SetupSession):
     """Small setup-session fake retaining the form and persisted result."""
 
     def __init__(
         self,
         providers: dict[str, dict[str, Any]],
-        submitted: dict[str, Any],
+        submitted: dict[str, ConfigValueType],
         *,
-        values: dict[str, Any] | None = None,
-        setup_data: dict[str, Any] | None = None,
+        values: dict[str, ConfigValueType] | None = None,
+        setup_data: dict[str, ConfigValueType] | None = None,
     ) -> None:
-        self.mass = MagicMock()
-        self.mass.config.get.return_value = providers
-        self.mass.players.all_players.return_value = []
-        self.context = SimpleNamespace(
+        self._mass_mock = MagicMock()
+        self.mass = self._mass_mock
+        self._mass_mock.config.get.return_value = providers
+        self._mass_mock.players.all_players.return_value = []
+        self.context = SetupFlowContext(
+            kind="setup",
+            reason="user",
+            domain="yandex_ynison",
             values=values or {},
             setup_data=setup_data or {},
         )
         self._submitted = submitted
-        self.entries: list[Any] = []
+        self.entries: list[ConfigEntry] = []
         self.form_kwargs: dict[str, Any] = {}
         self.shown_errors: list[dict[str, str] | None] = []
-        self.finished: dict[str, Any] | None = None
+        self.finished_values: dict[str, ConfigValueType] | None = None
 
-    async def form(self, entries: list[Any], **kwargs: Any) -> dict[str, Any]:
+    async def form(
+        self,
+        entries: list[ConfigEntry],
+        step_id: str = "user",
+        errors: dict[str, str] | None = None,
+        last_step: bool | None = None,
+        expires_in: float | None = None,
+        translation_params: list[str] | None = None,
+    ) -> dict[str, ConfigValueType]:
         """Capture the presented form and return the configured submission."""
         self.entries = entries
-        self.form_kwargs = kwargs
-        self.shown_errors.append(kwargs.get("errors"))
+        self.form_kwargs = {
+            "step_id": step_id,
+            "errors": errors,
+            "last_step": last_step,
+            "expires_in": expires_in,
+            "translation_params": translation_params,
+        }
+        self.shown_errors.append(errors)
         return self._submitted
 
-    async def finish(self, values: dict[str, Any]) -> dict[str, str]:
+    async def finish(self, values: dict[str, ConfigValueType]) -> dict[str, str]:
         """Capture setup data as Music Assistant would persist it."""
-        self.finished = values
+        self.finished_values = values
         return {"instance_id": "ynison-test"}
+
+    def set_players(self, players: list[Any]) -> None:
+        """Configure the players returned by the Music Assistant fake."""
+        self._mass_mock.players.all_players.return_value = players
 
 
 def _entry(session: _SetupSession, key: str) -> Any:
@@ -78,7 +107,7 @@ async def test_single_yandex_music_instance_is_preselected_and_persisted() -> No
     assert source.value == "ym-main"
     assert [option.value for option in source.options] == ["ym-main"]
     assert session.form_kwargs["last_step"] is True
-    assert session.finished == {
+    assert session.finished_values == {
         CONF_YM_INSTANCE: "ym-main",
         CONF_MASS_PLAYER_ID: PLAYER_ID_AUTO,
         CONF_PUBLISH_NAME: DEFAULT_DISPLAY_NAME,
@@ -106,13 +135,13 @@ async def test_multiple_accounts_without_valid_prefill_require_explicit_selectio
     assert source.default_value is None
     assert source.value is None
     assert [option.value for option in source.options] == ["ym-a", "ym-b"]
-    assert session.finished is not None
-    assert session.finished[CONF_YM_INSTANCE] == "ym-b"
+    assert session.finished_values is not None
+    assert session.finished_values[CONF_YM_INSTANCE] == "ym-b"
 
 
 async def test_reconfigure_preserves_valid_identity_and_nulls_legacy_secrets() -> None:
     """Leaving legacy values intact must not preserve a second credential owner."""
-    setup_data = {
+    setup_data: dict[str, ConfigValueType] = {
         CONF_YM_INSTANCE: "ym-main",
         CONF_MASS_PLAYER_ID: "living-room",
         CONF_PUBLISH_NAME: "Living room",
@@ -133,16 +162,16 @@ async def test_reconfigure_preserves_valid_identity_and_nulls_legacy_secrets() -
     player = MagicMock()
     player.player_id = "living-room"
     player.display_name = "Living room"
-    session.mass.players.all_players.return_value = [player]
+    session.set_players([player])
 
     await run_setup(session)
 
     assert _entry(session, CONF_YM_INSTANCE).value == "ym-main"
     assert _entry(session, CONF_MASS_PLAYER_ID).value == "living-room"
     assert _entry(session, CONF_PUBLISH_NAME).value == "Living room"
-    assert session.finished is not None
+    assert session.finished_values is not None
     for key in ("token", "x_token", "account_login", "remember_session"):
-        assert session.finished[key] is None
+        assert session.finished_values[key] is None
 
 
 async def test_new_setup_does_not_persist_legacy_auth_keys() -> None:
@@ -158,8 +187,16 @@ async def test_new_setup_does_not_persist_legacy_auth_keys() -> None:
 
     await run_setup(session)
 
-    assert session.finished is not None
-    assert not {"token", "x_token", "account_login", "remember_session"} & session.finished.keys()
+    assert session.finished_values is not None
+    assert (
+        not {
+            "token",
+            "x_token",
+            "account_login",
+            "remember_session",
+        }
+        & session.finished_values.keys()
+    )
 
 
 async def test_no_yandex_music_instance_aborts_as_missing_dependency() -> None:
@@ -227,7 +264,7 @@ async def test_finish_error_reopens_form_with_preserved_values() -> None:
     class RetrySession(_SetupSession):
         attempts = 0
 
-        async def finish(self, values: dict[str, Any]) -> dict[str, str]:
+        async def finish(self, values: dict[str, ConfigValueType]) -> dict[str, str]:
             self.attempts += 1
             if self.attempts == 1:
                 raise SetupFlowError("provider rejected setup", translation_key="invalid_auth")
@@ -246,8 +283,8 @@ async def test_finish_error_reopens_form_with_preserved_values() -> None:
 
     assert session.attempts == 2
     assert session.shown_errors == [None, {"base": "invalid_auth"}]
-    assert session.finished is not None
-    assert session.finished[CONF_PUBLISH_NAME] == "Kitchen"
+    assert session.finished_values is not None
+    assert session.finished_values[CONF_PUBLISH_NAME] == "Kitchen"
 
 
 async def test_legacy_player_and_display_name_are_preserved() -> None:
@@ -264,7 +301,7 @@ async def test_legacy_player_and_display_name_are_preserved() -> None:
     player = MagicMock()
     player.player_id = "kitchen"
     player.display_name = "Kitchen"
-    session.mass.players.all_players.return_value = [player]
+    session.set_players([player])
 
     await run_setup(session)
 
