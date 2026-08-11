@@ -240,6 +240,13 @@ jobs:
               || python3 scripts/build_translations.py || true
           fi
 
+          # Provider releases can improve method ordering and thereby shrink
+          # upstream's grandfathered lint baseline. Refresh it before staging;
+          # check_method_order uses only the Python standard library.
+          if [ -f scripts/check_method_order.py ]; then
+            python3 -m scripts.check_method_order --update-baseline
+          fi
+
           # Remove the cloned provider-repo dir before staging to avoid adding it as a submodule
           rm -rf provider-repo
 
