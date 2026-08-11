@@ -778,7 +778,7 @@ def _make_direct_config(**overrides: Any) -> MagicMock:
     }
     defaults.update(overrides)
     config = MagicMock()
-    config.get_value = MagicMock(side_effect=lambda key: defaults.get(key, ""))
+    config.get_value = MagicMock(side_effect=lambda key, *_: defaults.get(key, ""))
     return config
 
 
