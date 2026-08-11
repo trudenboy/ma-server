@@ -18,8 +18,8 @@ import pytest
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
-from music_assistant_models.auth import Scope
-from music_assistant_models.config_entries import ConfigEntry
+from music_assistant_models.auth import AuthProviderType, Scope
+from music_assistant_models.config_entries import ConfigActionResult, ConfigEntry
 from music_assistant_models.enums import ConfigEntryType
 
 from music_assistant.providers.fastmcp_server import meta_discovery
@@ -681,6 +681,24 @@ def _bypass_ma_argument_parser(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+async def test_impersonation_resolves_a_builtin_ma_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy string user identifier is scoped to MA's built-in auth provider."""
+    adapter = _real_adapter(_handler("music/search", lambda: None))
+    expected_user = MagicMock(user_id="listener")
+    resolve = AsyncMock(return_value=expected_user)
+    monkeypatch.setattr(
+        "music_assistant.controllers.webserver.helpers.auth_middleware.resolve_impersonated_user",
+        resolve,
+    )
+
+    result = await adapter._resolve_impersonated_user(None, "listener")
+
+    assert result is expected_user
+    resolve.assert_awaited_once_with(adapter.mass, AuthProviderType.BUILTIN, "listener")
+
+
 async def test_adapter_discovers_handler_and_compiles_schema() -> None:
     """The runtime registry becomes a canonical ma_api catalog entry."""
 
@@ -988,6 +1006,137 @@ async def test_adapter_executes_strictly_and_bounds_result() -> None:
     assert result["truncated"] is True
     assert result["returned_count"] <= 25
     assert result["bytes"] <= 12_288
+
+
+async def test_play_media_schema_excludes_dynamic_radio_arguments() -> None:
+    """Radio stations play directly without ambiguous dynamic-radio flags."""
+
+    async def play_media(
+        queue_id: str,
+        media: str,
+        radio_mode: bool = False,
+    ) -> None:
+        del queue_id, media, radio_mode
+
+    adapter = _real_adapter(_handler("player_queues/play_media", play_media))
+    entry = (await adapter.visible_entries())[0]
+    properties = entry.input_schema["properties"]
+
+    assert "media" in properties
+    assert "uri" in properties
+    assert "radio" not in properties
+    assert "radio_mode" not in properties
+
+
+@pytest.mark.parametrize("argument", ["radio", "radio_mode"])
+async def test_play_media_rejects_dynamic_radio_arguments(argument: str) -> None:
+    """Hidden dynamic-radio arguments cannot bypass the published contract."""
+    calls: list[tuple[str, str, bool]] = []
+
+    async def play_media(
+        queue_id: str,
+        media: str,
+        radio_mode: bool = False,
+    ) -> None:
+        calls.append((queue_id, media, radio_mode))
+
+    adapter = _real_adapter(_handler("player_queues/play_media", play_media))
+
+    with pytest.raises(ToolError, match=r"\[invalid_arguments\]"):
+        await adapter.call(
+            "ma_api:player_queues/play_media",
+            {
+                "queue_id": "living-room",
+                "media": "siriusxm://radio/real-jazz",
+                argument: True,
+            },
+            response_mode="compact",
+            fields=None,
+            max_items=None,
+            ctx=MagicMock(),
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("media_argument", ["media", "uri"])
+async def test_play_media_passes_radio_uri_without_dynamic_mode(media_argument: str) -> None:
+    """A Radio URI reaches the native handler with its default direct-play mode."""
+    calls: list[tuple[str, str, bool]] = []
+
+    async def play_media(
+        queue_id: str,
+        media: str,
+        radio_mode: bool = False,
+    ) -> None:
+        calls.append((queue_id, media, radio_mode))
+
+    adapter = _real_adapter(_handler("player_queues/play_media", play_media))
+
+    await adapter.call(
+        "ma_api:player_queues/play_media",
+        {"queue_id": "living-room", media_argument: "siriusxm://radio/real-jazz"},
+        response_mode="compact",
+        fields=None,
+        max_items=None,
+        ctx=MagicMock(),
+    )
+
+    assert calls == [("living-room", "siriusxm://radio/real-jazz", False)]
+
+
+async def test_config_action_result_localizes_in_dynamic_response() -> None:
+    """Native config action messages use MA's translation resolver in MCP output."""
+
+    async def invoke() -> ConfigActionResult:
+        return ConfigActionResult(
+            translation_key="cleanup.result",
+            translation_owner="core.cache",
+            translation_args=[3],
+        )
+
+    adapter = _real_adapter(_handler("config/core/invoke_action", invoke, "config.core.write"))
+    adapter.mass.translations.get_translation.side_effect = lambda key, owner=None, params=None: (
+        f"{key}|{owner}|{','.join(params or ())}"
+    )
+
+    response = await adapter.call(
+        "ma_api:config/core/invoke_action",
+        {},
+        response_mode="full",
+        fields=None,
+        max_items=None,
+        ctx=MagicMock(),
+    )
+
+    assert response["data"] == {
+        "message": "config_actions.cleanup.result|core.cache|3",
+        "open_url": None,
+    }
+
+
+async def test_config_action_open_url_survives_dynamic_response() -> None:
+    """A one-shot action URL reaches MCP clients without translation metadata."""
+
+    async def invoke() -> ConfigActionResult:
+        return ConfigActionResult(open_url="https://ma.example/result")
+
+    adapter = _real_adapter(
+        _handler("config/providers/invoke_action", invoke, "config.providers.write")
+    )
+    response = await adapter.call(
+        "ma_api:config/providers/invoke_action",
+        {},
+        response_mode="full",
+        fields=None,
+        max_items=None,
+        ctx=MagicMock(),
+    )
+
+    assert response["data"] == {
+        "message": None,
+        "open_url": "https://ma.example/result",
+    }
 
 
 async def test_empty_upstream_exception_names_type_and_command() -> None:

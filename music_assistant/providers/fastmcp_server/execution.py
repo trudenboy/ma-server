@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING, Any
 from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_REQUEST, METHOD_NOT_FOUND
-from music_assistant_models.auth import Scope
+from music_assistant_models.auth import AuthProviderType, Scope
+from music_assistant_models.translations import TRANSLATION_RESOLVER
 
 from .audit import (
     ANONYMOUS_USER_ID,
@@ -354,6 +355,9 @@ class DynamicAPIAdapter:
                 ToolFailureCode.INVALID_ARGUMENTS,
                 "Arguments do not match the tool schema",
             ) from exc
+        if entry.profile is not None:
+            for excluded_name in entry.profile.excluded_arguments:
+                parsed.pop(excluded_name, None)
 
         initial_invocation = await self._authorize_call_audited(
             entry,
@@ -414,14 +418,18 @@ class DynamicAPIAdapter:
             impersonated=impersonated,
             impersonating=impersonating,
         )
-        return self._bounded_envelope(
-            name,
-            result,
-            response_mode=response_mode,
-            fields=fields,
-            max_items=max_items,
-            profile=invocation.entry.profile,
-        )
+        translation_token = TRANSLATION_RESOLVER.set(self.mass.translations.get_translation)
+        try:
+            return self._bounded_envelope(
+                name,
+                result,
+                response_mode=response_mode,
+                fields=fields,
+                max_items=max_items,
+                profile=invocation.entry.profile,
+            )
+        finally:
+            TRANSLATION_RESOLVER.reset(translation_token)
 
     async def _execute_authorized(
         self,
@@ -755,13 +763,16 @@ class DynamicAPIAdapter:
         *,
         allow_impersonation: bool,
     ) -> dict[str, Any]:
-        """Add provider-owned aliases and impersonation to a compiled input schema."""
+        """Apply provider aliases, exclusions, and impersonation to an input schema."""
         schema = dict(input_schema)
         properties = dict(schema["properties"])
         schema["properties"] = properties
         required = list(schema.get("required", []))
         alias_requirements: list[dict[str, Any]] = []
         if profile is not None:
+            for name in profile.excluded_arguments:
+                properties.pop(name, None)
+            required = [name for name in required if name not in profile.excluded_arguments]
             for alias, canonical in profile.argument_aliases.items():
                 canonical_schema = properties.get(canonical)
                 if canonical_schema is None:
@@ -1430,7 +1441,11 @@ class DynamicAPIAdapter:
                 auth_middleware,
             )
 
-            return await auth_middleware.resolve_impersonated_user(self.mass, requested_user)
+            return await auth_middleware.resolve_impersonated_user(
+                self.mass,
+                AuthProviderType.BUILTIN,
+                requested_user,
+            )
         except Exception as exc:
             raise ToolError(f"Unable to impersonate requested user: {exc}") from exc
         finally:

@@ -14,9 +14,6 @@ import re
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
-from music_assistant_models.config_entries import ConfigEntry
-from music_assistant_models.enums import ConfigEntryType
-
 from music_assistant.models.plugin import PluginProvider
 
 from .constants import is_hot_swappable_key
