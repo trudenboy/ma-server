@@ -5,14 +5,14 @@ These tests construct a partial provider instance via ``__new__`` (no
 ``__init__``), attach the attributes the method-under-test reads, and
 exercise it directly. The pattern avoids the upstream Music Assistant
 provider-init machinery which would otherwise drag in a real
-``MusicAssistant`` instance. Tests that exercise the cache decorator do
-need a server, and attach the minimal one from the ``mass_minimal`` fixture.
+``MusicAssistant`` instance.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+import logging
+from typing import TYPE_CHECKING, Any, cast
 from unittest import mock
 
 import pytest
@@ -20,15 +20,24 @@ from music_assistant_models.errors import LoginFailed, ResourceTemporarilyUnavai
 
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.yandex_music.constants import (
+    CONF_BASE_URL,
+    CONF_REFRESH_TOKEN,
+    CONF_RESTRICTIVE_RATE_LIMITS,
+    CONF_TOKEN,
+    CONF_X_TOKEN,
+    DEFAULT_BASE_URL,
     MY_WAVE_PLAYLIST_ID,
     TRACK_BATCH_SIZE,
 )
 from music_assistant.providers.yandex_music.provider import YandexMusicProvider
 
+from .conftest import use_real_create_task
+
+# This fork-only setup key may not exist in the installed upstream package used by local mypy.
+_CONF_MANUAL_TOKEN = "manual_token"
+
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from music_assistant.mass import MusicAssistant
 
 
 def _make_provider() -> tuple[YandexMusicProvider, mock.AsyncMock]:
@@ -59,7 +68,7 @@ def _make_auth_init_provider(
     provider.logger = mock.MagicMock()
     provider.logger.level = logging.INFO
     values = {
-        CONF_MANUAL_TOKEN: manual_token,
+        _CONF_MANUAL_TOKEN: manual_token,
         CONF_BASE_URL: DEFAULT_BASE_URL,
         CONF_RESTRICTIVE_RATE_LIMITS: False,
     }
@@ -110,7 +119,7 @@ async def test_manual_token_replacement_is_validated_then_promoted() -> None:
             mock.call(CONF_REFRESH_TOKEN, None),
         ]
     )
-    update_config_value.assert_called_once_with(CONF_MANUAL_TOKEN, None, immediate=True)
+    update_config_value.assert_called_once_with(_CONF_MANUAL_TOKEN, None, immediate=True)
 
 
 async def test_invalid_manual_token_keeps_existing_setup_credentials() -> None:
@@ -137,7 +146,7 @@ async def test_invalid_manual_token_keeps_existing_setup_credentials() -> None:
     assert client_class.call_count == 1
     refresh_music_token.assert_not_awaited()
     update_setup_data.assert_not_called()
-    update_config_value.assert_called_once_with(CONF_MANUAL_TOKEN, None, immediate=True)
+    update_config_value.assert_called_once_with(_CONF_MANUAL_TOKEN, None, immediate=True)
 
 
 # -- M4: get_playlist_tracks must not abort on a single empty batch -----------
@@ -230,13 +239,14 @@ class _StubConfig:
 
 
 @pytest.fixture
-async def cached_provider(
-    mass_minimal: MusicAssistant,
-) -> tuple[YandexMusicProvider, mock.AsyncMock]:
-    """Return a provider backed by a real (empty) cache controller."""
-    await mass_minimal.cache._setup_database()
+def cached_provider() -> tuple[YandexMusicProvider, mock.AsyncMock]:
+    """Return a provider with an empty cache and real task coalescing."""
     provider, mock_client = _make_provider()
-    provider.mass = mass_minimal
+    provider.mass = mock.MagicMock()
+    provider.mass.cache = mock.AsyncMock()
+    provider.mass.cache.get_with_freshness = mock.AsyncMock(return_value=(None, False, False))
+    provider.mass.cache.set = mock.AsyncMock()
+    use_real_create_task(provider.mass)
     provider.config = _StubConfig()  # type: ignore[assignment]
     provider.manifest = mock.MagicMock(domain="yandex_music")
     provider._wave_states = {}
@@ -251,8 +261,6 @@ async def _wait_for_gated_fetch(started: Callable[[], bool]) -> None:
         await asyncio.sleep(0.01)
     else:
         pytest.fail("gated fetch never started")
-    # a caller arriving after the gate is released would start a second fetch,
-    # which the await-count assertions below catch
     await asyncio.sleep(0.05)
 
 

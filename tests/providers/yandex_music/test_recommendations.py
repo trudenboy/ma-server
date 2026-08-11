@@ -29,9 +29,8 @@ from music_assistant.providers.yandex_music.constants import (
     ROTOR_STATION_MY_WAVE,
 )
 from music_assistant.providers.yandex_music.provider import YandexMusicProvider, _WaveState
-from tests.common import use_real_create_task
 
-from .conftest import DE_JSON_CLIENT, provider_dir
+from .conftest import DE_JSON_CLIENT, provider_dir, use_real_create_task
 
 _RECOMMENDATION_STRINGS = json.loads((provider_dir() / "strings.json").read_text(encoding="utf-8"))[
     "media"
@@ -53,9 +52,6 @@ ROW_IDS = [
 def _media_item_mock(spec: type) -> Mock:
     """
     Return a media item stand-in that a copy hands back unchanged.
-
-    A cached result is copied per caller, which real media items survive because they
-    compare by value. A mock compares by identity, so keep it out of the copy.
 
     :param spec: The media item class the mock stands in for.
     """
@@ -853,11 +849,91 @@ async def test_get_recommendation_items_chart_triggers_only_chart_fetch(
     )
     provider_mock._get_chart_recommendations = AsyncMock(return_value=folder)
 
-    mock_parsed_track = _media_item_mock(Track)
-    mock_parsed_track.item_id = "track_1"
-    with patch(
-        "music_assistant.providers.yandex_music.provider.parse_track",
-        return_value=mock_parsed_track,
+    items = await YandexMusicProvider.get_recommendation_items(provider_mock, "chart")
+
+    provider_mock._get_chart_recommendations.assert_awaited_once()
+    assert list(items) == [track]
+    assert provider_mock.client.mock_calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_recommendation_items_uses_deterministic_tag_outside_cached_helper(
+    provider_mock: Mock,
+) -> None:
+    """Mood row chooses its rotating tag before calling the cached helper."""
+    playlist = Mock(spec=Playlist)
+    folder = RecommendationFolder(
+        item_id="mood_mix",
+        provider=provider_mock.instance_id,
+        name="Mood Mix",
+        items=UniqueList([playlist]),
+    )
+    provider_mock._get_valid_tags_for_category = AsyncMock(return_value=["focus", "chill"])
+    provider_mock._rotating_row_tag = Mock(return_value="focus")
+    provider_mock._get_mood_mix_recommendations = AsyncMock(return_value=folder)
+
+    items = await YandexMusicProvider.get_recommendation_items(provider_mock, "mood_mix")
+
+    provider_mock._get_valid_tags_for_category.assert_awaited_once_with("mood")
+    provider_mock._rotating_row_tag.assert_called_once_with("mood", ["focus", "chill"])
+    provider_mock._get_mood_mix_recommendations.assert_awaited_once_with("focus")
+    assert list(items) == [playlist]
+
+
+@pytest.mark.asyncio
+async def test_get_recommendation_items_empty_or_unknown_returns_empty(
+    provider_mock: Mock,
+) -> None:
+    """Missing tags, empty helpers, and unknown row IDs yield an empty list."""
+    provider_mock._get_valid_tags_for_category = AsyncMock(return_value=[])
+    provider_mock._get_feed_recommendations = AsyncMock(return_value=None)
+
+    assert not await YandexMusicProvider.get_recommendation_items(provider_mock, "mood_mix")
+    assert not await YandexMusicProvider.get_recommendation_items(provider_mock, "feed")
+    assert not await YandexMusicProvider.get_recommendation_items(provider_mock, "unknown")
+
+
+@pytest.mark.asyncio
+async def test_rotating_row_tag_subtitle_from_warm_cache(provider_mock: Mock) -> None:
+    """A warm tag cache produces a localized rotating-row subtitle."""
+    provider_mock.mass.cache.get_with_freshness = AsyncMock(
+        return_value=(["chill", "focus"], True, True)
+    )
+    provider_mock._rotating_row_tag = YandexMusicProvider._rotating_row_tag.__get__(
+        provider_mock, YandexMusicProvider
+    )
+
+    label = await YandexMusicProvider._rotating_row_tag_subtitle(provider_mock, "mood")
+
+    assert label in {"Chill", "Focus"}
+    provider_mock.client.get_landing_tags.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rotating_row_tag_subtitle_cold_cache_returns_none(provider_mock: Mock) -> None:
+    """Descriptor discovery avoids I/O when the tag cache is cold."""
+    provider_mock.mass.cache.get_with_freshness = AsyncMock(return_value=(None, False, False))
+
+    label = await YandexMusicProvider._rotating_row_tag_subtitle(provider_mock, "activity")
+
+    assert label is None
+    provider_mock.client.get_landing_tags.assert_not_awaited()
+
+
+def test_rotating_row_tag_is_deterministic_and_category_scoped(provider_mock: Mock) -> None:
+    """Hourly tag selection is stable and incorporates the category."""
+    fixed_now = datetime(2026, 7, 30, 12, tzinfo=UTC)
+    tags = ["chill", "focus", "happy", "calm"]
+
+    with (
+        patch(
+            "music_assistant.providers.yandex_music.provider.utc",
+            return_value=fixed_now,
+        ),
+        patch(
+            "music_assistant.providers.yandex_music.provider.hashlib.sha256",
+            wraps=hashlib.sha256,
+        ) as sha256,
     ):
         mood_first = YandexMusicProvider._rotating_row_tag(provider_mock, "mood", tags)
         mood_second = YandexMusicProvider._rotating_row_tag(provider_mock, "mood", tags)
