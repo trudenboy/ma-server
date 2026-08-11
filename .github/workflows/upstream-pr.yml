@@ -58,6 +58,13 @@ jobs:
           # `workflow` scope (classic) / Workflows: write (fine-grained).
           token: ${{ secrets.FORK_SYNC_PAT }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Baseline scripts parse the whole upstream tree. Using the runner's
+          # older system Python silently skips files with newer syntax.
+          python-version-file: .python-version
+
       - name: Resolve domain and clone provider release
         env:
           GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
