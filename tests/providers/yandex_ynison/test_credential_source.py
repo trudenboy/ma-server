@@ -13,8 +13,8 @@ from ya_passport_auth import SecretStr
 from music_assistant.providers.yandex_ynison.credential_source import YandexMusicCredentialSource
 
 
-def test_reads_music_and_x_tokens_from_setup_data() -> None:
-    """Removing setup-data reads must make linked authentication lose both tokens."""
+def test_reads_only_setup_owned_tokens() -> None:
+    """Credentials must flow through the linked provider's public setup accessor only."""
     owner = MagicMock()
     owner.domain = "yandex_music"
     owner.type = ProviderType.MUSIC
@@ -25,6 +25,7 @@ def test_reads_music_and_x_tokens_from_setup_data() -> None:
     owner.config.get_value.side_effect = AssertionError("ordinary config must not be read")
     mass = MagicMock()
     mass.get_provider.return_value = owner
+    mass.config = MagicMock()
 
     music_token, x_token = YandexMusicCredentialSource(mass, "ym-primary").read_tokens()
 
@@ -32,6 +33,7 @@ def test_reads_music_and_x_tokens_from_setup_data() -> None:
     assert music_token.get_secret() == "music-token"
     assert isinstance(x_token, SecretStr)
     assert x_token.get_secret() == "x-token"
+    assert mass.config.mock_calls == []
 
 
 def test_preserves_secret_values_and_normalizes_empty_values() -> None:

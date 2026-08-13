@@ -17,9 +17,12 @@ from music_assistant_models.enums import (
     ProviderType,
 )
 from music_assistant_models.errors import (
+    ActionUnavailable,
     LoginFailed,
+    MediaNotFoundError,
     PlayerCommandFailed,
     ResourceTemporarilyUnavailable,
+    RetriesExhausted,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioFormat, AudioSource
@@ -429,6 +432,28 @@ class TestSourceSelection:
         assert provider._active_player_id == "spb_base-player"
         assert provider._in_use_by_queue == "base-player"
 
+    async def test_known_failure_stopping_previous_player_keeps_selection(self) -> None:
+        """A typed player-command failure must not block a new source selection."""
+        provider = _make_provider()
+        provider._active_player_id = "old-player"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=PlayerCommandFailed("stop failed"))
+
+        await provider.on_source_selected("main", "new-player", "new-player", "session_1")
+
+        assert provider._active_player_id == "new-player"
+        assert provider._in_use_by_queue == "new-player"
+
+    async def test_unexpected_failure_stopping_previous_player_propagates(self) -> None:
+        """An unexpected stop error must not be mistaken for an operational failure."""
+        provider = _make_provider()
+        provider._active_player_id = "old-player"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("bug"))
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await provider.on_source_selected("main", "new-player", "new-player", "session_1")
+
+        assert provider._active_player_id == "old-player"
+
     async def test_on_source_selected_switching_disabled(self) -> None:
         """Rejects source selection when player switching is disabled."""
         mass = _make_mock_mass()
@@ -440,7 +465,7 @@ class TestSourceSelection:
         provider._default_player_id = "default-player"
         mass.players.get_player.return_value = MagicMock()
 
-        with pytest.raises(RuntimeError, match="Player switching is disabled"):
+        with pytest.raises(ActionUnavailable, match="Player switching is disabled"):
             await provider.on_source_selected("main", "other-player", "other-player", "session_1")
 
         # Should have redirected to the configured default via play_media
@@ -467,7 +492,7 @@ class TestSourceSelection:
         mass.players.get_player.return_value = MagicMock()
 
         for _ in range(3):
-            with pytest.raises(RuntimeError, match="Player switching is disabled"):
+            with pytest.raises(ActionUnavailable, match="Player switching is disabled"):
                 await provider.on_source_selected(
                     "main", "other-player", "other-player", "session_1"
                 )
@@ -1435,10 +1460,10 @@ class TestPCMNormalization:
         assert mapping.audio_format is not original_format
 
     async def test_stream_track_api_error_returns_empty(self) -> None:
-        """If get_stream_details fails, _stream_track yields nothing."""
+        """A typed stream-details failure ends the track without yielding audio."""
         provider = _make_provider()
         mock_yandex = MagicMock()
-        mock_yandex.get_stream_details = AsyncMock(side_effect=Exception("API error"))
+        mock_yandex.get_stream_details = AsyncMock(side_effect=MediaNotFoundError("API error"))
         provider._yandex_provider = mock_yandex
 
         collected: list[bytes] = []
@@ -1482,6 +1507,35 @@ class TestPCMNormalization:
         assert provider._stream_stop_event.is_set()
 
 
+class TestRadioReplenishmentErrors:
+    """Radio queue fallback owns typed MA failures only."""
+
+    async def test_known_ma_error_returns_none(self) -> None:
+        """A provider-reported media failure leaves the radio queue unchanged."""
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._yandex_provider.get_rotor_station_tracks = AsyncMock(
+            side_effect=MediaNotFoundError("missing")
+        )
+
+        result = await provider._replenish_radio_queue(
+            "station1", "RADIO", [{"playable_id": "track1"}]
+        )
+
+        assert result is None
+
+    async def test_unexpected_error_propagates(self) -> None:
+        """An internal radio API error must not look like an empty station."""
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        provider._yandex_provider.get_rotor_station_tracks = AsyncMock(
+            side_effect=RuntimeError("bug")
+        )
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await provider._replenish_radio_queue("station1", "RADIO", [{"playable_id": "track1"}])
+
+
 def _make_ym_provider_stub(
     instance_id: str = "ym-inst",
     token: str | None = None,
@@ -1520,11 +1574,12 @@ class TestPlayerRateSnap:
         )
 
     @staticmethod
-    def _link_player(provider: YandexYnisonProvider, rates: list[tuple[int, int]]) -> None:
+    def _link_player(provider: YandexYnisonProvider, rates: list[tuple[int, int]]) -> MagicMock:
         player = MagicMock()
         player.get_supported_sample_rates = MagicMock(return_value=rates)
         provider._active_player_id = "p1"
         provider.mass.players.get_player = MagicMock(return_value=player)  # type: ignore[attr-defined]
+        return player
 
     async def test_hi_res_rate_snapped_down_to_supported(self) -> None:
         """A 96 kHz hint on a 48 kHz-max player declares 48 kHz (fast-path hit)."""
@@ -1563,6 +1618,25 @@ class TestPlayerRateSnap:
         self._link_player(provider, [(44100, 16), (48000, 24)])
         provider._update_normalized_format(hint=self._hint(48000))
         assert provider._normalized_format.sample_rate == 96000
+
+    async def test_invalid_capability_data_keeps_hint_rate(self) -> None:
+        """Malformed player capability data uses the selected source rate."""
+        provider = _make_provider()
+        player = self._link_player(provider, [])
+        player.get_supported_sample_rates.side_effect = ValueError("invalid capabilities")
+
+        provider._update_normalized_format(hint=self._hint(96000))
+
+        assert provider._normalized_format.sample_rate == 96000
+
+    async def test_unexpected_capability_error_propagates(self) -> None:
+        """An internal capability error must not be hidden by rate fallback."""
+        provider = _make_provider()
+        player = self._link_player(provider, [])
+        player.get_supported_sample_rates.side_effect = RuntimeError("bug")
+
+        with pytest.raises(RuntimeError, match="bug"):
+            provider._update_normalized_format(hint=self._hint(96000))
 
 
 class TestResolveLinkedToken:
@@ -2086,7 +2160,7 @@ class TestPausePlayback:
         provider = _make_provider()
         provider._active_player_id = "spb_bridge1"
         provider._in_use_by_queue = "player1"
-        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("boom"))
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=PlayerCommandFailed("boom"))
 
         await provider._pause_playback()
 
@@ -2099,6 +2173,16 @@ class TestPausePlayback:
         # "successfully paused, expecting resume" state.
         assert provider._externally_paused is False
 
+    async def test_unexpected_cmd_stop_error_propagates(self) -> None:
+        """An unexpected player-controller error must escape the pause fallback."""
+        provider = _make_provider()
+        provider._active_player_id = "spb_bridge1"
+        provider._in_use_by_queue = "player1"
+        provider.mass.players.cmd_stop = AsyncMock(side_effect=RuntimeError("bug"))
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await provider._pause_playback()
+
     async def test_no_active_player_is_a_noop(self) -> None:
         """Pause with no active queue does not call cmd_stop or set the stop event."""
         provider = _make_provider()
@@ -2109,6 +2193,36 @@ class TestPausePlayback:
 
         assert not provider._stream_stop_event.is_set()
         provider.mass.players.cmd_stop.assert_not_called()
+
+
+class TestStreamTrackErrorHandling:
+    """Expected MA failures end a track while unexpected failures propagate."""
+
+    async def test_stream_details_ma_error_ends_track(self) -> None:
+        """An exhausted operational lookup stops the stream without yielding audio."""
+        provider = _make_provider()
+        _stub_attr(
+            provider,
+            "_get_stream_details_with_retry",
+            AsyncMock(side_effect=RetriesExhausted("unavailable")),
+        )
+
+        chunks = [chunk async for chunk in provider._stream_track("track1")]
+
+        assert chunks == []
+        assert provider._stream_stop_event.is_set()
+
+    async def test_unexpected_stream_details_error_propagates(self) -> None:
+        """An internal lookup bug must not be converted into an ordinary stream end."""
+        provider = _make_provider()
+        _stub_attr(
+            provider,
+            "_get_stream_details_with_retry",
+            AsyncMock(side_effect=RuntimeError("bug")),
+        )
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await anext(provider._stream_track("track1"))
 
 
 # ------------------------------------------------------------------
@@ -2311,7 +2425,9 @@ class TestGetStreamDetailsWithRetry:
         sd = MagicMock()
         sd.expiration = 600
         sd.to_dict.return_value = {"track_id": "t1"}
-        mock_yp.get_stream_details = AsyncMock(side_effect=[RuntimeError("transient"), sd])
+        mock_yp.get_stream_details = AsyncMock(
+            side_effect=[ResourceTemporarilyUnavailable("transient"), sd]
+        )
         provider._yandex_provider = mock_yp
 
         with patch(
@@ -2322,10 +2438,12 @@ class TestGetStreamDetailsWithRetry:
         assert mock_yp.get_stream_details.await_count == 2
 
     async def test_raises_after_max_retries(self) -> None:
-        """Raises RuntimeError after all retries exhausted."""
+        """Raises RetriesExhausted after all transient retries are exhausted."""
         provider = _make_provider()
         mock_yp = MagicMock()
-        mock_yp.get_stream_details = AsyncMock(side_effect=RuntimeError("always fails"))
+        mock_yp.get_stream_details = AsyncMock(
+            side_effect=ResourceTemporarilyUnavailable("always fails")
+        )
         provider._yandex_provider = mock_yp
 
         with (
@@ -2333,10 +2451,22 @@ class TestGetStreamDetailsWithRetry:
                 "music_assistant.providers.yandex_ynison.provider.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
-            pytest.raises(RuntimeError, match="failed after"),
+            pytest.raises(RetriesExhausted, match="failed after"),
         ):
             await provider._get_stream_details_with_retry("t1")
         assert mock_yp.get_stream_details.await_count == _API_MAX_RETRIES
+
+    async def test_permanent_error_is_not_retried(self) -> None:
+        """A permanent MA error propagates without consuming the retry budget."""
+        provider = _make_provider()
+        mock_yp = MagicMock()
+        mock_yp.get_stream_details = AsyncMock(side_effect=MediaNotFoundError("missing"))
+        provider._yandex_provider = mock_yp
+
+        with pytest.raises(MediaNotFoundError, match="missing"):
+            await provider._get_stream_details_with_retry("t1")
+
+        mock_yp.get_stream_details.assert_awaited_once()
 
     async def test_cancellation_not_retried(self) -> None:
         """CancelledError propagates immediately, no retry."""
@@ -3022,6 +3152,68 @@ class TestDynamicSessionCoordinator:
         assert fetch.await_count == 2
         invalidate.assert_awaited_once_with("track2")
 
+    async def test_exhausted_transient_batch_is_retried(self) -> None:
+        """Dynamic startup starts a fresh retry batch after transient exhaustion."""
+        provider = _make_provider()
+        self._enable(provider, [(96_000, 24)])
+        valid = self._details(96_000, 24)
+        fetch = AsyncMock(side_effect=[RetriesExhausted("temporary"), valid])
+        _stub_attr(provider, "_get_stream_details_with_retry", fetch)
+
+        with patch(
+            "music_assistant.providers.yandex_ynison.provider.asyncio.sleep", new=AsyncMock()
+        ):
+            result = await provider._get_dynamic_stream_details("track2", 7)
+
+        assert result is valid
+        assert fetch.await_count == 2
+
+    @pytest.mark.parametrize(
+        "error",
+        [MediaNotFoundError("missing"), RuntimeError("bug")],
+        ids=["permanent-ma-error", "unexpected-python-error"],
+    )
+    async def test_non_transient_dynamic_error_propagates(self, error: Exception) -> None:
+        """Dynamic startup must not retry permanent failures or internal bugs."""
+        provider = _make_provider()
+        self._enable(provider, [(96_000, 24)])
+        fetch = AsyncMock(side_effect=error)
+        _stub_attr(provider, "_get_stream_details_with_retry", fetch)
+
+        async def _end_generation(_delay: float) -> None:
+            provider._dynamic_generation += 1
+
+        sleep = AsyncMock(side_effect=_end_generation)
+        with (
+            patch("music_assistant.providers.yandex_ynison.provider.asyncio.sleep", new=sleep),
+            pytest.raises(type(error), match=str(error)),
+        ):
+            await provider._get_dynamic_stream_details("track2", 7)
+
+        fetch.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    def test_invalid_actual_player_capabilities_use_source_pcm(self) -> None:
+        """Malformed actual-player capabilities preserve the source signature."""
+        provider = _make_provider()
+        player = MagicMock()
+        player.get_supported_sample_rates.side_effect = ValueError("invalid capabilities")
+        provider.mass.players.get_player.return_value = player
+
+        signature = provider._effective_signature_for_player(self._details(96_000, 24), "player1")
+
+        assert signature == (ContentType.PCM_S24LE, 96_000, 24, 2)
+
+    def test_unexpected_actual_player_capability_error_propagates(self) -> None:
+        """An internal actual-player lookup error must not select guessed PCM."""
+        provider = _make_provider()
+        player = MagicMock()
+        player.get_supported_sample_rates.side_effect = RuntimeError("bug")
+        provider.mass.players.get_player.return_value = player
+
+        with pytest.raises(RuntimeError, match="bug"):
+            provider._effective_signature_for_player(self._details(96_000, 24), "player1")
+
     async def test_on_source_selected_recalculates_for_actual_consumer(self) -> None:
         """The callback must replace a target guess before MA requests StreamDetails."""
         provider = _make_provider()
@@ -3357,6 +3549,38 @@ class TestDynamicSessionCoordinator:
         assert task.cancelled()
         assert provider._dynamic_generation == old_generation + 1
         assert provider._prefetched_stream_details == {}
+
+
+class TestPrefetchErrorHandling:
+    """Ordinary format prefetch owns typed MA failures only."""
+
+    async def test_known_ma_error_keeps_current_format(self) -> None:
+        """A provider-reported prefetch failure preserves the session format."""
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        before = dict(provider._normalized_params)
+        _stub_attr(
+            provider,
+            "_get_stream_details_with_retry",
+            AsyncMock(side_effect=MediaNotFoundError("missing")),
+        )
+
+        await provider._prefetch_format_for_track("track1")
+
+        assert provider._normalized_params == before
+
+    async def test_unexpected_error_propagates(self) -> None:
+        """An internal prefetch error must not be converted into a format fallback."""
+        provider = _make_provider()
+        provider._yandex_provider = MagicMock()
+        _stub_attr(
+            provider,
+            "_get_stream_details_with_retry",
+            AsyncMock(side_effect=RuntimeError("bug")),
+        )
+
+        with pytest.raises(RuntimeError, match="bug"):
+            await provider._prefetch_format_for_track("track1")
 
 
 class TestPrefetchFlowsThroughToStreamDetails:
@@ -3710,14 +3934,8 @@ class TestBypassThrottlerScope:
         mock_ynison.state.is_paused = False
         provider._ynison = mock_ynison
 
-        # _stream_track swallows the exception, sets the stop event, returns.
-        # Patch asyncio.sleep so the inner retry-with-backoff (2s + 4s) does
-        # not block the test in real time.
-        with patch(
-            "music_assistant.providers.yandex_ynison.provider.asyncio.sleep", new=AsyncMock()
-        ):
-            async for _ in provider._stream_track("track1"):
-                pass
+        with pytest.raises(RuntimeError, match="boom"):
+            await anext(provider._stream_track("track1"))
 
         assert BYPASS_THROTTLER.get() is False
 

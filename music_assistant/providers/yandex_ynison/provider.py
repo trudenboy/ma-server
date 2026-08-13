@@ -24,9 +24,13 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import (
+    ActionUnavailable,
     LoginFailed,
     MediaNotFoundError,
+    MusicAssistantError,
     PlayerCommandFailed,
+    ResourceTemporarilyUnavailable,
+    RetriesExhausted,
     UnsupportedFeaturedException,
 )
 from music_assistant_models.media_items import AudioSource, ProviderMapping
@@ -693,7 +697,7 @@ class YandexYnisonProvider(PluginProvider):
                         current_target, str(self._audio_source.uri)
                     )
                 msg = f"Player switching is disabled; source must remain on {current_target}"
-                raise RuntimeError(msg)
+                raise ActionUnavailable(msg)
 
         if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
             track_id = self._pending_restart_track_id or (
@@ -729,7 +733,7 @@ class YandexYnisonProvider(PluginProvider):
             )
             try:
                 await self.mass.players.cmd_stop(prev_player_id)
-            except Exception as err:
+            except PlayerCommandFailed as err:
                 self.logger.debug(
                     "Failed to stop previous player %s: %s",
                     prev_player_id,
@@ -821,7 +825,7 @@ class YandexYnisonProvider(PluginProvider):
         bypass_token = BYPASS_THROTTLER.set(True)
         try:
             stream_details = await self._get_stream_details_with_retry(track_id)
-        except Exception:
+        except MusicAssistantError:
             self.logger.exception("Failed to get stream details for track %s", track_id)
             self._stream_stop_event.set()
             return
@@ -929,7 +933,7 @@ class YandexYnisonProvider(PluginProvider):
                 return sd
             except asyncio.CancelledError:
                 raise
-            except Exception as err:
+            except ResourceTemporarilyUnavailable as err:
                 last_err = err
                 if attempt < _API_MAX_RETRIES - 1:
                     jitter = backoff * random.uniform(0.75, 1.25)
@@ -943,7 +947,7 @@ class YandexYnisonProvider(PluginProvider):
                     await asyncio.sleep(jitter)
                     backoff = min(backoff * 2, _API_MAX_BACKOFF)
         msg = f"get_stream_details failed after {_API_MAX_RETRIES} attempts for {track_id}"
-        raise RuntimeError(msg) from last_err
+        raise RetriesExhausted(msg) from last_err
 
     async def _invalidate_stream_cache(self, track_id: str) -> None:
         """Evict cached stream details for a track so the next fetch is fresh."""
@@ -1405,7 +1409,7 @@ class YandexYnisonProvider(PluginProvider):
         self._stream_stop_event.set()
         try:
             await self.mass.players.cmd_stop(target)
-        except Exception:
+        except PlayerCommandFailed:
             # cmd_stop is the only mechanism that flips MA's PlaybackState
             # to IDLE for an AudioSource. A silent failure here resurrects
             # the very UX bug this code path exists to fix.
@@ -1542,7 +1546,7 @@ class YandexYnisonProvider(PluginProvider):
                 _PREFETCH_FORMAT_TIMEOUT,
             )
             return
-        except Exception:
+        except MusicAssistantError:
             self.logger.warning(
                 "Pre-fetch of stream details failed for %s — keeping current format",
                 track_id,
@@ -1650,7 +1654,7 @@ class YandexYnisonProvider(PluginProvider):
             if not supported or rate in supported:
                 return rate
             return max((r for r in supported if r <= rate), default=min(supported))
-        except Exception:
+        except AttributeError, TypeError, ValueError:
             self.logger.debug(
                 "Could not snap sample rate to player capabilities; keeping %d Hz",
                 rate,
@@ -2003,7 +2007,7 @@ class YandexYnisonProvider(PluginProvider):
             except asyncio.CancelledError:
                 self.logger.debug("Dynamic prefetch cancelled for %s", track_id)
                 raise
-            except Exception as err:
+            except (ResourceTemporarilyUnavailable, RetriesExhausted, ValueError) as err:
                 self.logger.warning(
                     "Dynamic prefetch for %s failed (%s); retrying in %.1fs",
                     track_id,
@@ -2065,7 +2069,7 @@ class YandexYnisonProvider(PluginProvider):
             player = self.mass.players.get_player(player_id)
             if player is not None:
                 supported = list(player.get_supported_sample_rates())
-        except Exception:
+        except AttributeError, TypeError, ValueError:
             self.logger.debug(
                 "Could not resolve supported formats for %s; using source PCM",
                 player_id,
@@ -2385,7 +2389,7 @@ class YandexYnisonProvider(PluginProvider):
             tracks, batch_id = await self._yandex_provider.get_rotor_station_tracks(
                 entity_id, queue=last_track_id
             )
-        except Exception:
+        except MusicAssistantError:
             self.logger.exception("Failed to fetch radio tracks for %s", entity_id)
             return None
 

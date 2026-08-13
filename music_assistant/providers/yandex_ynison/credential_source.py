@@ -1,4 +1,11 @@
-"""Read linked Yandex Music credentials from Music Assistant setup data."""
+"""
+Adapt Music Assistant setup-owned Yandex Music credentials for Ynison.
+
+This provider-local boundary resolves and validates the linked Music Assistant
+provider. It only reads credentials through the owner's public setup-data API;
+token persistence, rotation, and generic Passport authentication remain outside
+this module.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +22,7 @@ if TYPE_CHECKING:
 
 
 class YandexMusicCredentialSource:
-    """Read credentials owned by one linked Yandex Music provider instance."""
+    """Read setup-owned credentials from one linked Yandex Music instance."""
 
     def __init__(self, mass: MusicAssistant, instance_id: str) -> None:
         """
