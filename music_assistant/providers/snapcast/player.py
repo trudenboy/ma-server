@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from typing import TYPE_CHECKING, TypedDict, cast
 
-from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
+from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import IdentifierType, PlaybackState, PlayerFeature
 from music_assistant_models.player import DeviceInfo, PlayerMedia
 from propcache import under_cached_property as cached_property
@@ -22,14 +22,15 @@ from music_assistant.providers.snapcast.ma_stream import SnapcastMAStream
 from music_assistant.providers.sync_group.constants import SGP_PREFIX
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
+    from music_assistant_models.config_entries import ConfigEntry
 
     from music_assistant.providers.snapcast.provider import SnapCastProvider
     from music_assistant.providers.snapcast.snap_cntrl_proto import SnapclientProto, SnapstreamProto
 
 
 class TrackedPlayerState(TypedDict, total=False):
-    """Tracked state for the Snapcast MA player.
+    """
+    Tracked state for the Snapcast MA player.
 
     It is used for change detection and state synchronization, and may be
     partially populated depending on which information is
@@ -57,9 +58,6 @@ class TrackedPlayerState(TypedDict, total=False):
 class SnapCastPlayer(Player):
     """SnapCastPlayer."""
 
-    # snapcast has fixed sample rate/bit depth
-    _attr_supported_sample_rates = [(48000, 16)]
-
     def __init__(
         self,
         provider: SnapCastProvider,
@@ -69,6 +67,10 @@ class SnapCastPlayer(Player):
         """Init."""
         self.snap_client = snap_client
         super().__init__(provider, player_id)
+
+        # Snapcast stream format is fixed for a provider instance (from advanced settings)
+        stream_format = provider.stream_audio_format
+        self._attr_supported_sample_rates = [(stream_format.sample_rate, stream_format.bit_depth)]
 
         self._snap_ma_stream: SnapcastMAStream | None = None
 
@@ -372,11 +374,7 @@ class SnapCastPlayer(Player):
                 else "default"
             )
 
-    async def get_config_entries(
-        self,
-        action: str | None = None,
-        values: dict[str, ConfigValueType] | None = None,
-    ) -> list[ConfigEntry]:
+    async def get_config_entries(self) -> list[ConfigEntry]:
         """Player config."""
         return [
             # we don't use the http server for streaming
@@ -415,7 +413,8 @@ class SnapCastPlayer(Player):
                 break
 
     async def _process_snapcast_client_state(self) -> bool:
-        """Process the latest Snapcast client state and apply changes to this player.
+        """
+        Process the latest Snapcast client state and apply changes to this player.
 
         Returns:
         True if changes were applied and a state update should be emitted via

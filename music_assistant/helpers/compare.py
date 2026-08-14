@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from difflib import SequenceMatcher
 
-import unidecode
 from music_assistant_models.enums import ExternalID, MediaType
+from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -87,6 +86,13 @@ def compare_artist(
         )
         if external_id_match is not None:
             return external_id_match
+    # return early if artist_types don't match
+    if (
+        isinstance(base_item, Artist)
+        and isinstance(compare_item, Artist)
+        and base_item.artist_type != compare_item.artist_type
+    ):
+        return False
     # finally comparing on (exact) name match
     return compare_strings(base_item.name, compare_item.name, strict=strict)
 
@@ -284,6 +290,9 @@ def compare_radio(
     # return early on exact item_id match
     if compare_item_ids(base_item, compare_item):
         return True
+    # a dynamic station is its provider's own, so a same-named station is a different one
+    if _is_dynamic_radio(base_item) or _is_dynamic_radio(compare_item):
+        return False
     # compare version
     if not compare_version(base_item.version, compare_item.version):
         return False
@@ -331,8 +340,8 @@ def compare_audiobook(
     ):
         return False
 
-    def _audiobook_artist_name(value: str | Artist) -> str:
-        return value.name if isinstance(value, Artist) else value
+    def _audiobook_artist_name(value: str | Artist | ItemMapping) -> str:
+        return value.name if isinstance(value, Artist | ItemMapping) else value
 
     # compare narrator(s) — different narrators indicate different recordings and must not be merged
     if base_item.narrators and compare_item.narrators:
@@ -535,23 +544,6 @@ def compare_external_ids(
     return None
 
 
-def create_safe_string(input_str: str, lowercase: bool = True, replace_space: bool = False) -> str:
-    """Return clean lowered string for compare actions."""
-    # handle some special cases
-    if input_str in ("P!nk", "p!nk"):
-        input_str = input_str.replace("!", "i")
-    if input_str in ("Wh♂", "wh♂"):
-        input_str = input_str.replace("♂", "o")
-    if input_str in ("KoЯn", "koЯn"):
-        input_str = input_str.replace("Я", "r")
-    if input_str == "$hort":
-        input_str = input_str.replace("$hort", "short")
-    input_str = input_str.lower().strip() if lowercase else input_str.strip()
-    unaccented_string = unidecode.unidecode(input_str)
-    regex = r"[^a-zA-Z0-9]" if replace_space else r"[^a-zA-Z0-9 ]"
-    return re.sub(regex, "", unaccented_string)
-
-
 def loose_compare_strings(base: str, alt: str) -> bool:
     """Compare strings and return True even on partial match."""
     # this is used to display 'versions' of the same track/album
@@ -632,3 +624,8 @@ def compare_explicit(base: MediaItemMetadata, compare: MediaItemMetadata) -> boo
         # only strict compare them if both have the info set
         return base.explicit == compare.explicit
     return None
+
+
+def _is_dynamic_radio(item: Radio | ItemMapping) -> bool:
+    """Return True if the item is a dynamic radio station."""
+    return isinstance(item, Radio) and item.is_dynamic

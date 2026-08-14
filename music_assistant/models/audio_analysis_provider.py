@@ -104,6 +104,9 @@ class AudioAnalysisProvider(Provider):
         """Initialize AudioAnalysisProvider."""
         super().__init__(mass, manifest, config, supported_features)
         self._sessions: dict[str, AnalysisSessionData] = {}
+        # Serializes (re)loading of heavy models so concurrent session starts load them once.
+        self._models_lock = asyncio.Lock()
+        self._models_loaded = False
 
     async def start_analysis(
         self,
@@ -140,31 +143,36 @@ class AudioAnalysisProvider(Provider):
         )
         if stored_version is not None and stored_version >= self.analysis_version:
             return False
+        if self.has_unloadable_models and not await self.ensure_models_loaded():
+            return False
         self._sessions[session_id] = AnalysisSessionData(
             streamdetails=streamdetails,
             audio_format=audio_format,
         )
-        if not await self._start_analysis(session_id, streamdetails, audio_format):
+        session = self._sessions[session_id]
+        try:
+            accepted = await self._start_analysis(session_id, streamdetails, audio_format)
+        except AudioAnalysisError as err:
+            await self._record_failure(session, err.reason, err.retry_at)
+            self._sessions.pop(session_id, None)
+            return False
+        except asyncio.CancelledError:
+            # Cancellation is not an analysis failure: let it propagate without recording.
+            raise
+        except Exception as err:
+            # _start_analysis is provider-implemented (ffmpeg/torch/numpy decode); its
+            # failure surface is open-ended, so the catch stays broad. Any unexpected
+            # error is logged with a traceback and recorded as a failure.
+            self.logger.error(
+                "_start_analysis raised for session %s: %s", session_id, err, exc_info=err
+            )
+            await self._record_failure(session, str(err), None)
+            self._sessions.pop(session_id, None)
+            return False
+        if not accepted:
             self._sessions.pop(session_id, None)
             return False
         return True
-
-    @abstractmethod
-    async def _start_analysis(
-        self,
-        session_id: str,
-        streamdetails: StreamDetails,
-        audio_format: AudioFormat,
-    ) -> bool:
-        """
-        Provider-specific initialization for a new analysis session.
-
-        Return False to reject the session (e.g. unsupported format).
-
-        :param session_id: The analysis session ID.
-        :param streamdetails: The stream details for the item being analyzed.
-        :param audio_format: PCM format of the audio stream.
-        """
 
     @abstractmethod
     async def process_pcm_chunk(
@@ -182,25 +190,24 @@ class AudioAnalysisProvider(Provider):
         :param pcm_chunk: Raw PCM audio data.
         """
 
-    @abstractmethod
-    async def _finalize(self, session_id: str) -> AudioAnalysisData | None:
-        """
-        Compute and return the analysis for this session (or None to skip).
-
-        The base class persists the returned value via set_audio_analysis() and
-        then fires post_analysis(). Return None to skip both.
-
-        :param session_id: The analysis session ID.
-        """
-
     async def finalize(self, session_id: str) -> None:
         """Finalize analysis, persist the result, fire post_analysis, then clean up."""
         analysis: AudioAnalysisData | None = None
+        session = self._sessions.get(session_id)
         try:
             analysis = await self._finalize(session_id)
+        except AudioAnalysisError as err:
+            if session is not None:
+                await self._record_failure(session, err.reason, err.retry_at)
+        except asyncio.CancelledError:
+            # Cancellation is not an analysis failure: let it propagate without recording.
+            raise
         except Exception as err:
+            # _finalize is provider-implemented (torch/ffmpeg inference); its failure
+            # surface is open-ended, so the catch stays broad — logged and recorded.
             self.logger.error("_finalize raised for session %s: %s", session_id, err, exc_info=err)
-        session = self._sessions.get(session_id)
+            if session is not None:
+                await self._record_failure(session, str(err), None)
         if analysis is not None and session is not None:
             try:
                 await self.mass.streams.audio_analysis.set_audio_analysis(
@@ -212,6 +219,8 @@ class AudioAnalysisProvider(Provider):
                     media_type=session.streamdetails.media_type,
                 )
             except Exception as err:
+                # Persisting (DB write + provider lookup) must never break session
+                # cleanup below, so the catch stays broad — logged and skipped.
                 self.logger.warning(
                     "set_audio_analysis raised for %s: %s", self.domain, err, exc_info=err
                 )
@@ -219,6 +228,8 @@ class AudioAnalysisProvider(Provider):
                 try:
                     await self.post_analysis(session.streamdetails, analysis)
                 except Exception as err:
+                    # post_analysis is a provider-implemented hook with an open-ended
+                    # failure surface; a failing side effect must not break cleanup.
                     self.logger.warning(
                         "post_analysis raised for %s: %s", self.domain, err, exc_info=err
                     )
@@ -246,9 +257,12 @@ class AudioAnalysisProvider(Provider):
         self._sessions.pop(session_id, None)
 
     async def unload(self, is_removed: bool = False) -> None:
-        """Handle unload, cancelling any active analysis sessions."""
+        """Handle unload, cancelling any active analysis sessions and freeing models."""
         for session_id in list(self._sessions):
             await self.cancel(session_id)
+        async with self._models_lock:
+            self._free_models()
+            self._models_loaded = False
         await super().unload(is_removed)
 
     async def _run_offloaded(self, func: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:

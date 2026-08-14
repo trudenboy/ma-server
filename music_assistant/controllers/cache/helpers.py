@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast, get_type_hints
 
 from music_assistant.controllers.cache.constants import DEFAULT_CACHE_EXPIRATION, SerializableType
 from music_assistant.helpers.api import parse_value
+from music_assistant.helpers.json import SerializableType
 
 if TYPE_CHECKING:
     from music_assistant.models.core_controller import CoreController
@@ -32,6 +34,9 @@ def use_cache(
 ]:
     """
     Return decorator that can be used to cache a method's result.
+
+    Concurrent callers that miss the cache on the same key share one execution and each
+    get their own copy of the result, or the one object when it cannot be copied.
 
     :param expiration: Time in seconds the cache entry should be valid.
     :param category: Category to group cache objects.
@@ -92,3 +97,26 @@ def use_cache(
         return wrapper
 
     return _decorator
+
+
+@dataclass(slots=True)
+class _FlightOutcome[ResultT]:
+    """Outcome of one shared fetch, handed to every caller awaiting that fetch."""
+
+    result: ResultT | None = None
+    error: Exception | None = None
+
+
+@functools.cache
+def _resolve_return_hint(func: Callable[..., Any]) -> Any:
+    """
+    Return the resolved return-type annotation of func, memoized per function.
+
+    A function's return annotation is invariant for the process lifetime, so it is resolved
+    once and cached instead of re-running get_type_hints() — which re-evaluates the PEP-563
+    string annotations — on every cache hit. Resolution stays lazy (it happens on the first
+    hit, not at decoration time), so forward-reference handling is unchanged.
+
+    :param func: The decorated function whose return-type annotation to resolve.
+    """
+    return get_type_hints(func)["return"]

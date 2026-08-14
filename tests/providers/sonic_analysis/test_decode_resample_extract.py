@@ -61,7 +61,8 @@ async def _start_session(
     session_id: str,
     sample_rate: int = 22050,
 ) -> None:
-    """Seed _sessions and call _start_analysis.
+    """
+    Seed _sessions and call _start_analysis.
 
     :param provider: The provider instance to register the session on.
     :param session_id: The session ID to register.

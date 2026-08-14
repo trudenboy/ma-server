@@ -2,20 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
-from music_assistant_models.enums import ConfigEntryType, ProviderFeature
-from music_assistant_models.errors import SetupFailedError
+from music_assistant_models.enums import ProviderFeature
 
-from music_assistant.constants import (
-    CONF_ENTRY_UNOFFICIAL_PROVIDER,
-    CONF_PASSWORD,
-    CONF_SOCKS_URL,
-    CONF_USERNAME,
-)
-
-from .constants import CONF_QUALITY, CONF_TAKEOVER_ACTION, QUALITY_HIGH, QUALITY_STANDARD
 from .provider import PandoraProvider
 
 if TYPE_CHECKING:
@@ -36,20 +26,6 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider instance with given configuration."""
-    username = config.get_value(CONF_USERNAME)
-    password = config.get_value(CONF_PASSWORD)
-
-    # Type-safe validation
-    if (
-        not username
-        or not password
-        or not isinstance(username, str)
-        or not isinstance(password, str)
-        or not username.strip()
-        or not password.strip()
-    ):
-        raise SetupFailedError("Username and password are required")
-
     return PandoraProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 

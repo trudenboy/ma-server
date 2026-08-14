@@ -1,4 +1,5 @@
-"""Play queue command handlers for Plex remote control.
+"""
+Play queue command handlers for Plex remote control.
 
 Handles playMedia, createPlayQueue and refreshPlayQueue HTTP commands.
 """
@@ -66,7 +67,8 @@ class QueueCommandsMixin:
         async def _create_plex_playqueue_from_ma(self) -> None: ...
 
     async def _play_single_track(self, player_id: str, key: str) -> None:
-        """Resolve a single Plex track key and play it as a fresh (replaced) queue.
+        """
+        Resolve a single Plex track key and play it as a fresh (replaced) queue.
 
         Used as the fallback whenever loading a full Plex play queue fails.
 
@@ -81,7 +83,8 @@ class QueueCommandsMixin:
         )
 
     async def _fetch_full_play_queue(self, queue_id: str) -> PlayQueue | None:
-        """Fetch a PlayQueue, paginating past the server's per-request window cap.
+        """
+        Fetch a PlayQueue, paginating past the server's per-request window cap.
 
         The Plex server caps each response to ~200 items regardless of the requested
         window size. We use playQueueTotalCount to detect truncation and keep fetching
@@ -148,8 +151,19 @@ class QueueCommandsMixin:
         playqueue.__dict__["items"] = all_items
         return playqueue
 
+    def _selected_item_index(self, playqueue: PlayQueue) -> int:
+        """Return the selected item's index within the fetched queue window."""
+        selected_id = getattr(playqueue, "playQueueSelectedItemID", None)
+        if selected_id is not None:
+            for index, item in enumerate(playqueue.items):
+                if getattr(item, "playQueueItemID", None) == selected_id:
+                    return index
+        selected_offset = getattr(playqueue, "playQueueSelectedItemOffset", 0) or 0
+        return selected_offset if 0 <= selected_offset < len(playqueue.items) else 0
+
     def _source_key_from_play_queue_uri(self, source_uri: str) -> str | None:
-        """Extract a Plex library key from a playQueueSourceURI string.
+        """
+        Extract a Plex library key from a playQueueSourceURI string.
 
         Plex encodes the source as ``library:///directory/ENCODED_PATH``. We decode it
         to a plain library path that :meth:`_resolve_plex_item` can use.
@@ -180,7 +194,8 @@ class QueueCommandsMixin:
         source_uri: str,
         offset: int,
     ) -> bool:
-        """Load a shuffled PlayQueue's source in original order, then defer shuffle to MA.
+        """
+        Load a shuffled PlayQueue's source in original order, then defer shuffle to MA.
 
         When Plex reports a shuffled PlayQueue the items are already in Plex's shuffled
         order. Loading them directly would cause MA to shuffle an already-shuffled list.
@@ -222,7 +237,8 @@ class QueueCommandsMixin:
             return False
 
     async def _resolve_plex_item(self, key: str) -> Any:
-        """Resolve a Plex key to a Music Assistant media item.
+        """
+        Resolve a Plex key to a Music Assistant media item.
 
         :param key: The Plex key to resolve.
         """
@@ -255,7 +271,8 @@ class QueueCommandsMixin:
         shuffle: bool,
         offset: int,
     ) -> None:
-        """Fetch a Plex PlayQueue and start playback, loading remaining tracks in the background.
+        """
+        Fetch a Plex PlayQueue and start playback, loading remaining tracks in the background.
 
         :param player_id: The Music Assistant player ID.
         :param container_key: The Plex container key (e.g. /playQueues/123).
@@ -275,9 +292,8 @@ class QueueCommandsMixin:
             playqueue = await self._fetch_full_play_queue(queue_id)
 
             if playqueue is not None and playqueue.items:
-                # playQueueSelectedItemOffset may be None on track-radio queues.
-                selected_offset = getattr(playqueue, "playQueueSelectedItemOffset", 0) or 0
-                LOGGER.info(f"PlayQueue selected item offset: {selected_offset}")
+                selected_offset = self._selected_item_index(playqueue)
+                LOGGER.info(f"PlayQueue selected item index: {selected_offset}")
 
                 # When Plex reports a shuffled queue, load the original source into MA
                 # unshuffled and let MA apply its own shuffle, then propagate back to Plex.
@@ -289,11 +305,7 @@ class QueueCommandsMixin:
 
                 self.play_queue_item_ids = {}
 
-                first_item = (
-                    playqueue.items[selected_offset]
-                    if selected_offset < len(playqueue.items)
-                    else playqueue.items[0]
-                )
+                first_item = playqueue.items[selected_offset]
                 first_track_key, first_play_queue_item_id = plex_item_fields(first_item)
 
                 if not first_track_key:
@@ -344,7 +356,8 @@ class QueueCommandsMixin:
                 await self._play_single_track(player_id, starting_key)
 
     async def handle_play_media(self, request: web.Request) -> web.Response:
-        """Handle playMedia command from Plex controller.
+        """
+        Handle playMedia command from Plex controller.
 
         Plexamp sends various parameters:
         - key: The item to play (track, album, playlist, etc.)
@@ -421,12 +434,13 @@ class QueueCommandsMixin:
 
         except Exception as e:
             LOGGER.exception(f"Error handling playMedia: {e}")
-            return web.Response(status=500, text=str(e))
+            return web.Response(status=500, text="Internal error")
         finally:
             self._updating_from_plex = False
 
     async def handle_create_play_queue(self, request: web.Request) -> web.Response:
-        """Handle createPlayQueue command from Plex controller.
+        """
+        Handle createPlayQueue command from Plex controller.
 
         Creates a new play queue from a URI (album, playlist, artist tracks, etc.)
         and optionally applies shuffle.
@@ -504,19 +518,20 @@ class QueueCommandsMixin:
 
                 except Exception as e:
                     LOGGER.exception(f"Error starting playback with first track: {e}")
-                    return web.Response(status=500, text=f"Failed to start playback: {e}")
+                    return web.Response(status=500, text="Failed to start playback")
             else:
                 LOGGER.error("Failed to create play queue or queue is empty")
                 return web.Response(status=500, text="Failed to create play queue")
 
         except Exception as e:
             LOGGER.exception(f"Error handling createPlayQueue: {e}")
-            return web.Response(status=500, text=str(e))
+            return web.Response(status=500, text="Internal error")
         finally:
             self._updating_from_plex = False
 
     async def handle_refresh_play_queue(self, request: web.Request) -> web.Response:
-        """Handle refreshPlayQueue command from Plex controller.
+        """
+        Handle refreshPlayQueue command from Plex controller.
 
         Called when the play queue is modified (items added, removed, reordered).
         Syncs the updated queue state to MA while preserving current playback.
@@ -598,6 +613,6 @@ class QueueCommandsMixin:
 
         except Exception as e:
             LOGGER.exception(f"Error handling refreshPlayQueue: {e}")
-            return web.Response(status=500, text=str(e))
+            return web.Response(status=500, text="Internal error")
         finally:
             self._updating_from_plex = False

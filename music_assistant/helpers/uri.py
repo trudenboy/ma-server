@@ -3,12 +3,16 @@
 import asyncio
 import os
 import re
+from typing import Final
 
 from music_assistant_models.enums import MediaType
 from music_assistant_models.errors import InvalidProviderID, InvalidProviderURI
 from music_assistant_models.helpers import create_uri as create_uri_org
 
 base62_length22_id_pattern = re.compile(r"^[a-zA-Z0-9]{22}$")
+
+# plain stream URLs that resolve to the builtin provider, which takes the URL as its item_id
+BUILTIN_URL_SCHEMES: Final[tuple[str, ...]] = ("http://", "https://", "rtsp://", "rtmp://")
 
 # create alias to original create_uri function
 create_uri = create_uri_org
@@ -27,7 +31,8 @@ def valid_id(provider: str, item_id: str) -> bool:
 
 
 async def parse_uri(uri: str, validate_id: bool = False) -> tuple[MediaType, str, str]:  # noqa: PLR0915
-    """Try to parse URI to Mass identifiers.
+    """
+    Try to parse URI to Mass identifiers.
 
     Returns Tuple: MediaType, provider_instance_id_or_domain, item_id
     """

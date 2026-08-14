@@ -23,9 +23,17 @@ from music_assistant.models.music_provider import MusicProvider
 from . import parsers
 from .constants import RADIO_PARADISE_CHANNELS
 
+if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ConfigEntry
+
 
 class RadioParadiseProvider(MusicProvider):
     """Radio Paradise Music Provider for Music Assistant."""
+
+    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+        """Return Config entries to setup this provider."""
+        # we (currently) do not have any config entries to set up
+        return ()
 
     @property
     def is_streaming_provider(self) -> bool:

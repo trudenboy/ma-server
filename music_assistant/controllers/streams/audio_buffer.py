@@ -18,11 +18,15 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
-from music_assistant_models.enums import ContentType, MediaType, VolumeNormalizationMode
+from music_assistant_models.enums import (
+    ContentType,
+    MediaType,
+    VolumeNormalizationMode,
+)
 from music_assistant_models.errors import AudioError
 from music_assistant_models.media_items import AudioFormat
 
-from music_assistant.constants import CONF_SMART_FADES_MODE, MASS_LOGGER_NAME, VERBOSE_LOG_LEVEL
+from music_assistant.constants import MASS_LOGGER_NAME, VERBOSE_LOG_LEVEL
 from music_assistant.controllers.streams.constants import (
     BUFFER_SIZE_MAP,
     CONF_BUFFER_SIZE,
@@ -33,7 +37,6 @@ from music_assistant.controllers.streams.constants import (
     BufferSize,
 )
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
-from music_assistant.models.smart_fades import SmartFadesMode
 
 if TYPE_CHECKING:
     from music_assistant_models.streamdetails import StreamDetails
@@ -101,6 +104,7 @@ class AudioBuffer:
         self._inactivity_task: asyncio.Task[None] | None = None
         self._cancelled = False
         self._producer_error: Exception | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self.ready = asyncio.Event()
         self._chunk_callbacks: list[ChunkCallback] = []
 
@@ -276,10 +280,14 @@ class AudioBuffer:
             chunk_count = 0
             status = "running"
             try:
-                async for chunk in audio_source:
-                    chunk_count += 1
-                    await self._put(chunk)
-                    await asyncio.sleep(0)
+                # aclosing guarantees the source generator (and any ffmpeg chain
+                # behind it) is finalized immediately when this task is cancelled,
+                # instead of lingering until garbage collection.
+                async with aclosing(audio_source):
+                    async for chunk in audio_source:
+                        chunk_count += 1
+                        await self._put(chunk)
+                        await asyncio.sleep(0)
                 await self._set_eof()
             except asyncio.CancelledError:
                 status = "cancelled"
@@ -409,7 +417,9 @@ class AudioBuffer:
             content_type=ContentType.from_bit_depth(streamdetails.audio_format.bit_depth),
             sample_rate=streamdetails.audio_format.sample_rate,
             bit_depth=streamdetails.audio_format.bit_depth,
-            channels=streamdetails.audio_format.channels,
+            # buffer the stereo fold of a surround source, so audio analysis measures
+            # the same audio that is played back rather than the untouched surround mix
+            channels=min(streamdetails.audio_format.channels, 2),
         )
 
         # determine ready threshold: how many seconds of audio must be buffered
@@ -423,7 +433,7 @@ class AudioBuffer:
             if streamdetails.queue_id
             else SmartFadesMode.DISABLED
         )
-        if smart_fades_mode != SmartFadesMode.DISABLED:
+        if crossfade_enabled:
             ready_threshold = 8
         elif streamdetails.volume_normalization_mode == VolumeNormalizationMode.DYNAMIC:
             ready_threshold = 5
@@ -654,7 +664,9 @@ class AudioBuffer:
             if exc is not None and isinstance(exc, Exception):
                 self._producer_error = exc
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._notify_on_producer_error())
+                task = loop.create_task(self._notify_on_producer_error())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
 
         task.add_done_callback(_on_producer_done)
 

@@ -29,7 +29,7 @@ from .constants import (
 
 if TYPE_CHECKING:
     from async_upnp_client.client import UpnpService, UpnpStateVariable
-    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
+    from music_assistant_models.config_entries import ConfigEntry
 
     from .provider import WiimProvider
 
@@ -89,6 +89,7 @@ class WiimPlayer(Player):
 
         self._last_logged_sdk_uri: str | None = None
         self._last_logged_sdk_status: PlayingStatus | None = None
+        self._ma_stream_uri: str | None = None
 
     # --- Lifecycle ---
 
@@ -121,11 +122,7 @@ class WiimPlayer(Player):
             self.logger.exception("Error tearing down WiiM device %s", self.name)
         self.logger.debug("Player %s unloaded, SDK resources released", self.name)
 
-    async def get_config_entries(
-        self,
-        action: str | None = None,
-        values: dict[str, ConfigValueType] | None = None,
-    ) -> list[ConfigEntry]:
+    async def get_config_entries(self) -> list[ConfigEntry]:
         """Return player-specific config entries."""
         return [
             create_sample_rates_config_entry(
@@ -152,9 +149,14 @@ class WiimPlayer(Player):
             source_id=media.source_id,
             clear_all=True,
         )
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time.time()
+        self._ma_stream_uri = stream_url
         try:
             await self.device.async_play(uri=stream_url, metadata=didl_metadata)
         except (WiimDeviceException, WiimRequestException) as err:
+            # The device never took our stream, so the guard must not outlive the attempt.
+            self._ma_stream_uri = None
             self._handle_command_error("play_media", err)
             return
         self._update_ma_state_from_sdk_cache()
@@ -201,6 +203,7 @@ class WiimPlayer(Player):
         """Stop command."""
         self._attr_active_source = None
         self._attr_current_media = None
+        self._ma_stream_uri = None
         try:
             await self.device.async_stop()
         except (WiimDeviceException, WiimRequestException) as err:
@@ -241,7 +244,8 @@ class WiimPlayer(Player):
         self._update_ma_state_from_sdk_cache()
 
     async def select_source(self, source: str) -> None:
-        """Handle SELECT SOURCE command on the player.
+        """
+        Handle SELECT SOURCE command on the player.
 
         :param source: The source(id) to select, as defined in the source_list.
         """
@@ -263,6 +267,7 @@ class WiimPlayer(Player):
     ) -> None:
         """Handle SET_MEMBERS command on the player."""
         queue = self.mass.player_queues.get(self.player_id)
+        pq_data = self.mass.player_queues.queue_data_or_none(self.player_id) if queue else None
         entry_sdk_uri = self.device.current_media.uri if self.device.current_media else None
         self.logger.debug(
             "set_members entry on %s: add=%s, remove=%s | "
@@ -274,7 +279,7 @@ class WiimPlayer(Player):
             player_ids_to_remove,
             queue.current_item.queue_item_id if queue and queue.current_item else None,
             queue.next_item.queue_item_id if queue and queue.next_item else None,
-            queue.next_item_id_enqueued if queue else None,
+            pq_data.next_item_id_enqueued if pq_data else None,
             entry_sdk_uri,
             self.device.playing_status,
         )
@@ -379,21 +384,19 @@ class WiimPlayer(Player):
             self.update_state()
             return
 
+        media = self.device.current_media
+        device_uri = media.uri if media and media.uri else ""
+        play_mode = self.device.play_mode
+
         # Playback state
-        if self.device.playing_status is not None:
-            self._attr_playback_state = SDK_TO_MA_STATE.get(
-                self.device.playing_status, PlaybackState.IDLE
-            )
+        if (new_state := self._resolve_playback_state(device_uri, play_mode)) is not None:
+            self._attr_playback_state = new_state
 
         # Group members
         group_members = self._wiim_controller.get_group_members(self.device.udn)
         self._attr_group_members = [
             f"{PLAYER_ID_PREFIX}{m.udn}" for m in group_members if m.udn != self.device.udn
         ]
-
-        media = self.device.current_media
-        device_uri = media.uri if media and media.uri else ""
-        play_mode = self.device.play_mode
 
         if play_mode and play_mode != SOURCE_NETWORK and play_mode in INPUT_MODE_SOURCES:
             self._attr_active_source = INPUT_MODE_SOURCES[play_mode].id
@@ -439,6 +442,35 @@ class WiimPlayer(Player):
         self._log_sdk_state_change()
         self.update_state()
 
+    def _resolve_playback_state(
+        self, device_uri: str, play_mode: str | None
+    ) -> PlaybackState | None:
+        """
+        Map the SDK playing status to a MA playback state.
+
+        Returns ``None`` when the current state should be kept: either no status
+        is known yet, or the report is implausible and should not propagate.
+
+        :param device_uri: The media URI currently loaded on the device ("" if none).
+        :param play_mode: The device's current play mode (input source).
+        """
+        # widened annotation: the SDK types playing_status as non-optional, but
+        # we stay tolerant of a None from mocks/edge paths (as the code always has)
+        sdk_status: PlayingStatus | None = self.device.playing_status
+        if sdk_status is None:
+            return None
+        new_state = SDK_TO_MA_STATE.get(sdk_status, PlaybackState.IDLE)
+        # The device acks transport commands with a transient (false) PLAYING
+        # report while no media is loaded yet (observed during group session
+        # setup). Nothing can actually play in network mode without a URI, so
+        # keep the previous state instead of propagating the false start and
+        # the PLAYING->IDLE->PLAYING flicker it causes downstream. External
+        # inputs (line-in, Bluetooth, ...) legitimately play without a URI and
+        # are not affected.
+        if new_state == PlaybackState.PLAYING and play_mode == SOURCE_NETWORK and not device_uri:
+            return None
+        return new_state
+
     def _log_sdk_state_change(self) -> None:
         """Log a debug line whenever the SDK-reported URI or playing_status changes."""
         new_sdk_uri = self.device.current_media.uri if self.device.current_media else None
@@ -476,7 +508,12 @@ class WiimPlayer(Player):
         except (WiimDeviceException, WiimRequestException) as err:
             self.logger.debug("Failed to sync position for %s: %s", self._attr_name, err)
             return
-        if (media := self.device.current_media) is not None and media.position is not None:
+        media = self.device.current_media
+        device_uri = media.uri if media else None
+        if device_uri and device_uri == self._ma_stream_uri:
+            self._ma_stream_uri = None
+        # The device reports its previous content's position until it loads our stream URI.
+        if self._ma_stream_uri is None and media is not None and media.position is not None:
             self._attr_elapsed_time = media.position
             self._attr_elapsed_time_last_updated = time.time()
         self._update_ma_state_from_sdk_cache()

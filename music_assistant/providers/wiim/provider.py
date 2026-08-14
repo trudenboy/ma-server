@@ -25,6 +25,7 @@ from .constants import PLAYER_ID_PREFIX
 from .player import WiimPlayer
 
 if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ConfigEntry
     from zeroconf.asyncio import AsyncServiceInfo
 
     from music_assistant.mass import MusicAssistant
@@ -81,12 +82,17 @@ class WiimProvider(PlayerProvider):
     This provides a WiiM player implementation for Music Assistant.
     """
 
+    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+        """Return Config entries to setup this provider."""
+        return (CONF_ENTRY_MANUAL_DISCOVERY_IPS,)
+
     async def handle_async_init(self) -> None:
         """Handle async initialization of the provider."""
+        # the sdk logs routine keep-alive chatter at INFO
         if self.logger.isEnabledFor(VERBOSE_LOG_LEVEL):
             logging.getLogger("wiim").setLevel(logging.DEBUG)
         else:
-            logging.getLogger("wiim").setLevel(self.logger.level + 10)
+            logging.getLogger("wiim").setLevel(max(self.logger.level + 10, logging.WARNING))
 
         self.wiim_controller = WiimController(self.mass.http_session_no_ssl)
 

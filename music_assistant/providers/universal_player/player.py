@@ -70,7 +70,7 @@ class UniversalPlayer(Player):
     def available(self) -> bool:
         """Return if the player is currently available."""
         return any(
-            (p := self.mass.players.get_player(pid)) and p.available
+            (p := self.mass.players.get_player(pid)) and p.available_for_playback
             for pid in self._protocol_player_ids
         )
 

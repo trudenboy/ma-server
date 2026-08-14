@@ -1,7 +1,4 @@
-"""The Musicbrainz Metadata provider for Music Assistant.
-
-At this time only used for retrieval of ID's but to be expanded to fetch metadata too.
-"""
+"""The Musicbrainz Metadata provider for Music Assistant."""
 
 from __future__ import annotations
 

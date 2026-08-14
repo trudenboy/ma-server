@@ -2,36 +2,42 @@
 
 from __future__ import annotations
 
-import contextlib
-import posixpath
-import urllib.parse
 from dataclasses import asdict
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, cast
 from urllib.parse import quote, unquote, urlparse, urlunparse
 
 import aiohttp
-from music_assistant_models.enums import MediaType
 from music_assistant_models.errors import (
     LoginFailed,
     MediaNotFoundError,
-    MusicAssistantError,
     ProviderUnavailableError,
     SetupFailedError,
 )
 
-from music_assistant.constants import CONF_PASSWORD, CONF_USERNAME, DB_TABLE_PROVIDER_MAPPINGS
-from music_assistant.helpers.tags import async_parse_tags, get_embedded_image
+from music_assistant.constants import CONF_PASSWORD, CONF_USERNAME
+from music_assistant.controllers.tasks.context import update_current_task_progress_text
+from music_assistant.helpers.tags import get_embedded_image
 from music_assistant.providers.filesystem_local import LocalFileSystemProvider
-from music_assistant.providers.filesystem_local.constants import SUPPORTED_EXTENSIONS
-from music_assistant.providers.filesystem_local.helpers import FileSystemItem
+from music_assistant.providers.filesystem_local.constants import (
+    CONF_ENTRY_CONTENT_TYPE,
+    CONF_ENTRY_IGNORE_ALBUM_PLAYLISTS,
+    CONF_ENTRY_LIBRARY_SYNC_AUDIOBOOKS,
+    CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS,
+    CONF_ENTRY_LIBRARY_SYNC_PODCASTS,
+    CONF_ENTRY_LIBRARY_SYNC_TRACKS,
+    CONF_ENTRY_MISSING_ALBUM_ARTIST,
+    CONF_ENTRY_PROPAGATE_GENRES,
+    SUPPORTED_EXTENSIONS,
+    content_type_config_entry,
+)
+from music_assistant.providers.filesystem_local.helpers import FileSystemItem, ScanErrors
 
 from .constants import CONF_CONTENT_TYPE, CONF_URL, CONF_VERIFY_SSL
 from .helpers import WebDAVItem, build_webdav_url, webdav_propfind, webdav_test_connection
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ProviderConfig
-    from music_assistant_models.media_items import Track
+    from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -40,6 +46,9 @@ if TYPE_CHECKING:
 class WebDAVFileSystemProvider(LocalFileSystemProvider):
     """WebDAV File System Provider for Music Assistant."""
 
+    # WebDAV servers often struggle with 16 parallel tag-parse GETs
+    _SYNC_CONCURRENCY = 4
+
     def __init__(
         self,
         mass: MusicAssistant,
@@ -47,13 +56,35 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
         config: ProviderConfig,
     ) -> None:
         """Initialize WebDAV FileSystem Provider."""
-        base_url = cast("str", config.get_value(CONF_URL)).rstrip("/")
-        super().__init__(mass, manifest, config, base_url)
-        self.base_url = base_url
-        self.username = cast("str | None", config.get_value(CONF_USERNAME))
-        self.password = cast("str | None", config.get_value(CONF_PASSWORD))
-        self.verify_ssl = cast("bool", config.get_value(CONF_VERIFY_SSL))
-        self.media_content_type = cast("str", config.get_value(CONF_CONTENT_TYPE))
+        # the base path (WebDAV URL) is resolved from the setup data below, which needs
+        # the initialized instance, so hand the base class a placeholder and set it after
+        super().__init__(mass, manifest, config, base_path="")
+        self.base_url = cast("str", self.get_setup_value(CONF_URL)).rstrip("/")
+        self.base_path = self.base_url
+        self.username = cast("str | None", self.get_setup_value(CONF_USERNAME))
+        self.password = cast("str | None", self.get_setup_value(CONF_PASSWORD))
+        self.verify_ssl = cast("bool", self.get_setup_value(CONF_VERIFY_SSL))
+        self.media_content_type = cast(
+            "str", self.get_setup_value(CONF_CONTENT_TYPE, CONF_ENTRY_CONTENT_TYPE.default_value)
+        )
+
+    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+        """Return Config entries to setup this provider."""
+        # connection details and content type are collected by the setup flow; surface the
+        # (immutable) content type read-only so the sync options' depends_on chains resolve
+        content_type = str(
+            self.get_setup_value(CONF_CONTENT_TYPE, CONF_ENTRY_CONTENT_TYPE.default_value)
+        )
+        return (
+            content_type_config_entry(content_type),
+            CONF_ENTRY_MISSING_ALBUM_ARTIST,
+            CONF_ENTRY_IGNORE_ALBUM_PLAYLISTS,
+            CONF_ENTRY_LIBRARY_SYNC_TRACKS,
+            CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS,
+            CONF_ENTRY_LIBRARY_SYNC_PODCASTS,
+            CONF_ENTRY_LIBRARY_SYNC_AUDIOBOOKS,
+            CONF_ENTRY_PROPAGATE_GENRES,
+        )
 
     @property
     def instance_name_postfix(self) -> str | None:
@@ -64,10 +95,10 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
         return parsed.netloc
 
     @property
-    def _auth(self) -> aiohttp.BasicAuth | None:
-        """Get BasicAuth for WebDAV requests."""
+    def _auth_header(self) -> str | None:
+        """Return the WebDAV Authorization header value, or None when no credentials are set."""
         if self.username:
-            return aiohttp.BasicAuth(self.username, self.password or "")
+            return aiohttp.encode_basic_auth(self.username, self.password or "")
         return None
 
     @property
@@ -117,9 +148,11 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
         webdav_url = build_webdav_url(self.base_url, file_path)
         session = self._session
         try:
-            items = await webdav_propfind(session, webdav_url, depth=0, auth=self._auth)
+            items = await webdav_propfind(
+                session, webdav_url, depth=0, auth_header=self._auth_header
+            )
             return len(items) > 0 or webdav_url.rstrip("/") == self.base_url.rstrip("/")
-        except (LoginFailed, SetupFailedError, ProviderUnavailableError):
+        except LoginFailed, SetupFailedError, ProviderUnavailableError:
             raise
         except aiohttp.ClientError:
             return False
@@ -129,7 +162,7 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
         webdav_url = build_webdav_url(self.base_url, file_path)
         session = self._session
 
-        items = await webdav_propfind(session, webdav_url, depth=0, auth=self._auth)
+        items = await webdav_propfind(session, webdav_url, depth=0, auth_header=self._auth_header)
         if not items:
             # Handle root directory case
             if webdav_url.rstrip("/") == self.base_url.rstrip("/"):
@@ -154,12 +187,15 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
     async def _scandir(self, path: str) -> list[FileSystemItem]:
         """List WebDAV directory contents with caching."""
         cache_key = f"scandir_{path}"
-        if cached := await self.cache.get(
-            key=cache_key,
-            provider=self.instance_id,
-            category=0,
-        ):
-            return [FileSystemItem(**item) for item in cached]
+        # bypass the cache during sync so edits are picked up immediately;
+        # the fresh result is still written back for subsequent browse/exists calls
+        if not self.sync_running:
+            if cached := await self.cache.get(
+                key=cache_key,
+                provider=self.instance_id,
+                category=0,
+            ):
+                return [FileSystemItem(**item) for item in cached]
 
         path = self._normalize_path(path)
         webdav_url = build_webdav_url(self.base_url, path)
@@ -181,7 +217,9 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
         """Read file contents over HTTP."""
         webdav_url = build_webdav_url(self.base_url, path)
         session = self._session
-        async with session.get(webdav_url, auth=self._auth) as resp:
+        auth_header = self._auth_header
+        headers = {"Authorization": auth_header} if auth_header else None
+        async with session.get(webdav_url, headers=headers) as resp:
             if resp.status != 200:
                 raise MediaNotFoundError(f"File not found: {path}")
             return await resp.read()
@@ -251,7 +289,9 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
         # For actual image files, fetch the raw bytes
         webdav_url = build_webdav_url(self.base_url, path)
         session = self._session
-        async with session.get(webdav_url, auth=self._auth) as resp:
+        auth_header = self._auth_header
+        headers = {"Authorization": auth_header} if auth_header else None
+        async with session.get(webdav_url, headers=headers) as resp:
             if resp.status != 200:
                 raise MediaNotFoundError(f"Image not found: {path}")
             return await resp.read()
@@ -289,8 +329,7 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
 
     async def _scan_recursive(
         self,
-        path: str,
-        cur_filenames: set[str],
+        *,
         file_checksums: dict[str, str],
         visited: set[str],
     ) -> None:
@@ -318,30 +357,7 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
                 if await self._process_item_async(item, prev_checksum):
                     cur_filenames.add(item.relative_path)
 
-    async def _parse_playlist_line(self, line: str, playlist_path: str) -> Track | None:
-        """Try to parse a track from a playlist line."""
-        try:
-            line = line.replace("file://", "").strip()
-            for _line in (line, urllib.parse.unquote(line)):
-                # Try relative to playlist folder
-                if playlist_path:
-                    normalized = posixpath.normpath(f"{playlist_path}/{_line}")
-                    with contextlib.suppress(FileNotFoundError, MediaNotFoundError):
-                        file_item = await self.resolve(normalized)
-                        tags = await async_parse_tags(file_item.absolute_path, file_item.file_size)
-                        return await self._parse_track(file_item, tags)
-
-                # Try relative to base path
-                with contextlib.suppress(FileNotFoundError, MediaNotFoundError):
-                    file_item = await self.resolve(_line)
-                    tags = await async_parse_tags(file_item.absolute_path, file_item.file_size)
-                    return await self._parse_track(file_item, tags)
-
-            raise MediaNotFoundError("Invalid path/uri")
-
-        except MusicAssistantError as err:
-            self.logger.warning("Could not parse %s to track: %s", line, str(err))
-        return None
+        await _walk("", is_root=True)
 
     def _get_chapter_path(self, relative_path: str) -> str:
         """Return authenticated WebDAV URL for a chapter file."""

@@ -30,6 +30,7 @@ from music_assistant.constants import (
     DEFAULT_STREAM_HEADERS,
     DLNA_CONTENT_FEATURES_REALTIME,
 )
+from music_assistant.controllers.streams.audio_processing import get_media_session_id
 from music_assistant.helpers.audio import get_mime_type
 from music_assistant.helpers.util import TaskManager
 from music_assistant.models.player import DeviceInfo, Player, PlayerMedia
@@ -38,6 +39,7 @@ from .constants import (
     CONF_ENTRY_UGP_OUTPUT_FORMAT,
     CONF_UGP_OUTPUT_FORMAT,
     CONFIG_ENTRY_UGP_NOTE,
+    EXTRA_FEATURES_FROM_MEMBERS,
     IDLE_GRACE_SECONDS,
     UGP_OUTPUT_MP3,
     resolve_ugp_output_format,
@@ -47,13 +49,14 @@ from .ugp_stream import UGPStream
 if TYPE_CHECKING:
     from .provider import UniversalGroupProvider
 
-# PlayerFeature.POWER is intentionally not in the base feature set anymore:
-# the lifecycle (form on play, dissolve on stop, debounced idle deform) governs
-# whether the group captures its members. POWER is added dynamically when the
-# user assigns 'Fake power control' to the group.
+# The features the group carries on its own. Everything else is resolved per read in
+# the supported_features property: POWER when the user assigns 'Fake power control',
+# SET_MEMBERS for dynamic groups, and EXTRA_FEATURES_FROM_MEMBERS from the members.
+# PlayerFeature.POWER is intentionally not a base feature: the lifecycle (form on
+# play, dissolve on stop, debounced idle deform) governs whether the group captures
+# its members.
 BASE_FEATURES = {
     PlayerFeature.PLAY_MEDIA,
-    PlayerFeature.VOLUME_SET,
     PlayerFeature.MULTI_DEVICE_DSP,
 }
 
@@ -78,7 +81,6 @@ class UniversalGroupPlayer(Player):
         # opt-in mechanism for explicit on/off semantics.
         self._attr_powered = None
         self._attr_device_info = DeviceInfo(model="Universal Group", manufacturer=provider.name)
-        self._attr_supported_features = {*BASE_FEATURES}
         self._attr_needs_poll = True
         self._attr_poll_interval = 30
         # task that releases members after the idle grace window expires
@@ -128,29 +130,13 @@ class UniversalGroupPlayer(Player):
             # only realign members to the configured static set when the group
             # is dormant — otherwise we would lose any dynamic adds mid-session.
             self._attr_group_members = static_members.copy()
-        if self.is_dynamic:
-            self._attr_supported_features.add(PlayerFeature.SET_MEMBERS)
-        elif PlayerFeature.SET_MEMBERS in self._attr_supported_features:
-            self._attr_supported_features.remove(PlayerFeature.SET_MEMBERS)
-        # advertise POWER feature only when the user has opted in via fake control
-        raw_power_conf = self.mass.config.get_raw_player_config_value(
-            self.player_id, CONF_POWER_CONTROL
-        )
-        if raw_power_conf == PLAYER_CONTROL_FAKE:
-            self._attr_supported_features.add(PlayerFeature.POWER)
-        else:
-            self._attr_supported_features.discard(PlayerFeature.POWER)
 
     @cached_property
     def is_dynamic(self) -> bool:
         """Return if the player is a dynamic group player."""
         return bool(self.config.get_value(CONF_DYNAMIC_GROUP_MEMBERS, False))
 
-    async def get_config_entries(
-        self,
-        action: str | None = None,
-        values: dict[str, ConfigValueType] | None = None,
-    ) -> list[ConfigEntry]:
+    async def get_config_entries(self) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the given player (if any)."""
         return [
             # add universal group specific entries
@@ -159,12 +145,10 @@ class UniversalGroupPlayer(Player):
                 key=CONF_GROUP_MEMBERS,
                 type=ConfigEntryType.STRING,
                 multi_value=True,
-                label="Group members",
                 default_value=[],
-                description="Select all players you want to be part of this group",
                 required=False,  # needed for dynamic members (which allows empty members list)
                 options=[
-                    ConfigValueOption(x.display_name, x.player_id)
+                    ConfigValueOption(x.player_id, title=x.display_name)
                     for x in self.mass.players.all_players(True, False)
                     if x.type != PlayerType.GROUP
                 ],
@@ -172,8 +156,6 @@ class UniversalGroupPlayer(Player):
             ConfigEntry(
                 key=CONF_DYNAMIC_GROUP_MEMBERS,
                 type=ConfigEntryType.BOOLEAN,
-                label="Enable dynamic members",
-                description="Allow members to (temporary) join/leave the group dynamically.",
                 default_value=False,
                 required=False,
             ),
@@ -298,6 +280,156 @@ class UniversalGroupPlayer(Player):
             self._attr_group_members = self._attr_static_group_members.copy()
         self.update_state()
 
+    async def play_media(self, media: PlayerMedia) -> None:
+        """Handle PLAY MEDIA on given player."""
+        # form on play: cancel any pending idle-grace release, then capture the
+        # configured members and free them of any conflicting prior allegiance.
+        self._cancel_idle_grace_timer()
+        await self._capture_members()
+
+        if self.stream and not self.stream.done:
+            # stop any existing stream first
+            await self.stream.stop()
+
+        # resolve the static output format the UGP serves to all members
+        output_format, fmt_str = resolve_ugp_output_format(
+            cast("str", self.config.get_value(CONF_UGP_OUTPUT_FORMAT, UGP_OUTPUT_MP3))
+        )
+        # internal PCM pivot for the multiplexer: F32 at the configured output rate
+        # so the per-member encoder doesn't have to resample
+        pivot_format = AudioFormat(
+            content_type=ContentType.PCM_F32LE,
+            sample_rate=output_format.sample_rate,
+            bit_depth=32,
+            channels=2,
+        )
+        audio_source = self.mass.streams.get_stream(media, pivot_format, self.player_id)
+        self.stream = UGPStream(
+            audio_source=audio_source,
+            audio_format=pivot_format,
+            base_pcm_format=pivot_format,
+            queue_id=media.source_id,
+            session_id=get_media_session_id(media),
+        )
+        base_url = f"{self.mass.streams.base_url}/ugp/{self.player_id}.{fmt_str}"
+
+        # set the state optimistically
+        self._attr_current_media = deepcopy(media)
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time() - 1
+        self._attr_playback_state = PlaybackState.PLAYING
+        self.update_state()
+
+        # forward to downstream play_media commands
+        async with TaskManager(self.mass) as tg:
+            for member in self.mass.players.iter_group_members(self, only_powered=True):
+                # Use internal handler to get protocol selection and avoid redirect
+                tg.create_task(
+                    self.mass.players._handle_play_media(
+                        member.player_id,
+                        PlayerMedia(
+                            uri=f"{base_url}?player_id={member.player_id}",
+                            media_type=MediaType.FLOW_STREAM,
+                            title=self.display_name,
+                            source_id=self.player_id,
+                            custom_data={
+                                "ugp_player_id": self.player_id,
+                                "session_id": self.stream.session_id,
+                            },
+                        ),
+                    )
+                )
+
+    async def set_members(
+        self,
+        player_ids_to_add: list[str] | None = None,
+        player_ids_to_remove: list[str] | None = None,
+    ) -> None:
+        """Handle SET_MEMBERS command on the player."""
+        if not self.is_dynamic:
+            raise UnsupportedFeaturedException(
+                f"Group {self.display_name} does not allow dynamically adding/removing members!",
+                translation_key="group_not_dynamic",
+                translation_owner=self.translation_owner,
+                translation_args=[self.display_name],
+            )
+        # handle additions
+        for player_id in player_ids_to_add or []:
+            if player_id in self._attr_group_members:
+                continue
+            if player_id == self.player_id:
+                raise UnsupportedFeaturedException(
+                    f"Cannot add {self.display_name} to itself as a member!",
+                    translation_key="cannot_add_group_to_itself",
+                    translation_owner=self.translation_owner,
+                    translation_args=[self.display_name],
+                )
+            child_player = self.mass.players.get_player(player_id, True)
+            assert child_player  # for type checking
+            if child_player.synced_to:
+                # This is player is part of a syncgroup - ungroup it first
+                await child_player.ungroup()
+            self._attr_group_members.append(player_id)
+            # let the newly added member join the stream if it's still live —
+            # the `self.powered` gate that used to guard this is gone with the
+            # session-lifecycle refactor (groups now have `_attr_powered=None`
+            # unless the user assigned Fake control).
+            if self.stream and not self.stream.done:
+                _, fmt_str = resolve_ugp_output_format(
+                    cast("str", self.config.get_value(CONF_UGP_OUTPUT_FORMAT, UGP_OUTPUT_MP3))
+                )
+                base_url = f"{self.mass.streams.base_url}/ugp/{self.player_id}.{fmt_str}"
+                # Use internal handler to get protocol selection and avoid redirect
+                await self.mass.players._handle_play_media(
+                    player_id,
+                    PlayerMedia(
+                        uri=f"{base_url}?player_id={player_id}",
+                        media_type=MediaType.FLOW_STREAM,
+                        title=self.display_name,
+                        source_id=self.player_id,
+                        custom_data={
+                            "ugp_player_id": self.player_id,
+                            "session_id": self.stream.session_id,
+                        },
+                    ),
+                )
+        # handle removals
+        for player_id in player_ids_to_remove or []:
+            if player_id not in self._attr_group_members:
+                continue
+            if player_id == self.player_id:
+                raise UnsupportedFeaturedException(
+                    f"Cannot remove {self.display_name} from itself as a member!",
+                    translation_key=(
+                        "provider.universal_group.errors.cannot_remove_group_from_itself"
+                    ),
+                    translation_args=[self.display_name],
+                )
+            self._attr_group_members.remove(player_id)
+            child_player = self.mass.players.get_player(player_id, True)
+            assert child_player is not None  # for type checking
+            if child_player.playback_state in (
+                PlaybackState.PLAYING,
+                PlaybackState.PAUSED,
+            ):
+                # if the child player is playing the group stream, stop it
+                # Use internal handler to get protocol selection and avoid redirect
+                await self.mass.players._handle_cmd_stop(player_id)
+        self.update_state()
+
+    async def poll(self) -> None:
+        """Poll player for state updates."""
+        self._set_attributes()
+
+    async def on_unload(self) -> None:
+        """Handle logic when the player is unloaded from the Player controller."""
+        self._cancel_idle_grace_timer()
+        await super().on_unload()
+        if self.is_active_session or self._attr_powered is True:
+            # tear down any in-flight session before unloading
+            await self.stop()
+            self._attr_powered = False
+
     async def _capture_members(self) -> None:
         """
         Resolve collisions and prepare the configured members for grouping.
@@ -362,156 +494,21 @@ class UniversalGroupPlayer(Player):
             if not member.powered and member.power_control != PLAYER_CONTROL_NONE:
                 await self.mass.players.cmd_power(member.player_id, True)
 
-    async def volume_set(self, volume_level: int) -> None:
-        """Send VOLUME_SET command to given player."""
-        # group volume is already handled in the player manager
-
-    async def play_media(self, media: PlayerMedia) -> None:
-        """Handle PLAY MEDIA on given player."""
-        # form on play: cancel any pending idle-grace release, then capture the
-        # configured members and free them of any conflicting prior allegiance.
-        self._cancel_idle_grace_timer()
-        await self._capture_members()
-
-        if self.stream and not self.stream.done:
-            # stop any existing stream first
-            await self.stream.stop()
-
-        # resolve the static output format the UGP serves to all members
-        output_format, fmt_str = resolve_ugp_output_format(
-            cast("str", self.config.get_value(CONF_UGP_OUTPUT_FORMAT, UGP_OUTPUT_MP3))
-        )
-        # internal PCM pivot for the multiplexer: F32 at the configured output rate
-        # so the per-member encoder doesn't have to resample
-        pivot_format = AudioFormat(
-            content_type=ContentType.PCM_F32LE,
-            sample_rate=output_format.sample_rate,
-            bit_depth=32,
-            channels=2,
-        )
-        audio_source = self.mass.streams.get_stream(media, pivot_format, self.player_id)
-        self.stream = UGPStream(
-            audio_source=audio_source,
-            audio_format=pivot_format,
-            base_pcm_format=pivot_format,
-        )
-        base_url = f"{self.mass.streams.base_url}/ugp/{self.player_id}.{fmt_str}"
-
-        # set the state optimistically
-        self._attr_current_media = deepcopy(media)
-        self._attr_elapsed_time = 0
-        self._attr_elapsed_time_last_updated = time() - 1
-        self._attr_playback_state = PlaybackState.PLAYING
-        self.update_state()
-
-        # forward to downstream play_media commands
-        async with TaskManager(self.mass) as tg:
-            for member in self.mass.players.iter_group_members(self, only_powered=True):
-                # Use internal handler to get protocol selection and avoid redirect
-                tg.create_task(
-                    self.mass.players._handle_play_media(
-                        member.player_id,
-                        PlayerMedia(
-                            uri=f"{base_url}?player_id={member.player_id}",
-                            media_type=MediaType.FLOW_STREAM,
-                            title=self.display_name,
-                            source_id=self.player_id,
-                            custom_data={"ugp_player_id": self.player_id},
-                        ),
-                    )
-                )
-
-    async def set_members(
-        self,
-        player_ids_to_add: list[str] | None = None,
-        player_ids_to_remove: list[str] | None = None,
-    ) -> None:
-        """Handle SET_MEMBERS command on the player."""
-        if not self.is_dynamic:
-            raise UnsupportedFeaturedException(
-                f"Group {self.display_name} does not allow dynamically adding/removing members!"
-            )
-        # handle additions
-        for player_id in player_ids_to_add or []:
-            if player_id in self._attr_group_members:
-                continue
-            if player_id == self.player_id:
-                raise UnsupportedFeaturedException(
-                    f"Cannot add {self.display_name} to itself as a member!"
-                )
-            child_player = self.mass.players.get_player(player_id, True)
-            assert child_player  # for type checking
-            if child_player.synced_to:
-                # This is player is part of a syncgroup - ungroup it first
-                await child_player.ungroup()
-            self._attr_group_members.append(player_id)
-            # let the newly added member join the stream if it's still live —
-            # the `self.powered` gate that used to guard this is gone with the
-            # session-lifecycle refactor (groups now have `_attr_powered=None`
-            # unless the user assigned Fake control).
-            if self.stream and not self.stream.done:
-                _, fmt_str = resolve_ugp_output_format(
-                    cast("str", self.config.get_value(CONF_UGP_OUTPUT_FORMAT, UGP_OUTPUT_MP3))
-                )
-                base_url = f"{self.mass.streams.base_url}/ugp/{self.player_id}.{fmt_str}"
-                # Use internal handler to get protocol selection and avoid redirect
-                await self.mass.players._handle_play_media(
-                    player_id,
-                    PlayerMedia(
-                        uri=f"{base_url}?player_id={player_id}",
-                        media_type=MediaType.FLOW_STREAM,
-                        title=self.display_name,
-                        source_id=self.player_id,
-                        custom_data={"ugp_player_id": self.player_id},
-                    ),
-                )
-        # handle removals
-        for player_id in player_ids_to_remove or []:
-            if player_id not in self._attr_group_members:
-                continue
-            if player_id == self.player_id:
-                raise UnsupportedFeaturedException(
-                    f"Cannot remove {self.display_name} from itself as a member!"
-                )
-            self._attr_group_members.remove(player_id)
-            child_player = self.mass.players.get_player(player_id, True)
-            assert child_player is not None  # for type checking
-            if child_player.playback_state in (
-                PlaybackState.PLAYING,
-                PlaybackState.PAUSED,
-            ):
-                # if the child player is playing the group stream, stop it
-                # Use internal handler to get protocol selection and avoid redirect
-                await self.mass.players._handle_cmd_stop(player_id)
-        self.update_state()
-
-    async def poll(self) -> None:
-        """Poll player for state updates."""
-        self._set_attributes()
-
-    async def on_unload(self) -> None:
-        """Handle logic when the player is unloaded from the Player controller."""
-        self._cancel_idle_grace_timer()
-        await super().on_unload()
-        if self.is_active_session or self._attr_powered is True:
-            # tear down any in-flight session before unloading
-            await self.stop()
-            self._attr_powered = False
-
     def _set_attributes(self) -> None:
         """Set attributes of the group player."""
-        if self.is_dynamic and PlayerFeature.SET_MEMBERS not in self.supported_features:
-            # dynamic group players should support SET_MEMBERS feature
-            self._attr_supported_features.add(PlayerFeature.SET_MEMBERS)
-        elif not self.is_dynamic and PlayerFeature.SET_MEMBERS in self.supported_features:
-            # static group players should not support SET_MEMBERS feature
-            self._attr_supported_features.discard(PlayerFeature.SET_MEMBERS)
         prev_state = self._attr_playback_state
         # grab current media and state from one of the active players
         # use state properties (not raw attributes) to account for protocol player propagation
         for child_player in self.mass.players.iter_group_members(self, active_only=True):
             self._attr_playback_state = child_player.state.playback_state
-            if child_player.state.elapsed_time:
+            # a position is only meaningful together with the timestamp it was taken at,
+            # so the pair is adopted as a whole or not at all. Position 0 is a valid
+            # position: members that anchor the group stream once report a fixed 0 and
+            # let the timestamp carry both the progression and their own buffer delay.
+            if (
+                child_player.state.elapsed_time is not None
+                and child_player.state.elapsed_time_last_updated is not None
+            ):
                 self._attr_elapsed_time = child_player.state.elapsed_time
                 self._attr_elapsed_time_last_updated = child_player.state.elapsed_time_last_updated
             break
@@ -648,19 +645,23 @@ class UniversalGroupPlayer(Player):
         )
 
         # Generate filter params for the player specific DSP settings
-        filter_params = None
+        output_plan = None
         if child_player_id:
-            filter_params = self.mass.streams.audio.get_player_filter_params(
-                child_player_id, self.stream.input_format, output_format
+            output_plan = self.mass.streams.audio.get_player_output_plan(
+                child_player_id,
+                self.stream.input_format,
+                output_format,
+                queue_id=self.stream.queue_id,
+                session_id=self.stream.session_id,
             )
 
         async for chunk in self.stream.get_stream(
             output_format,
-            filter_params=filter_params,
+            filter_params=output_plan.filter_params if output_plan else None,
         ):
             try:
                 await resp.write(chunk)
-            except (ConnectionError, ConnectionResetError):
+            except ConnectionError, ConnectionResetError:
                 break
 
         return resp

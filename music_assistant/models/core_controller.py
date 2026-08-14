@@ -6,15 +6,21 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from music_assistant_models.config_entries import ConfigValueType
 from music_assistant_models.enums import ProviderStage, ProviderType
+from music_assistant_models.errors import ActionUnavailable
 from music_assistant_models.provider import ProviderManifest
 
 from music_assistant.constants import CONF_LOG_LEVEL, MASS_LOGGER_NAME
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, CoreConfig
+    from music_assistant_models.config_entries import ConfigActionResult, ConfigEntry, CoreConfig
 
+    from music_assistant.helpers.json import SerializableType
     from music_assistant.mass import MusicAssistant
+
+# TypeVar for config value type inference
+_ConfigValueT = TypeVar("_ConfigValueT", bound=ConfigValueType)
 
 
 class CoreController:
@@ -22,6 +28,10 @@ class CoreController:
 
     domain: str  # used as identifier (=name of the module)
     manifest: ProviderManifest  # some info for the UI only
+    # config: the controller's active configuration, assigned at startup/reload and kept
+    # up to date by the config controller, so internal code can read config values
+    # (including entry defaults) without rebuilding the config entries
+    config: CoreConfig
 
     def __init__(self, mass: MusicAssistant) -> None:
         """Initialize core controller."""
@@ -40,12 +50,18 @@ class CoreController:
             allow_disable=False,
         )
 
-    async def get_config_entries(
-        self,
-        action: str | None = None,
-        values: dict[str, ConfigValueType] | None = None,
-    ) -> tuple[ConfigEntry, ...]:
-        """Return all Config Entries for this core module (if any)."""
+    @property
+    def translation_owner(self) -> str:
+        """Return the "core.<domain>" namespace this module's translation strings resolve under."""
+        return f"core.{self.domain}"
+
+    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+        """
+        Return all Config Entries for this core module (if any).
+
+        Include ``ConfigEntryType.ACTION`` entries for one-shot buttons and handle
+        their presses in ``handle_config_action``.
+        """
         return ()
 
     async def get_diagnostics(self) -> dict[str, Any] | None:
@@ -73,6 +89,7 @@ class CoreController:
             config = await self.mass.config.get_core_config(self.domain)
         log_level = str(config.get_value(CONF_LOG_LEVEL))
         self._set_logger(log_level)
+        self.config = config
         await self.setup(config)
         await self.post_setup()
 
@@ -113,6 +130,3 @@ class CoreController:
             self.logger.setLevel(mass_logger.level)
         else:
             self.logger.setLevel(log_level)
-        if logging.getLogger().level > self.logger.level:
-            # if the root logger's level is higher, we need to adjust that too
-            logging.getLogger().setLevel(self.logger.level)

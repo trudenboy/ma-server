@@ -252,7 +252,8 @@ async def get_spotify_token(
     refresh_token: str,
     session_name: str = "spotify",
 ) -> dict[str, Any]:
-    """Refresh Spotify access token using refresh token.
+    """
+    Refresh Spotify access token using refresh token.
 
     :param http_session: aiohttp client session.
     :param client_id: Spotify client ID.
@@ -292,51 +293,29 @@ async def get_spotify_token(
     raise LoginFailed(f"Failed to refresh {session_name} access token: {err}")
 
 
-async def pkce_auth_flow(
-    mass: MusicAssistant,
-    session_id: str,
-    client_id: str,
-) -> str:
-    """Perform Spotify PKCE auth flow and return refresh token.
+async def _log_pairing_output(librespot_proc: AsyncProcess) -> None:
+    """Log the pairing daemon's output so a failure to advertise is diagnosable."""
+    reported_warnings: set[str] = set()
+    async for line in librespot_proc.iter_stderr():
+        warning_key = PAIRING_LOG_TIMESTAMP.sub("[", line, count=1)
+        if ("ERROR" in line or "WARN" in line) and warning_key not in reported_warnings:
+            reported_warnings.add(warning_key)
+            LOGGER.warning("[librespot-pairing] %s", line)
+        else:
+            LOGGER.debug("[librespot-pairing] %s", line)
 
-    :param mass: MusicAssistant instance.
-    :param session_id: Session ID for the authentication helper.
-    :param client_id: The client ID to use for authentication.
-    :return: Refresh token string.
-    """
-    # spotify PKCE auth flow
-    # https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow
-    code_verifier, code_challenge = pkce.generate_pkce_pair()
-    async with AuthenticationHelper(mass, session_id) as auth_helper:
-        params = {
-            "response_type": "code",
-            "client_id": client_id,
-            "scope": " ".join(SCOPE),
-            "code_challenge_method": "S256",
-            "code_challenge": code_challenge,
-            "redirect_uri": CALLBACK_REDIRECT_URL,
-            "state": auth_helper.callback_url,
-        }
-        query_string = urlencode(params)
-        url = f"https://accounts.spotify.com/authorize?{query_string}"
-        result = await auth_helper.authenticate(url)
-        authorization_code = result["code"]
 
-    # now get the access token
-    token_params = {
-        "grant_type": "authorization_code",
-        "code": authorization_code,
-        "redirect_uri": CALLBACK_REDIRECT_URL,
-        "client_id": client_id,
-        "code_verifier": code_verifier,
-    }
-    async with mass.http_session.post(
-        "https://accounts.spotify.com/api/token", data=token_params
-    ) as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise LoginFailed(f"Failed to get access token: {error_text}")
-        token_result = await response.json()
+async def _await_credentials_file(cache_dir: str) -> str:
+    """Poll librespot's cache directory until it holds a complete credential file."""
+    credentials_file = os.path.join(cache_dir, CREDENTIALS_FILE)
+    while True:
+        if os.path.exists(credentials_file):
+            try:
+                return await asyncio.to_thread(_read_credentials_file, credentials_file)
+            except OSError, ValueError:
+                # the file was caught mid-write; fall through and retry
+                pass
+        await asyncio.sleep(1)
 
     return str(token_result["refresh_token"])
 

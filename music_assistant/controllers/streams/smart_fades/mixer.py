@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
+
+from music_assistant_models.enums import CrossfadeMode
 
 from music_assistant.controllers.streams.audio_analysis import SMART_FADES_ANALYSIS_DOMAIN
 from music_assistant.controllers.streams.smart_fades.fades import (

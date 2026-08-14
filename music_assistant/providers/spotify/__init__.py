@@ -11,8 +11,7 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
 from music_assistant_models.enums import ConfigEntryType, EventType, ProviderFeature
 from music_assistant_models.errors import InvalidDataError, LoginFailed
 
-from music_assistant.constants import CONF_ENTRY_UNOFFICIAL_PROVIDER
-from music_assistant.helpers.app_vars import app_var  # type: ignore[attr-defined]
+from music_assistant.constants import CONF_PROVIDERS
 
 from .constants import (
     CALLBACK_REDIRECT_URL,
@@ -554,30 +553,38 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    # Migration: handle legacy refresh_token
-    legacy_token = config.get_value(CONF_REFRESH_TOKEN_DEPRECATED)
-    global_token = config.get_value(CONF_REFRESH_TOKEN_GLOBAL)
-
-    if legacy_token and not global_token:
-        # Migrate legacy token to appropriate new key
-        if config.get_value(CONF_CLIENT_ID):
-            # Had custom client ID, migrate to dev token
-            mass.config.set_raw_provider_config_value(
-                config.instance_id, CONF_REFRESH_TOKEN_DEV, legacy_token, encrypted=True
-            )
-        else:
-            # No custom client ID, migrate to global token
-            mass.config.set_raw_provider_config_value(
-                config.instance_id, CONF_REFRESH_TOKEN_GLOBAL, legacy_token, encrypted=True
-            )
-        # Remove the deprecated legacy token from config
-        mass.config.set_raw_provider_config_value(
-            config.instance_id, CONF_REFRESH_TOKEN_DEPRECATED, None
-        )
-        # Re-fetch the updated config value
-        global_token = config.get_value(CONF_REFRESH_TOKEN_GLOBAL)
-
-    if global_token in (None, ""):
-        msg = "Re-Authentication required"
-        raise LoginFailed(msg)
+    _migrate_legacy_token(mass, config)
+    # a global refresh token lives in setup_data (new installs) or, for installs configured
+    # before setup flows existed, in the legacy config values (read-through covers both)
+    if not (
+        config.setup_data.get(CONF_REFRESH_TOKEN_GLOBAL)
+        or config.get_value(CONF_REFRESH_TOKEN_GLOBAL)
+    ):
+        raise LoginFailed("Re-Authentication required")
     return SpotifyProvider(mass, manifest, config, SUPPORTED_FEATURES)
+
+
+def _migrate_legacy_token(mass: MusicAssistant, config: ProviderConfig) -> None:
+    """Move a legacy (pre global/dev split) refresh_token into setup_data, one-off."""
+    legacy_token = config.get_value(CONF_REFRESH_TOKEN_DEPRECATED)
+    if not legacy_token:
+        return
+    if config.setup_data.get(CONF_REFRESH_TOKEN_GLOBAL) or config.get_value(
+        CONF_REFRESH_TOKEN_GLOBAL
+    ):
+        return
+    # a custom client id means the legacy token authenticated a developer session
+    custom_client_id = config.get_value(CONF_CLIENT_ID)
+    target_key = CONF_REFRESH_TOKEN_DEV if custom_client_id else CONF_REFRESH_TOKEN_GLOBAL
+    base = f"{CONF_PROVIDERS}/{config.instance_id}/setup_data"
+    encrypted = mass.config.encrypt_string(str(legacy_token))
+    mass.config.set(f"{base}/{target_key}", encrypted)
+    config.setup_data[target_key] = encrypted
+    if target_key == CONF_REFRESH_TOKEN_DEV and custom_client_id:
+        client_id_encrypted = mass.config.encrypt_string(str(custom_client_id))
+        mass.config.set(f"{base}/{CONF_CLIENT_ID}", client_id_encrypted)
+        config.setup_data[CONF_CLIENT_ID] = client_id_encrypted
+    # drop the deprecated legacy token now that it lives under its new key
+    mass.config.set_raw_provider_config_value(
+        config.instance_id, CONF_REFRESH_TOKEN_DEPRECATED, None
+    )

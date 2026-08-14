@@ -7,6 +7,8 @@ description: Use when asked to review a GitHub pull request, PR link is shared, 
 
 Review the GitHub pull request: $ARGUMENTS.
 
+This is a read-only review. Report findings in the console — never post comments, approve, or request changes on GitHub, and never modify the code under review.
+
 ## Steps
 
 IMPORTANT:
@@ -27,27 +29,8 @@ IMPORTANT:
 
 ## Output Format
 
-List specific comments per file/line that need attention. Do not list things that are already correct.
+Comments per file and line that need attention. Skip what's already fine.
 
-Each comment:
-1. State the severity ([CRITICAL], [PROBLEM], [SUGGESTION])
-2. State the problem (1 sentence)
-3. Why it matters (1 sentence, if needed)
-4. Suggested fix (snippet or specific action)
+Each comment carries a severity (`[CRITICAL]`, `[PROBLEM]`, `[SUGGESTION]`), states the problem in a sentence, says why it matters when that isn't self-evident, and gives a concrete fix or snippet.
 
-Example:
-> This could generate a `KeyError` if `"name"` does not exist in the `dict`. Consider using `.get("name")` or adding a check.
-
-End with an overall assessment and summary:
-
-```
-Overall assessment: <approve | request changes | comment>
-- [CRITICAL] <issue>
-- [PROBLEM] <issue>
-- [SUGGESTION] <improvement>
-```
-
-## Constraints
-
-- DO NOT make any changes to the code.
-- No need to run tests or linters, just review the code changes.
+Close with an overall assessment — `approve`, `request changes`, or `comment` — followed by the findings grouped by severity.

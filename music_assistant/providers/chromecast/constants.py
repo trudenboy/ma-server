@@ -9,6 +9,7 @@ from music_assistant.constants import (
     CONF_ENTRY_FLOW_MODE,
     CONF_ENTRY_HTTP_PROFILE_DEFAULT_3,
     CONF_ENTRY_OUTPUT_CODEC,
+    CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
     create_sample_rates_config_entry,
 )
 
@@ -17,6 +18,17 @@ APP_MEDIA_RECEIVER = "CC1AD845"
 SENDSPIN_CAST_APP_ID = "DD107DDB"
 SENDSPIN_CAST_NAMESPACE = "urn:x-cast:sendspin"
 CONF_USE_MASS_APP = "use_mass_app"
+DASHBOARD_NAMESPACE = "urn:x-cast:io.music-assistant.cast"
+
+# Seconds to wait for a Cast receiver to acknowledge an app launch.
+APP_LAUNCH_TIMEOUT = 30.0
+
+# keepalive media the cast receiver plays while showing a dashboard
+DASHBOARD_KEEPALIVE_SUFFIXES = ("/dashboard-keepalive.mp4", "/keepalive.png")
+
+# Interval (seconds) before an unavailable player is re-evaluated as a possible
+# passive multichannel endpoint that should be removed from the setup.
+MULTICHANNEL_RECHECK_INTERVAL = 600
 
 # Devices known to not work with the Sendspin Cast bridge.
 # Tuple of (manufacturer, model) where "*" is a wildcard.
@@ -29,6 +41,7 @@ SENDSPIN_CAST_BLOCKLIST: set[tuple[str, str]] = {
 
 CAST_PLAYER_CONFIG_ENTRIES = (
     CONF_ENTRY_OUTPUT_CODEC,
+    CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
     CONF_ENTRY_HTTP_PROFILE_DEFAULT_3,
     # enable flow mode by default as cast devices handle a continuous
     # flow stream more reliably than enqueueing individual tracks
@@ -36,13 +49,7 @@ CAST_PLAYER_CONFIG_ENTRIES = (
     ConfigEntry(
         key=CONF_USE_MASS_APP,
         type=ConfigEntryType.BOOLEAN,
-        label="Use Music Assistant Cast App",
         default_value=True,
-        description="By default, Music Assistant will use a special Music Assistant "
-        "Cast Receiver app to play media on cast devices. It is tweaked to provide "
-        "better metadata and future expansion. \\n\\n"
-        "If you want to use the official Google Cast Receiver app instead, disable this option, "
-        "for example if your device has issues with the Music Assistant app.",
         advanced=True,
     ),
 )
@@ -74,7 +81,8 @@ CAST_FALLBACK_STATIC_DELAY = 330
 
 
 def get_cast_model_static_delay(manufacturer: str, model: str) -> int:
-    """Look up the default static delay for a Cast device model.
+    """
+    Look up the default static delay for a Cast device model.
 
     :param manufacturer: Device manufacturer (e.g., "Google Inc.").
     :param model: Device model name (e.g., "Google Nest Mini").

@@ -1,7 +1,13 @@
-"""Smart Fades - Audio filter implementations."""
+"""
+Smart Fades - the FFmpeg filter toolset.
+
+Each ``Filter`` is one tool a transition can apply to the fade-out/fade-in
+stream pair; the renderer picks and orders them to realize a ``TransitionPlan``.
+"""
 
 import logging
 from abc import ABC, abstractmethod
+from enum import StrEnum
 
 
 class Filter(ABC):
@@ -122,8 +128,47 @@ class FadeOutTrimFilter(Filter):
 class FrequencySweepFilter(Filter):
     """Filter that sweeps a lowpass/highpass cutoff frequency over time."""
 
-    output_fadeout_label: str = "frequency_sweep"
-    output_fadein_label: str = "frequency_sweep"
+    output_fadeout_label: str = "fadeout_tailtrim"
+    output_fadein_label: str = "fadein_tailtrim"
+
+    def __init__(self, logger: logging.Logger, fadeout_end_pos: float, trimmed_seconds: float):
+        """
+        Initialize fade-out trim filter.
+
+        :param fadeout_end_pos: Position in seconds where the outgoing track's
+            audible content ends; everything after it is dropped.
+            Measured on the untrimmed input timeline, so this filter must precede
+            any time-stretching filter in the chain.
+        :param trimmed_seconds: Amount of trailing audio in seconds that the trim
+            drops, for logging/debugging purposes.
+        """
+        self.fadeout_end_pos = fadeout_end_pos
+        self.trimmed_seconds = trimmed_seconds
+        super().__init__(logger)
+
+    def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
+        """Trim the outgoing track's tail at the effective audio end."""
+        return [
+            f"{input_fadeout_label}atrim=end={self.fadeout_end_pos:.3f},"
+            f"asetpts=PTS-STARTPTS[{self.output_fadeout_label}]",
+            f"{input_fadein_label}anull[{self.output_fadein_label}]",  # codespell:ignore anull
+        ]
+
+    def __repr__(self) -> str:
+        """Return string representation of FadeOutTrimFilter."""
+        return f"FadeOutTrim(end={self.fadeout_end_pos:.2f}s, trimmed={self.trimmed_seconds:.2f}s)"
+
+
+class ShelfType(StrEnum):
+    """EQ band for a scheduled-gain filter; values are the ffmpeg filter names."""
+
+    LOW = "lowshelf"
+    HIGH = "highshelf"
+    PEAK = "equalizer"
+
+
+class ShelfFilter(Filter):
+    """Shelving EQ whose gain follows a scheduled ramp (asendcmd-driven)."""
 
     # cutoff at which the filter is perceptually transparent
     lowpass_open_freq: int = 20000
@@ -134,14 +179,10 @@ class FrequencySweepFilter(Filter):
     def __init__(
         self,
         logger: logging.Logger,
-        sweep_type: str,
-        target_freq: int,
-        duration: float,
-        start_time: float,
-        sweep_direction: str,
-        poles: int,
-        curve_type: str,
-        stream_type: str = "fadeout",
+        shelf_type: ShelfType,
+        frequency: int,
+        gain_steps: list[tuple[float, float]],
+        stream_type: str,
     ):
         """
         Initialize frequency sweep filter.
@@ -155,33 +196,33 @@ class FrequencySweepFilter(Filter):
         :param curve_type: 'linear', 'exponential', or 'logarithmic'.
         :param stream_type: 'fadeout' or 'fadein' - which stream to process.
         """
-        self.sweep_type = sweep_type
-        self.target_freq = target_freq
-        self.duration = duration
-        self.start_time = start_time
-        self.sweep_direction = sweep_direction
-        self.poles = poles
-        self.curve_type = curve_type
+        Initialize shelf filter.
+
+        :param shelf_type: Which shelving band to process.
+        :param frequency: Shelf corner frequency in Hz.
+        :param gain_steps: Schedule of (time_seconds, gain_db); the first step at
+            t=0 sets the initial gain.
+        :param stream_type: 'fadeout' or 'fadein' - which stream to process.
+        """
+        self.shelf_type = shelf_type
+        self.frequency = frequency
+        self.gain_steps = gain_steps
         self.stream_type = stream_type
-
-        # Set output labels based on stream type
+        band = "low" if shelf_type is ShelfType.LOW else "high"
         if stream_type == "fadeout":
-            self.output_fadeout_label = f"fadeout_{sweep_type}"
-            self.output_fadein_label = "fadein_passthrough"
+            self.output_fadeout_label = f"fadeout_{band}shelf"
+            self.output_fadein_label = f"fadein_pt_{band}_out"
         else:
-            self.output_fadeout_label = "fadeout_passthrough"
-            self.output_fadein_label = f"fadein_{sweep_type}"
-
+            self.output_fadeout_label = f"fadeout_pt_{band}_in"
+            self.output_fadein_label = f"fadein_{band}shelf"
         super().__init__(logger)
 
     def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
         """Generate FFmpeg filters for the frequency sweep effect."""
         # Select the correct input based on stream type
         if self.stream_type == "fadeout":
-            input_label = input_fadeout_label
-            output_label = self.output_fadeout_label
-            passthrough_label = self.output_fadein_label
-            passthrough_input = input_fadein_label
+            input_label, output_label = input_fadeout_label, self.output_fadeout_label
+            pass_in, pass_out = input_fadein_label, self.output_fadein_label
         else:
             input_label = input_fadein_label
             output_label = self.output_fadein_label

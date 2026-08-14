@@ -80,3 +80,6 @@ async def get_config_entries(
             ),
         ),
     )
+    from .provider import SmartFadesProvider  # noqa: PLC0415
+
+    return SmartFadesProvider(mass, manifest, config, SUPPORTED_FEATURES)

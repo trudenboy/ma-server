@@ -23,6 +23,7 @@ from music_assistant.constants import MASS_LOGGER_NAME, VERBOSE_LOG_LEVEL
 from music_assistant.helpers.diagnostics import install_diagnostics_log_handler
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.logging import activate_log_queue_handler
+from music_assistant.helpers.util import cap_native_thread_pools
 from music_assistant.mass import MusicAssistant
 
 FORMAT_DATE: Final = "%Y-%m-%d"
@@ -84,7 +85,10 @@ def setup_logger(data_path: str, level: str = "DEBUG") -> logging.Logger:
     # define log formatter
     log_fmt = "%(asctime)s.%(msecs)03d %(levelname)s (%(threadName)s) [%(name)s] %(message)s"
 
-    # base logging config for the root logger
+    # base logging config for the root logger.
+    # The root level doubles as the gate for third-party libraries that never get an
+    # explicit level of their own, so it is kept separate from the Music Assistant log
+    # level below: a verbose MA (or provider) level stays scoped to MA's own loggers.
     logging.basicConfig(level=logging.INFO)
 
     colorfmt = f"%(log_color)s{log_fmt}%(reset)s"
@@ -140,6 +144,8 @@ def setup_logger(data_path: str, level: str = "DEBUG") -> logging.Logger:
     logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
     logging.getLogger("numba").setLevel(logging.WARNING)
     logging.getLogger("torio._extension.utils").setLevel(logging.WARNING)
+    logging.getLogger("quic").setLevel(logging.WARNING)
+    logging.getLogger("http3").setLevel(logging.WARNING)
 
     # Add a filter to suppress slow callback warnings from buffered audio streaming
     # These warnings are expected when audio buffers fill up and producers wait for consumers
@@ -271,8 +277,10 @@ def main() -> None:
             with suppress(NotImplementedError):
                 loop.add_signal_handler(sig, _set_stop)
 
-        await mass.start()
         try:
+            # a startup that fails part-way must be cleaned up too, or the databases it
+            # already opened keep their worker threads alive and the process never exits
+            await mass.start()
             await stop_event.wait()
         finally:
             logger.info("shutdown requested!")

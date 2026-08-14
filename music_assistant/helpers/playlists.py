@@ -24,6 +24,7 @@ from music_assistant_models.media_items import (
     PodcastEpisode,
     ProviderMapping,
     Radio,
+    SoundEffect,
     Track,
     UniqueList,
 )
@@ -339,7 +340,8 @@ def generate_m3u(
     items: Sequence[PlaylistItem],
     playlist_image_url: str | None = None,
 ) -> str:
-    """Generate an M3U8 playlist string from PlaylistItem entries.
+    """
+    Generate an M3U8 playlist string from PlaylistItem entries.
 
     :param playlist_name: Human-readable name (written as #PLAYLIST directive).
     :param items: Entries to write. Only fields that are set are emitted.
@@ -390,8 +392,10 @@ def generate_m3u(
             remotely = "true" if img.remotely_accessible else "false"
             fields = [img.type, img.path, img.provider, remotely]
             lines.append(f"#EXTIMG:{sep.join(fields)}")
-        if item.title is not None and item.length is not None:
-            lines.append(f"#EXTINF:{item.length},{item.title}")
+        if item.title is not None:
+            # -1 is the M3U convention for unknown length; without it an entry without
+            # duration (such as a radio station) loses its title on every rewrite
+            lines.append(f"#EXTINF:{item.length if item.length is not None else -1},{item.title}")
         lines.append(item.path)
     return "\n".join(lines) + "\n"
 
@@ -404,35 +408,61 @@ def generate_m3u(
 def construct_media_item_from_playlist_item(
     item: PlaylistItem,
     mass: MusicAssistant,
+    default_media_type: MediaType = MediaType.TRACK,
 ) -> MediaItemType | None:
-    """Construct a MediaItem from a PlaylistItem's stored metadata.
+    """
+    Construct a MediaItem from a PlaylistItem's stored metadata.
 
     Resolves provider mappings by instance_id first (free dict lookup),
     falling back to domain if the instance no longer exists.
 
     :param item: Parsed PlaylistItem with metadata, providers, and images.
     :param mass: MusicAssistant instance for provider resolution.
+    :param default_media_type: Media type to build when the entry's #EXTMA metadata
+        holds no usable media_type.
     """
     metadata = item.metadata or {}
     try:
-        media_type = MediaType(metadata.get("media_type", "track"))
+        media_type = MediaType(metadata.get("media_type", default_media_type.value))
     except ValueError:
-        media_type = MediaType.TRACK
+        media_type = default_media_type
     name = metadata.get("name") or item.title or item.path
     duration = try_parse_int(item.length, default=None) if item.length else None
 
     provider_mappings = _resolve_provider_mappings(item, mass)
+    if not provider_mappings and item.path.startswith(BUILTIN_URL_SCHEMES):
+        # an item without any mapping never reaches library_add, leaving an unplayable
+        # library entry, so a plain stream URL is mapped to the provider that serves it
+        provider_mappings = _builtin_fallback_mappings(item.path, mass)
     external_ids = _collect_external_ids(metadata)
 
+    # a set has no order, so sort to keep the chosen mapping stable across runs
+    sorted_mappings = sorted(provider_mappings, key=lambda pm: (pm.provider_instance, pm.item_id))
     first_provider = next(
-        (pm for pm in provider_mappings if pm.available),
-        next(iter(provider_mappings), None),
+        (pm for pm in sorted_mappings if pm.available),
+        next(iter(sorted_mappings), None),
     )
-    item_provider = first_provider.provider_domain if first_provider else "builtin"
-    item_id = first_provider.item_id if first_provider else item.path.rsplit("/", 1)[-1]
+    # prefer the instance over the domain: a domain resolves to whichever instance of it
+    # happens to be loaded first, which is the wrong one when several are configured
+    item_provider = (
+        (first_provider.provider_instance or first_provider.provider_domain)
+        if first_provider
+        else "builtin"
+    )
+    item_id = first_provider.item_id if first_provider else item.path
 
     media_item: MediaItemType
-    if media_type == MediaType.RADIO:
+    if media_type == MediaType.SOUND_EFFECT:
+        media_item = SoundEffect(
+            item_id=item_id,
+            provider=item_provider,
+            name=name,
+            provider_mappings=provider_mappings,
+            external_ids=external_ids,
+        )
+        if duration is not None:
+            media_item.duration = duration
+    elif media_type == MediaType.RADIO:
         media_item = Radio(
             item_id=item_id,
             provider=item_provider,
@@ -531,6 +561,19 @@ def _resolve_provider_mappings(item: PlaylistItem, mass: MusicAssistant) -> set[
             )
         )
     return provider_mappings
+
+
+def _builtin_fallback_mappings(path: str, mass: MusicAssistant) -> set[ProviderMapping]:
+    """Return the builtin mapping for a stream URL, which builtin takes as its item_id."""
+    prov = mass.get_provider("builtin")
+    return {
+        ProviderMapping(
+            item_id=path,
+            provider_domain="builtin",
+            provider_instance=prov.instance_id if prov else "builtin",
+            available=prov is not None,
+        )
+    }
 
 
 def _collect_external_ids(metadata: dict[str, str]) -> set[tuple[ExternalID, str]]:
@@ -672,7 +715,8 @@ def collect_podcast_info(full_item: MediaItem) -> PodcastInfo | None:
 
 
 def media_item_to_playlist_item(full_item: MediaItem) -> PlaylistItem:
-    """Convert a MediaItem to a PlaylistItem with full M3U metadata.
+    """
+    Convert a MediaItem to a PlaylistItem with full M3U metadata.
 
     Pure conversion — takes an already-fetched MediaItem and produces a
     PlaylistItem suitable for ``generate_m3u``.

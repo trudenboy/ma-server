@@ -35,7 +35,6 @@ from music_assistant.constants import (
     CONF_ENTRY_OUTPUT_CODEC,
     VERBOSE_LOG_LEVEL,
 )
-from music_assistant.helpers.tags import async_parse_tags
 from music_assistant.helpers.util import is_valid_mac_address
 from music_assistant.models.player import Player
 from music_assistant.providers.sonos.const import (
@@ -53,7 +52,7 @@ from music_assistant.providers.sonos.const import (
 if TYPE_CHECKING:
     from aiosonos.api.models import DiscoveryInfo as SonosDiscoveryInfo
     from aiosonos.group import SonosGroup
-    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
+    from music_assistant_models.config_entries import ConfigEntry
 
     from .provider import SonosPlayerProvider
 
@@ -72,7 +71,7 @@ class SonosQueue:
     """Simple representation of a Sonos (cloud) Queue."""
 
     items: list[PlayerMedia] = field(default_factory=list)
-    last_updated: float = time.time()
+    last_updated: float = field(default_factory=time.time)
     includes_beginning: bool = False
     includes_end: bool = False
 
@@ -191,15 +190,28 @@ class SonosPlayer(Player):
             )
         )
 
-    async def get_config_entries(
-        self,
-        action: str | None = None,
-        values: dict[str, ConfigValueType] | None = None,
-    ) -> list[ConfigEntry]:
+    async def get_config_entries(self) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the player."""
         return [
             CONF_ENTRY_HTTP_PROFILE_DEFAULT_2,
+            CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
         ]
+
+    async def on_unload(self) -> None:
+        """Handle logic when the player is unloaded from the Player controller."""
+        await super().on_unload()
+        for task_id in (
+            f"sonos_reconnect_{self.player_id}",
+            f"restore_airplay_group_{self.player_id}",
+        ):
+            # a timer that already fired lives on as a task under the same id,
+            # so both are needed to cover the pending and the running case
+            self.mass.cancel_timer(task_id)
+            self.mass.cancel_task(task_id)
+        try:
+            await self._disconnect()
+        except Exception:
+            self.logger.exception("Error disconnecting from Sonos player %s", self.name)
 
     async def volume_set(self, volume_level: int) -> None:
         """
@@ -316,7 +328,12 @@ class SonosPlayer(Player):
                 f"Player {self.display_name} can not "
                 "accept play_media command, it is synced to another player."
             )
-            raise PlayerCommandFailed(msg)
+            raise PlayerCommandFailed(
+                msg,
+                translation_key="player_synced_cannot_play",
+                translation_owner=self.translation_owner,
+                translation_args=[self.display_name],
+            )
         # for now always reset the active session
         self.group_controller.active_session_id = None
         if media.source_id:
@@ -325,10 +342,7 @@ class SonosPlayer(Player):
         if media.media_type == MediaType.ANNOUNCEMENT:
             # We cannot use play_stream_url for announcements because Sonos treats those
             # as duration less radio streams and will retry/loop them.
-            if not media.duration and media.custom_data:
-                announcement_url = media.custom_data.get("announcement_url", media.uri)
-                media_info = await async_parse_tags(announcement_url, require_duration=True)
-                media.duration = int(media_info.duration) if media_info.duration else None
+            media.duration = await self.mass.streams.get_announcement_duration(media)
             media.queue_item_id = "announcement"
             self.sonos_queue.items = [media]
             self.sonos_queue.last_updated = time.time()
@@ -471,9 +485,8 @@ class SonosPlayer(Player):
         # Wait until the announcement is finished playing
         # This is helpful for people who want to play announcements in a sequence
         # yeah we can also setup a subscription on the sonos player for this, but this is easier
-        media_info = await async_parse_tags(announcement.uri, require_duration=True)
-        duration = media_info.duration or 10
-        await asyncio.sleep(duration)
+        duration = await self.mass.streams.get_announcement_duration(announcement)
+        await asyncio.sleep(duration or 10)
 
     def on_player_event(self, event: SonosEvent | None) -> None:
         """Handle incoming event from player."""
@@ -700,6 +713,38 @@ class SonosPlayer(Player):
         self._attr_elapsed_time_last_updated = last_updated
         self.update_state()
 
+    def reconnect(self, delay: float = 1) -> None:
+        """Reconnect the player."""
+        if self.mass.closing:
+            return
+        # use a task_id to prevent multiple reconnects
+        task_id = f"sonos_reconnect_{self.player_id}"
+        self.mass.call_later(delay, self._connect, delay, task_id=task_id)
+
+    async def sync_play_modes(self, queue_id: str) -> None:
+        """Sync the play modes between MA and Sonos."""
+        queue = self.mass.player_queues.get(queue_id)
+        if not queue or queue.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
+            return
+        repeat_single_enabled = queue.repeat_mode == RepeatMode.ONE
+        repeat_all_enabled = queue.repeat_mode == RepeatMode.ALL
+        if not self.client.player.group:
+            return
+        play_modes = self.group_controller.play_modes
+        if (
+            play_modes.repeat != repeat_all_enabled
+            or play_modes.repeat_one != repeat_single_enabled
+        ):
+            try:
+                await self.group_controller.set_play_modes(
+                    repeat=repeat_all_enabled,
+                    repeat_one=repeat_single_enabled,
+                )
+            except FailedCommand as err:
+                if "groupCoordinatorChanged" not in str(err):
+                    # this may happen at race conditions
+                    raise
+
     async def _connect(self, retry_on_fail: int = 0) -> None:
         """Connect to the Sonos player."""
         if self.mass.closing:
@@ -741,14 +786,6 @@ class SonosPlayer(Player):
         self._listen_task = self.mass.create_task(_listener())
         await init_ready.wait()
 
-    def reconnect(self, delay: float = 1) -> None:
-        """Reconnect the player."""
-        if self.mass.closing:
-            return
-        # use a task_id to prevent multiple reconnects
-        task_id = f"sonos_reconnect_{self.player_id}"
-        self.mass.call_later(delay, self._connect, delay, task_id=task_id)
-
     async def _disconnect(self) -> None:
         """Disconnect the client and cleanup."""
         self.connected = False
@@ -758,30 +795,6 @@ class SonosPlayer(Player):
             await self.client.disconnect()
         self.logger.debug("Disconnected from player API")
 
-    async def sync_play_modes(self, queue_id: str) -> None:
-        """Sync the play modes between MA and Sonos."""
-        queue = self.mass.player_queues.get(queue_id)
-        if not queue or queue.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
-            return
-        repeat_single_enabled = queue.repeat_mode == RepeatMode.ONE
-        repeat_all_enabled = queue.repeat_mode == RepeatMode.ALL
-        if not self.client.player.group:
-            return
-        play_modes = self.group_controller.play_modes
-        if (
-            play_modes.repeat != repeat_all_enabled
-            or play_modes.repeat_one != repeat_single_enabled
-        ):
-            try:
-                await self.group_controller.set_play_modes(
-                    repeat=repeat_all_enabled,
-                    repeat_one=repeat_single_enabled,
-                )
-            except FailedCommand as err:
-                if "groupCoordinatorChanged" not in str(err):
-                    # this may happen at race conditions
-                    raise
-
     async def _set_sonos_queue_from_mass_queue(self, queue_id: str) -> None:
         """Set the SonosQueue items from the given MA PlayerQueue."""
         items: list[PlayerMedia] = []
@@ -790,6 +803,7 @@ class SonosPlayer(Player):
             self.sonos_queue.items.clear()
             self.sonos_queue.includes_beginning = False
             self.sonos_queue.includes_end = False
+            self._bump_queue_version()
             return
         current_index = queue.current_index or 0
 
@@ -827,6 +841,9 @@ class SonosPlayer(Player):
         self.sonos_queue.items = items
         self.sonos_queue.includes_beginning = offset == 0
         self.sonos_queue.includes_end = includes_end
+        # bump only after the new window is assigned (no await in between) so Sonos never sees a
+        # new version while itemWindow still serves the previous items
+        self._bump_queue_version()
         self.logger.log(
             VERBOSE_LOG_LEVEL,
             "Set Sonos queue items from MA queue %s on player %s: %s",
@@ -836,7 +853,8 @@ class SonosPlayer(Player):
         )
 
     def _extract_mac_from_player_id(self) -> str | None:
-        """Extract MAC address from Sonos player_id.
+        """
+        Extract MAC address from Sonos player_id.
 
         Sonos player_ids follow the format RINCON_XXXXXXXXXXXX01400 where
         the middle 12 hex characters represent the MAC address.
@@ -861,3 +879,13 @@ class SonosPlayer(Player):
 
         # Format as XX:XX:XX:XX:XX:XX
         return ":".join(mac_hex[i : i + 2].upper() for i in range(0, 12, 2))
+
+    def _bump_queue_version(self) -> None:
+        """
+        Advance the Sonos cloud-queue version to the current time.
+
+        The version is exposed as the queueVersion in the cloud-queue endpoints; advancing it on
+        every window rebuild is what makes Sonos refetch the window instead of replaying a stale
+        cached one.
+        """
+        self.sonos_queue.last_updated = time.time()

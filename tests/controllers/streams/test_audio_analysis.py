@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sqlite3
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
@@ -14,7 +15,7 @@ import pytest
 from music_assistant_models.audio_analysis import AudioAnalysisCoverage
 from music_assistant_models.enums import ContentType, MediaType, StreamType
 from music_assistant_models.errors import ProviderUnavailableError
-from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.media_items import AudioFormat, ProviderMapping, Track
 
 import music_assistant.controllers.streams.audio_analysis as audio_analysis_mod
 from music_assistant.constants import (
@@ -32,7 +33,10 @@ from music_assistant.controllers.streams.audio_analysis import (
 from music_assistant.controllers.streams.audio_buffer import AudioBufferEOF
 from music_assistant.helpers.json import json_dumps
 from music_assistant.models.audio_analysis import AudioAnalysisData
-from music_assistant.models.audio_analysis_provider import AudioAnalysisProvider
+from music_assistant.models.audio_analysis_provider import (
+    AudioAnalysisProvider,
+    InstrumentedSemaphore,
+)
 from music_assistant.models.music_provider import MusicProvider
 
 
@@ -447,6 +451,7 @@ async def test_find_candidates_handles_sqlite_row_without_get(
     controller = _make_controller()
     p1 = _make_aa_provider("prov-1", available=True)
     p1.domain = "loudness_analysis"
+    p1.analysis_version = 1
     p1.available = True
     monkeypatch.setattr(
         controller.__class__,
@@ -827,7 +832,8 @@ def test_merged_from_rows_priority_domain_not_available_is_excluded() -> None:
 
 
 def test_merged_from_rows_regression_sonic_does_not_clobber_loudness() -> None:
-    """Regression: sonic_analysis' RMS loudness must not overwrite the EBU R128 value.
+    """
+    Regression: sonic_analysis' RMS loudness must not overwrite the EBU R128 value.
 
     Reproduces the volume-jump bug: a newer sonic_analysis row carries an RMS-proxy
     loudness_integrated that wins under last-write-wins, but scoping to loudness_analysis
@@ -1257,11 +1263,12 @@ async def test_count_candidates_missing_analysis_queries_with_available_filesyst
     assert "aa.analysis_version IS NOT NULL" in sql
     assert "aa.analysis_version >= :current_version" in sql
     assert f"'{domain}'" in sql
-    assert params == {
-        "media_type": MediaType.TRACK.value,
-        "aa_domain": "sonic_analysis",
-        "current_version": 2,
-    }
+    assert params["media_type"] == MediaType.TRACK.value
+    assert params["aa_domain"] == "sonic_analysis"
+    assert params["current_version"] == 2
+    assert "now" in params
+    assert "aa.analysis_version IS NOT NULL" in sql
+    assert "aa.analysis_version >= :current_version" in sql
 
 
 def test_controller_has_no_provider_specific_extra_data_keys() -> None:

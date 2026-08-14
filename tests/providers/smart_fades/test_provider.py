@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
+from collections.abc import Callable, Generator
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
+import torch
 from music_assistant_models.enums import ContentType, MediaType
 from music_assistant_models.errors import SetupFailedError
 from music_assistant_models.media_items import AudioFormat
+from torchaudio.transforms import SpectralCentroid
 
-from music_assistant.models.audio_analysis import AudioAnalysisData
-from music_assistant.providers.smart_fades.provider import SmartFadesProvider
+from music_assistant.models.audio_analysis import AudioAnalysisData, AudioAnalysisError
+from music_assistant.providers.smart_fades.provider import ANALYSIS_SAMPLE_RATE, SmartFadesProvider
+from music_assistant.providers.smart_fades.vocal_activity import (
+    FIRERED_MEL_BINS,
+    infer_firered_chunk,
+)
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 # Synthetic 120 BPM drum pattern (kick-hat-snare-hat): 44100 Hz, stereo, float32, ~15.7s
@@ -20,10 +30,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 # Clip ends 0.2s after the last beat to avoid end-of-track hallucination.
 FIXTURE_PCM = FIXTURE_DIR / "test_120bpm_44100_2_32.pcm"
 
-# Expected values from both beat_this File2Beats(checkpoint_path="final0", dbn=False)
-# and the MA streaming pipeline (identical output, 0ms diff between the two).
-# All 32 beats match ground truth within 20ms; all 8 downbeats match within 20ms.
-# Zero false positives.
+# Expected beat grid for the deterministic 120 BPM fixture.
 EXPECTED_BEATS = [
     0.000,
     0.500,
@@ -111,14 +118,64 @@ def config_mock() -> Mock:
 
 @pytest.fixture
 async def provider(mass_mock: Mock, manifest_mock: Mock, config_mock: Mock) -> SmartFadesProvider:
-    """Return a SmartFadesProvider with mocked MA but real Beat This model."""
+    """Return a SmartFadesProvider without loading external model assets."""
     prov = SmartFadesProvider(mass_mock, manifest_mock, config_mock, set())
-    await prov.handle_async_init()
+    with patch.object(prov, "_load_models", new=AsyncMock()):
+        await prov.handle_async_init()
+    prov._spectral_centroid = SpectralCentroid(
+        sample_rate=ANALYSIS_SAMPLE_RATE,
+        hop_length=512,
+    )
+    prov._firered_model = Mock()
+    prov._firered_cmvn_means = np.zeros(FIRERED_MEL_BINS, dtype=np.float64)
+    prov._firered_cmvn_inverse_std = np.ones(FIRERED_MEL_BINS, dtype=np.float64)
     return prov
 
 
-async def test_beat_detection(provider: SmartFadesProvider, mass_mock: Mock) -> None:
-    """Test that the provider detects correct beats and downbeats from a PCM fixture."""
+@pytest.fixture
+def feature_provider(provider: SmartFadesProvider) -> Generator[SmartFadesProvider]:
+    """Return a provider with model-backed feature extraction disabled."""
+    with (
+        patch.object(provider, "_compute_musical_key_features"),
+        patch.object(provider, "_compute_vocal_features"),
+    ):
+        yield provider
+
+
+@pytest.fixture
+def deterministic_provider(
+    feature_provider: SmartFadesProvider,
+) -> Generator[SmartFadesProvider]:
+    """Return a provider with deterministic model inference."""
+    with (
+        patch.object(
+            feature_provider,
+            "_infer_beat_timings",
+            return_value=(
+                np.asarray(EXPECTED_BEATS, dtype=np.float32),
+                np.asarray(EXPECTED_DOWNBEATS, dtype=np.float32),
+                4,
+            ),
+        ),
+        patch.object(
+            feature_provider,
+            "_infer_musical_key",
+            return_value=("C", "major"),
+        ),
+        patch.object(
+            feature_provider,
+            "_infer_vocal_activity",
+            new=AsyncMock(return_value=np.zeros(2, dtype=np.float32)),
+        ),
+    ):
+        yield feature_provider
+
+
+async def test_beat_analysis_pipeline(
+    deterministic_provider: SmartFadesProvider,
+    mass_mock: Mock,
+) -> None:
+    """Test that the provider stores beats and downbeats from a PCM fixture."""
     audio_format = AudioFormat(
         content_type=ContentType.PCM_F32LE,
         bit_depth=32,
@@ -135,7 +192,7 @@ async def test_beat_detection(provider: SmartFadesProvider, mass_mock: Mock) -> 
     stream_details.duration = 120
 
     session_id = "test:test:test_120bpm"
-    await provider.start_analysis(session_id, stream_details, audio_format)
+    await deterministic_provider.start_analysis(session_id, stream_details, audio_format)
 
     # Feed PCM in 1-second chunks (matching the real streaming pipeline)
     pcm_data = FIXTURE_PCM.read_bytes()
@@ -143,10 +200,10 @@ async def test_beat_detection(provider: SmartFadesProvider, mass_mock: Mock) -> 
     offset = 0
     while offset < len(pcm_data):
         chunk = pcm_data[offset : offset + chunk_size]
-        await provider.process_pcm_chunk(session_id, chunk)
+        await deterministic_provider.process_pcm_chunk(session_id, chunk)
         offset += chunk_size
 
-    await provider.finalize(session_id)
+    await deterministic_provider.finalize(session_id)
 
     # Verify set_audio_analysis was called with correct data
     set_aa_mock = mass_mock.streams.audio_analysis.set_audio_analysis
@@ -178,8 +235,14 @@ async def test_beat_detection(provider: SmartFadesProvider, mass_mock: Mock) -> 
     assert analysis.bpm is not None
     assert 115 < analysis.bpm < 125, f"Expected BPM ~120, got {analysis.bpm:.1f}"
 
+    # the 120 BPM fixture is common time
+    assert analysis.beats_per_bar == 4
 
-async def test_extended_analysis_fields(provider: SmartFadesProvider, mass_mock: Mock) -> None:
+
+async def test_extended_analysis_fields(
+    deterministic_provider: SmartFadesProvider,
+    mass_mock: Mock,
+) -> None:
     """Test that extended analysis fields (energy, centroid, key) are populated."""
     audio_format = AudioFormat(
         content_type=ContentType.PCM_F32LE,
@@ -197,26 +260,27 @@ async def test_extended_analysis_fields(provider: SmartFadesProvider, mass_mock:
     stream_details.duration = 120
 
     session_id = "test:test:test_120bpm_extended"
-    await provider.start_analysis(session_id, stream_details, audio_format)
+    await deterministic_provider.start_analysis(session_id, stream_details, audio_format)
 
     pcm_data = FIXTURE_PCM.read_bytes()
     chunk_size = 44100 * 2 * 4  # 1 second at 44100 Hz, stereo, float32
     offset = 0
     while offset < len(pcm_data):
         chunk = pcm_data[offset : offset + chunk_size]
-        await provider.process_pcm_chunk(session_id, chunk)
+        await deterministic_provider.process_pcm_chunk(session_id, chunk)
         offset += chunk_size
 
-    await provider.finalize(session_id)
+    await deterministic_provider.finalize(session_id)
 
     set_aa_mock = mass_mock.streams.audio_analysis.set_audio_analysis
     analysis = set_aa_mock.call_args.kwargs["analysis"]
+    assert set_aa_mock.call_args.kwargs["analysis_version"] == 3
 
     # Energy curve should be 1800 bins, normalized to [0, 1]
     assert analysis.rms_energy is not None
     assert len(analysis.rms_energy) == 1800
-    assert analysis.rms_energy.max() <= 1.0
-    assert analysis.rms_energy.min() >= 0.0
+    assert max(analysis.rms_energy) <= 1.0
+    assert min(analysis.rms_energy) >= 0.0
 
     # Spectral centroid should be 1800 bins with positive Hz values
     assert analysis.spectral_centroid is not None
@@ -246,8 +310,25 @@ async def test_extended_analysis_fields(provider: SmartFadesProvider, mass_mock:
     assert analysis.bpm is not None
     assert 115 < analysis.bpm < 125
 
+    # v2: per-band RMS envelopes in extra_data, normalized by the full-band peak
+    assert analysis.extra_data is not None
+    band_rms = analysis.extra_data["band_rms"]
+    assert set(band_rms) == {"low", "low_mid", "mid", "high"}
+    for band in band_rms.values():
+        assert len(band) == 1800
+        assert all(v >= 0.0 for v in band)
+    # music with drums has real low-band content; bands are lists (JSON-safe)
+    assert isinstance(band_rms["low"], list)
+    assert max(band_rms["low"]) > 0.05
 
-async def test_finalize_returns_audio_analysis_data(provider: SmartFadesProvider) -> None:
+    vocal_probabilities = analysis.extra_data["vocal_activity"]
+    assert len(vocal_probabilities) == 1800
+    assert all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in vocal_probabilities)
+
+
+async def test_finalize_returns_audio_analysis_data(
+    deterministic_provider: SmartFadesProvider,
+) -> None:
     """Test that _finalize returns an AudioAnalysisData on success."""
     audio_format = AudioFormat(
         content_type=ContentType.PCM_F32LE,
@@ -265,23 +346,25 @@ async def test_finalize_returns_audio_analysis_data(provider: SmartFadesProvider
     stream_details.duration = 120
 
     session_id = "test:test:test_finalize_return"
-    await provider.start_analysis(session_id, stream_details, audio_format)
+    await deterministic_provider.start_analysis(session_id, stream_details, audio_format)
 
     pcm_data = FIXTURE_PCM.read_bytes()
     chunk_size = 44100 * 2 * 4
     offset = 0
     while offset < len(pcm_data):
         chunk = pcm_data[offset : offset + chunk_size]
-        await provider.process_pcm_chunk(session_id, chunk)
+        await deterministic_provider.process_pcm_chunk(session_id, chunk)
         offset += chunk_size
 
-    result = await provider._finalize(session_id)
+    result = await deterministic_provider._finalize(session_id)
 
     assert isinstance(result, AudioAnalysisData)
 
 
-async def test_finalize_returns_none_on_early_exit(provider: SmartFadesProvider) -> None:
-    """Test that _finalize returns None when not enough beats are detected."""
+async def test_finalize_raises_when_not_enough_beats(
+    feature_provider: SmartFadesProvider,
+) -> None:
+    """Test that _finalize raises AudioAnalysisError when not enough beats are detected."""
     audio_format = AudioFormat(
         content_type=ContentType.PCM_F32LE,
         bit_depth=32,
@@ -298,23 +381,26 @@ async def test_finalize_returns_none_on_early_exit(provider: SmartFadesProvider)
     stream_details.duration = 120
 
     session_id = "test:test:test_finalize_none"
-    await provider.start_analysis(session_id, stream_details, audio_format)
+    await feature_provider.start_analysis(session_id, stream_details, audio_format)
 
     pcm_data = FIXTURE_PCM.read_bytes()
     chunk_size = 44100 * 2 * 4
     offset = 0
     while offset < len(pcm_data):
         chunk = pcm_data[offset : offset + chunk_size]
-        await provider.process_pcm_chunk(session_id, chunk)
+        await feature_provider.process_pcm_chunk(session_id, chunk)
         offset += chunk_size
 
-    # Patch _infer_beat_timings to return fewer than 2 beats → triggers early exit
-    with patch.object(
-        provider,
-        "_infer_beat_timings",
-        return_value=(np.array([0.5]), np.array([])),
+    # Patch _infer_beat_timings to return fewer than 2 beats → deterministic skip
+    with (
+        patch.object(
+            feature_provider,
+            "_infer_beat_timings",
+            return_value=(np.array([0.5]), np.array([]), 4),
+        ),
+        pytest.raises(AudioAnalysisError, match="beat"),
     ):
-        result = await provider._finalize(session_id)
+        await feature_provider._finalize(session_id)
 
     assert result is None
 

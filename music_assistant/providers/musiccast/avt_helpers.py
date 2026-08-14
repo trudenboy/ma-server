@@ -127,7 +127,8 @@ async def avt_set_url(
     player_media: PlayerMedia,
     enqueue: bool = False,
 ) -> None:
-    """Set Url.
+    """
+    Set Url.
 
     If device is playing, this will just continue with new media.
     """

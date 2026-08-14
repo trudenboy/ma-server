@@ -7,9 +7,10 @@ import hashlib
 import logging
 import secrets
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Final, TypedDict, cast
 from urllib.parse import urlparse
 
 from hass_client import HomeAssistantClient
@@ -140,8 +141,11 @@ class LoginRateLimiter:
         # Track failed attempts per key: {key: [timestamp1, timestamp2, ...]}. A key is a
         # username on the interactive login path, but callers may group attempts differently.
         self._failed_attempts: dict[str, list[datetime]] = {}
-        # Time window for tracking attempts (30 minutes)
-        self._tracking_window = timedelta(minutes=30)
+        self._delay_tiers = tuple(delay_tiers)
+        self._tracking_window = tracking_window
+        self._warn_threshold = warn_threshold
+        self._alert_threshold = alert_threshold
+        self._subject = subject
         # Lock for thread-safe access to _failed_attempts
         self._lock = asyncio.Lock()
         self._delay_tiers = delay_tiers
@@ -149,32 +153,29 @@ class LoginRateLimiter:
         self._alert_threshold = alert_threshold
         self._subject = subject
 
-    def _cleanup_old_attempts(self, username: str) -> None:
+    def get_attempt_count(self, key: str) -> int:
         """
-        Remove failed attempts outside the tracking window.
+        Get the number of failed attempts for a key inside the tracking window.
 
-        :param username: The username to clean up.
+        :param key: The key to count failed attempts for.
+        :return: Number of failed attempts still being tracked.
         """
-        if username not in self._failed_attempts:
-            return
-
         cutoff_time = utc() - self._tracking_window
-        self._failed_attempts[username] = [
-            timestamp for timestamp in self._failed_attempts[username] if timestamp > cutoff_time
-        ]
+        return sum(1 for timestamp in self._failed_attempts.get(key, ()) if timestamp > cutoff_time)
 
-        # Remove username if no attempts left
-        if not self._failed_attempts[username]:
-            del self._failed_attempts[username]
-
-    def get_delay(self, username: str) -> int:
+    def get_delay(self, key: str) -> int:
         """
-        Get the delay in seconds before next login attempt is allowed.
+        Get the delay in seconds before the next attempt for a key is allowed.
 
         :param username: The username attempting to log in.
         :return: Delay in seconds (0 if no delay needed).
         """
-        self._cleanup_old_attempts(username)
+        attempt_count = self.get_attempt_count(key)
+        delay = 0
+        for tier_attempts, tier_delay in self._delay_tiers:
+            if attempt_count >= tier_attempts:
+                delay = tier_delay
+        return delay
 
         if username not in self._failed_attempts:
             return 0
@@ -188,20 +189,20 @@ class LoginRateLimiter:
 
     async def check_rate_limit(self, username: str) -> tuple[bool, int]:
         """
-        Check if login attempt is allowed and apply delay if needed.
+        Check if an attempt is allowed and apply delay if needed.
 
-        :param username: The username attempting to log in.
+        :param key: The key attempting to authenticate.
         :return: Tuple of (allowed, delay_seconds). If not allowed, includes remaining delay.
         """
         async with self._lock:
-            self._cleanup_old_attempts(username)
+            self._cleanup_old_attempts(key)
 
-            if username not in self._failed_attempts or not self._failed_attempts[username]:
+            if key not in self._failed_attempts or not self._failed_attempts[key]:
                 return True, 0
 
             # Get the most recent failed attempt
-            last_attempt = self._failed_attempts[username][-1]
-            required_delay = self.get_delay(username)
+            last_attempt = self._failed_attempts[key][-1]
+            required_delay = self.get_delay(key)
 
             if required_delay == 0:
                 return True, 0
@@ -216,19 +217,19 @@ class LoginRateLimiter:
 
             return True, 0
 
-    async def record_failed_attempt(self, username: str) -> None:
+    async def record_failed_attempt(self, key: str) -> None:
         """
-        Record a failed login attempt.
+        Record a failed attempt.
 
-        :param username: The username that failed to log in.
+        :param key: The key that failed to authenticate.
         """
         async with self._lock:
-            self._cleanup_old_attempts(username)
+            self._cleanup_old_attempts(key)
 
-            if username not in self._failed_attempts:
-                self._failed_attempts[username] = []
+            if key not in self._failed_attempts:
+                self._failed_attempts[key] = []
 
-            self._failed_attempts[username].append(utc())
+            self._failed_attempts[key].append(utc())
 
             # Log warning for suspicious activity
             attempt_count = len(self._failed_attempts[username])
@@ -248,15 +249,40 @@ class LoginRateLimiter:
                     username,
                 )
 
-    async def clear_attempts(self, username: str) -> None:
-        """
-        Clear failed attempts for a username (called after successful login).
+            # A key is only cleaned up when it is used again, and most keys (a one-off
+            # connection, a made-up username) never come back, so sweep the whole map once
+            # it grows past what any legitimate burst of callers produces.
+            if len(self._failed_attempts) > PRUNE_THRESHOLD:
+                for tracked_key in list(self._failed_attempts):
+                    self._cleanup_old_attempts(tracked_key)
 
-        :param username: The username to clear.
+    async def clear_attempts(self, key: str) -> None:
+        """
+        Clear failed attempts for a key (called after a successful attempt).
+
+        :param key: The key to clear.
         """
         async with self._lock:
-            if username in self._failed_attempts:
-                del self._failed_attempts[username]
+            if key in self._failed_attempts:
+                del self._failed_attempts[key]
+
+    def _cleanup_old_attempts(self, key: str) -> None:
+        """
+        Remove failed attempts outside the tracking window.
+
+        :param key: The key to clean up.
+        """
+        if key not in self._failed_attempts:
+            return
+
+        cutoff_time = utc() - self._tracking_window
+        self._failed_attempts[key] = [
+            timestamp for timestamp in self._failed_attempts[key] if timestamp > cutoff_time
+        ]
+
+        # Remove key if no attempts left
+        if not self._failed_attempts[key]:
+            del self._failed_attempts[key]
 
 
 class LoginProviderConfig(TypedDict, total=False):
@@ -555,68 +581,6 @@ class HomeAssistantOAuthProvider(LoginProvider):
         """
         return AuthResult(success=False, error="Use OAuth flow for Home Assistant authentication")
 
-    async def _get_external_ha_url(self) -> str | None:
-        """
-        Get the external URL for Home Assistant from the config API.
-
-        This is needed when MA runs as HA add-on and connects via internal docker network
-        (http://supervisor/api) but needs the external URL for OAuth redirects.
-
-        :return: External URL if available, otherwise None.
-        """
-        ha_url = (
-            cast("str", self.config.get("ha_url")).strip() if self.config.get("ha_url") else None
-        )
-        if not ha_url:
-            return None
-
-        # Check if we're using the internal supervisor URL
-        if "supervisor" not in ha_url.lower():
-            # Not using internal URL, return as-is
-            return ha_url
-
-        # We're using internal URL - try to get external URL from HA provider
-        ha_provider = self.mass.get_provider("hass")
-        if not ha_provider:
-            # No HA provider available, use configured URL
-            return ha_url
-
-        ha_provider = cast("HomeAssistantProvider", ha_provider)
-
-        try:
-            # Access the hass client from the provider
-            hass_client = ha_provider.hass
-            if not hass_client or not hass_client.connected:
-                return ha_url
-
-            # Get network URLs from Home Assistant using WebSocket API
-            # This command returns internal, external, and cloud URLs
-            network_urls = await hass_client.send_command("network/url")
-
-            if network_urls:
-                # Priority: external > cloud > internal
-                # External is the manually configured external URL
-                # Cloud is the Nabu Casa cloud URL
-                # Internal is the local network URL
-                external_url = network_urls.get("external")
-                cloud_url = network_urls.get("cloud")
-                internal_url = network_urls.get("internal")
-
-                # Use external URL first, then cloud, then internal
-                final_url = cast("str", external_url or cloud_url or internal_url).strip()
-                if final_url:
-                    self.logger.debug(
-                        "Using HA URL for OAuth: %s (from network/url, configured: %s)",
-                        final_url,
-                        ha_url,
-                    )
-                    return final_url
-        except Exception as err:
-            self.logger.warning("Failed to fetch HA network URLs: %s", err, exc_info=True)
-
-        # Fallback to configured URL
-        return ha_url
-
     async def get_authorization_url(
         self, redirect_uri: str, return_url: str | None = None
     ) -> str | None:
@@ -668,116 +632,6 @@ class HomeAssistantOAuthProvider(LoginProvider):
                 state=state,
             ),
         )
-
-    async def _fetch_ha_user_id_via_websocket(self, ha_url: str, access_token: str) -> str | None:
-        """
-        Fetch the HA user ID from Home Assistant via WebSocket using OAuth token.
-
-        :param ha_url: Home Assistant URL.
-        :param access_token: Access token for WebSocket authentication.
-        :return: The HA user ID or None if fetch fails.
-        """
-        ws_url = get_websocket_url(ha_url)
-
-        try:
-            # Use context manager to automatically handle connect/disconnect
-            async with HomeAssistantClient(ws_url, access_token, self.mass.http_session) as client:
-                # Use the auth/current_user command to get user ID
-                result = await client.send_command("auth/current_user")
-                if result and (user_id := result.get("id")):
-                    return str(user_id)
-                self.logger.warning("auth/current_user returned no user data or missing id")
-                return None
-        except BaseHassClientError as ws_error:
-            self.logger.error("Failed to fetch HA user via WebSocket: %s", ws_error)
-            return None
-
-    async def _get_or_create_user(
-        self,
-        username: str,
-        display_name: str | None,
-        ha_user_id: str,
-        avatar_url: str | None = None,
-    ) -> User | None:
-        """
-        Get or create a user for Home Assistant OAuth authentication.
-
-        Updates existing users with display_name and avatar_url from HA on each OAuth login
-        (HA is considered the source of truth for these fields).
-
-        :param username: Username from Home Assistant.
-        :param display_name: Display name from Home Assistant.
-        :param ha_user_id: Home Assistant user ID.
-        :param avatar_url: Avatar URL from Home Assistant person entity.
-        :return: User object or None if creation failed.
-        """
-        # Check if user already linked to HA
-        user = await self.auth_manager.get_user_by_provider_link(
-            AuthProviderType.HOME_ASSISTANT, ha_user_id
-        )
-        if user:
-            # Update user with HA details if available (HA is source of truth)
-            if display_name or avatar_url:
-                user = await self.auth_manager.update_user(
-                    user,
-                    display_name=display_name,
-                    avatar_url=avatar_url,
-                )
-            return user
-
-        username = normalize_username(username)
-
-        # Check if a user with this username already exists (from built-in provider)
-        user_row = await self.auth_manager.database.get_row("users", {"username": username})
-        if user_row:
-            # User exists with this username - link them to HA provider
-            user_dict = dict(user_row)
-            existing_user = User(
-                user_id=user_dict["user_id"],
-                username=user_dict["username"],
-                role=UserRole(user_dict["role"]),
-                enabled=bool(user_dict["enabled"]),
-                created_at=datetime.fromisoformat(user_dict["created_at"]),
-                display_name=user_dict["display_name"],
-                avatar_url=user_dict["avatar_url"],
-            )
-
-            # Link existing user to Home Assistant
-            await self.auth_manager.link_user_to_provider(
-                existing_user, AuthProviderType.HOME_ASSISTANT, ha_user_id
-            )
-
-            # Update user with HA details if available (HA is source of truth)
-            if display_name or avatar_url:
-                existing_user = await self.auth_manager.update_user(
-                    existing_user,
-                    display_name=display_name,
-                    avatar_url=avatar_url,
-                )
-
-            return existing_user
-
-        # New HA user - check if self-registration allowed
-        if not self.allow_self_registration:
-            return None
-
-        # Determine role based on HA admin status
-        role = await get_ha_user_role(self.mass, ha_user_id)
-
-        # Create new user
-        user = await self.auth_manager.create_user(
-            username=username,
-            role=role,
-            display_name=display_name or username,
-            avatar_url=avatar_url,
-        )
-
-        # Link to Home Assistant
-        await self.auth_manager.link_user_to_provider(
-            user, AuthProviderType.HOME_ASSISTANT, ha_user_id
-        )
-
-        return user
 
     async def handle_oauth_callback(self, code: str, state: str, redirect_uri: str) -> AuthResult:
         """
@@ -852,3 +706,175 @@ class HomeAssistantOAuthProvider(LoginProvider):
         except Exception as e:
             self.logger.exception("Error during Home Assistant OAuth callback")
             return AuthResult(success=False, error=str(e))
+
+    async def _get_external_ha_url(self) -> str | None:
+        """
+        Get the external URL for Home Assistant from the config API.
+
+        This is needed when MA runs as HA add-on and connects via internal docker network
+        (http://supervisor/api) but needs the external URL for OAuth redirects.
+
+        :return: External URL if available, otherwise None.
+        """
+        ha_url = (
+            cast("str", self.config.get("ha_url")).strip() if self.config.get("ha_url") else None
+        )
+        if not ha_url:
+            return None
+
+        # Check if we're using the internal supervisor URL
+        if "supervisor" not in ha_url.lower():
+            # Not using internal URL, return as-is
+            return ha_url
+
+        # We're using internal URL - try to get external URL from HA provider
+        ha_provider = self.mass.get_provider("hass")
+        if not ha_provider:
+            # No HA provider available, use configured URL
+            return ha_url
+
+        ha_provider = cast("HomeAssistantProvider", ha_provider)
+
+        try:
+            # Access the hass client from the provider
+            hass_client = ha_provider.hass
+            if not hass_client or not hass_client.connected:
+                return ha_url
+
+            # Get network URLs from Home Assistant using WebSocket API
+            # This command returns internal, external, and cloud URLs
+            network_urls = await hass_client.send_command("network/url")
+
+            if network_urls:
+                # Priority: external > cloud > internal
+                # External is the manually configured external URL
+                # Cloud is the Nabu Casa cloud URL
+                # Internal is the local network URL
+                external_url = network_urls.get("external")
+                cloud_url = network_urls.get("cloud")
+                internal_url = network_urls.get("internal")
+
+                # Use external URL first, then cloud, then internal
+                final_url = cast("str", external_url or cloud_url or internal_url).strip()
+                if final_url:
+                    self.logger.debug(
+                        "Using HA URL for OAuth: %s (from network/url, configured: %s)",
+                        final_url,
+                        ha_url,
+                    )
+                    return final_url
+        except Exception as err:
+            self.logger.warning("Failed to fetch HA network URLs: %s", err, exc_info=True)
+
+        # Fallback to configured URL
+        return ha_url
+
+    async def _fetch_ha_user_id_via_websocket(self, ha_url: str, access_token: str) -> str | None:
+        """
+        Fetch the HA user ID from Home Assistant via WebSocket using OAuth token.
+
+        :param ha_url: Home Assistant URL.
+        :param access_token: Access token for WebSocket authentication.
+        :return: The HA user ID or None if fetch fails.
+        """
+        ws_url = get_websocket_url(ha_url)
+
+        try:
+            # Use context manager to automatically handle connect/disconnect
+            async with HomeAssistantClient(ws_url, access_token, self.mass.http_session) as client:
+                # Use the auth/current_user command to get user ID
+                result = await client.send_command("auth/current_user")
+                if result and (user_id := result.get("id")):
+                    return str(user_id)
+                self.logger.warning("auth/current_user returned no user data or missing id")
+                return None
+        except BaseHassClientError as ws_error:
+            self.logger.error("Failed to fetch HA user via WebSocket: %s", ws_error)
+            return None
+
+    async def _get_or_create_user(
+        self,
+        username: str,
+        display_name: str | None,
+        ha_user_id: str,
+        avatar_url: str | None = None,
+    ) -> User | None:
+        """
+        Get or create a user for Home Assistant OAuth authentication.
+
+        Updates existing users with display_name and avatar_url from HA on each OAuth login
+        (HA is considered the source of truth for these fields).
+
+        :param username: Username from Home Assistant.
+        :param display_name: Display name from Home Assistant.
+        :param ha_user_id: Home Assistant user ID.
+        :param avatar_url: Avatar URL from Home Assistant person entity.
+        :return: User object or None if creation failed.
+        """
+        # Check if user already linked to HA
+        user = await self.auth_manager.get_user_by_provider_link(
+            AuthProviderType.HOME_ASSISTANT, ha_user_id
+        )
+        if user:
+            # Update user with HA details if available (HA is source of truth)
+            if display_name or avatar_url:
+                user = await self.auth_manager.update_user(
+                    user,
+                    display_name=display_name,
+                    avatar_url=avatar_url,
+                )
+            return user
+
+        username = normalize_username(username)
+
+        # Check if a user with this username already exists (from built-in provider)
+        user_row = await self.auth_manager.database.get_row("users", {"username": username})
+        if user_row:
+            # User exists with this username - link them to HA provider
+            user_dict = dict(user_row)
+            existing_user = User(
+                user_id=user_dict["user_id"],
+                username=user_dict["username"],
+                role=user_dict["role"],
+                enabled=bool(user_dict["enabled"]),
+                created_at=datetime.fromisoformat(user_dict["created_at"]),
+                display_name=user_dict["display_name"],
+                avatar_url=user_dict["avatar_url"],
+            )
+
+            # Link existing user to Home Assistant
+            await self.auth_manager.link_user_to_provider(
+                existing_user, AuthProviderType.HOME_ASSISTANT, ha_user_id
+            )
+
+            # Update user with HA details if available (HA is source of truth)
+            if display_name or avatar_url:
+                existing_user = await self.auth_manager.update_user(
+                    existing_user,
+                    display_name=display_name,
+                    avatar_url=avatar_url,
+                )
+
+            return existing_user
+
+        # New HA user - check if self-registration allowed
+        if not self.allow_self_registration:
+            return None
+
+        # Determine role based on HA admin status
+        role = await get_ha_user_role(self.mass, ha_user_id)
+
+        # Create new user
+        user = await self.auth_manager.create_user(
+            username=username,
+            role=role,
+            display_name=display_name or username,
+            avatar_url=avatar_url,
+        )
+
+        # Link to Home Assistant
+        await self.auth_manager.link_user_to_provider(
+            user, AuthProviderType.HOME_ASSISTANT, ha_user_id
+        )
+
+        return user

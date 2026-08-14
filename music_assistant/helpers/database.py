@@ -9,6 +9,7 @@ import re
 import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from sqlite3 import OperationalError
 from typing import TYPE_CHECKING, Any, cast
 
@@ -17,7 +18,7 @@ import aiosqlite
 from music_assistant.constants import MASS_LOGGER_NAME
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Sequence
 
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.database")
 
@@ -27,7 +28,7 @@ class _UnsetType:
 
     _instance: _UnsetType | None = None
 
-    def __new__(cls) -> _UnsetType:
+    def __new__(cls) -> _UnsetType:  # noqa: PYI034  # singleton sentinel always returns the one instance, not Self
         """Create singleton instance."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
@@ -46,6 +47,62 @@ UNSET: _UnsetType = _UnsetType()
 
 ENABLE_DEBUG = os.environ.get("PYTHONDEVMODE") == "1"
 
+SLOW_QUERY_THRESHOLD = 0.5
+_STALL_SAMPLE_INTERVAL = 0.05
+
+
+class _LoopStallTracker:
+    """Samples how long the event loop spends unavailable, so query timings can discount it."""
+
+    def __init__(self) -> None:
+        """Initialize class."""
+        self._total = 0.0
+        self._last_tick = 0.0
+        self._task: asyncio.Task[None] | None = None
+        self._users = 0
+
+    @property
+    def stalled(self) -> float:
+        """Return the total time the event loop was unavailable, to compare two readings of."""
+        if self._task is None:
+            return 0.0
+        # the sampler can only record a stall once the loop frees up again, and it hands any
+        # awaiting query its result first, so a stall in progress lives in how overdue the
+        # sampler currently is. Counting it here as well keeps this reading continuous, which
+        # is what lets two readings bracket exactly the stalls that fall between them
+        overdue = asyncio.get_running_loop().time() - self._last_tick - _STALL_SAMPLE_INTERVAL
+        return self._total + max(0.0, overdue)
+
+    def acquire(self) -> bool:
+        """Start sampling on behalf of one more user; False when there is nothing to sample."""
+        if not ENABLE_DEBUG:
+            return False
+        self._users += 1
+        if self._task is None:
+            loop = asyncio.get_running_loop()
+            self._last_tick = loop.time()
+            self._task = loop.create_task(self._sample())
+        return True
+
+    def release(self) -> None:
+        """Stop sampling once the last user has released the tracker."""
+        self._users = max(0, self._users - 1)
+        if self._users == 0 and self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    async def _sample(self) -> None:
+        """Record how late each wake-up is, which is the time the loop was unavailable."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(_STALL_SAMPLE_INTERVAL)
+            now = loop.time()
+            self._total += max(0.0, now - self._last_tick - _STALL_SAMPLE_INTERVAL)
+            self._last_tick = now
+
+
+_loop_stalls = _LoopStallTracker()
+
 
 @asynccontextmanager
 async def debug_query(
@@ -55,15 +112,21 @@ async def debug_query(
     if not ENABLE_DEBUG:
         yield
         return
-    time_start = time.time()
+    time_start = time.monotonic()
+    stalled_start = _loop_stalls.stalled
     try:
         yield
     except OperationalError as err:
         LOGGER.error(f"{err}\n{sql_query}")
         raise
     finally:
-        process_time = time.time() - time_start
-        if process_time > 0.5:
+        # queries run on aiosqlite's connection thread, so the awaited wall time also covers any
+        # stretch the loop was blocked elsewhere and could not deliver the result. Discounting
+        # that keeps an unrelated blocking callback from reporting as a slow query; a stall that
+        # overlaps a genuinely slow query is discounted too, so this under-reports rather than
+        # points at the wrong culprit.
+        process_time = time.monotonic() - time_start - (_loop_stalls.stalled - stalled_start)
+        if process_time > SLOW_QUERY_THRESHOLD:
             # log slow queries
             for key, value in (query_params or {}).items():
                 sql_query = sql_query.replace(f":{key}", repr(value))
@@ -147,6 +210,13 @@ class DatabaseConnection:
     def __init__(self, db_path: str) -> None:
         """Initialize class."""
         self.db_path = db_path
+        # per-instance ContextVar (instead of module level) so multiple database
+        # connections (library/cache/auth) track their deferred_commit scopes
+        # independently; only a handful of long-lived instances exist per process
+        self._deferred_commit_depth: ContextVar[int] = ContextVar(
+            "deferred_commit_depth", default=0
+        )
+        self._tracking_loop_stalls = False
 
     async def setup(
         self,
@@ -181,12 +251,18 @@ class DatabaseConnection:
         await self.execute(f"PRAGMA mmap_size = {mmap_size_bytes};")
         await self.execute(f"PRAGMA cache_size = -{cache_size_kib};")
         await self.commit()
+        self._tracking_loop_stalls = _loop_stalls.acquire()
 
     async def close(self) -> None:
         """Close db connection on exit."""
         await self.execute("PRAGMA optimize;")
         await self.commit()
         await self._db.close()
+        # mirror the acquire in setup() exactly, so a connection that failed to set up or is
+        # closed twice cannot release a slot that belongs to one of the other connections
+        if self._tracking_loop_stalls:
+            self._tracking_loop_stalls = False
+            _loop_stalls.release()
 
     async def get_rows(
         self,
@@ -296,7 +372,7 @@ class DatabaseConnection:
             sql_query = f"INSERT INTO {table}({','.join(keys)})"
         sql_query += f" VALUES ({','.join(f':{x}' for x in keys)})"
         row_id = await self._db.execute_insert(sql_query, values)
-        await self._db.commit()
+        await self._maybe_commit()
         assert row_id is not None  # for type checking
         assert isinstance(row_id[0], int)  # for type checking
         return row_id[0]
@@ -315,14 +391,40 @@ class DatabaseConnection:
         )
         sql_query += f" ON CONFLICT DO UPDATE SET {','.join(f'{x}=:{x}' for x in keys)}"
         await self._db.execute(sql_query, values)
-        await self._db.commit()
+        await self._maybe_commit()
+
+    async def upsert_many(self, table: str, values: Sequence[dict[str, Any]]) -> None:
+        """
+        Upsert multiple rows in the given table with a single commit.
+
+        :param table: The table to upsert the rows into.
+        :param values: The rows to upsert, each given as a column->value dict.
+            Rows do not need to share the same set of columns.
+        """
+        if not values:
+            return
+        # rows are grouped by their column set so each group can be executed as a
+        # single (prepared) statement, while omitted columns keep their existing
+        # value on conflict - identical to calling upsert() per row
+        rows_per_column_set: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+        for row in values:
+            # Filter out UNSET values so database defaults are used
+            filtered_row = {k: v for k, v in row.items() if v is not UNSET}
+            rows_per_column_set.setdefault(tuple(sorted(filtered_row)), []).append(filtered_row)
+        for keys, rows in rows_per_column_set.items():
+            sql_query = (
+                f"INSERT INTO {table}({','.join(keys)}) VALUES ({','.join(f':{x}' for x in keys)})"
+            )
+            sql_query += f" ON CONFLICT DO UPDATE SET {','.join(f'{x}=:{x}' for x in keys)}"
+            await self._db.executemany(sql_query, rows)
+        await self._maybe_commit()
 
     async def update(
         self,
         table: str,
         match: dict[str, Any],
         values: dict[str, Any],
-    ) -> Mapping[str, Any]:
+    ) -> None:
         """Update record."""
         # Filter out UNSET values so those fields are not updated
         values = {k: v for k, v in values.items() if v is not UNSET}
@@ -330,11 +432,7 @@ class DatabaseConnection:
         sql_query = f"UPDATE {table} SET {','.join(f'{x}=:{x}' for x in keys)} WHERE "
         sql_query += " AND ".join(f"{x} = :{x}" for x in match)
         await self.execute(sql_query, {**match, **values})
-        await self._db.commit()
-        # return updated item
-        updated_item = await self.get_row(table, match)
-        assert updated_item is not None  # for type checking
-        return updated_item
+        await self._maybe_commit()
 
     async def delete(
         self, table: str, match: dict[str, Any] | None = None, query: str | None = None
@@ -349,21 +447,63 @@ class DatabaseConnection:
         elif query:
             sql_query += query
         await self.execute(sql_query, match)
-        await self._db.commit()
+        await self._maybe_commit()
 
     async def delete_where_query(self, table: str, query: str | None = None) -> None:
         """Delete data in given table using given where clausule."""
         sql_query = f"DELETE FROM {table} WHERE {query}"
         await self.execute(sql_query)
-        await self._db.commit()
+        await self._maybe_commit()
 
     async def execute(self, query: str, values: dict[str, Any] | None = None) -> Any:
         """Execute command on the database."""
         return await self._db.execute(query, values)
 
+    async def execute_write(self, query: str, values: dict[str, Any] | None = None) -> None:
+        """
+        Execute a hand-written write statement and commit it.
+
+        Use instead of `execute` for anything that modifies data, so the write is durable
+        even if nothing else happens to commit the shared connection afterwards. Honors
+        `deferred_commit`, so a batch still commits once at the end of its scope.
+
+        :param query: The statement to execute.
+        :param values: The values to bind to the statement's named parameters.
+        """
+        await self._db.execute(query, values)
+        await self._maybe_commit()
+
     async def commit(self) -> None:
         """Commit the current transaction."""
         return await self._db.commit()
+
+    @asynccontextmanager
+    async def deferred_commit(self) -> AsyncGenerator[None]:
+        """
+        Batch all writes of the current task into a single commit when the scope exits.
+
+        Within the scope, the per-statement commit of the insert/upsert/update/delete
+        helpers is skipped for the current task and a single commit is issued when the
+        outermost scope exits (scopes may be nested). This greatly reduces the commit
+        overhead of multi-statement operations such as adding a media item with all
+        its relations to the library.
+
+        Note: this is not an atomic transaction. The scope always commits on exit -
+        also on error or cancellation - and never rolls back. Writes from other tasks
+        are unaffected and still commit immediately.
+        """
+        depth = self._deferred_commit_depth.get()
+        token = self._deferred_commit_depth.set(depth + 1)
+        try:
+            yield
+        finally:
+            self._deferred_commit_depth.reset(token)
+            # always commit on exit, never rollback: the connection is shared by all
+            # tasks, so statements from concurrent writers may interleave with this
+            # scope's statements in the same underlying SQLite transaction and a
+            # rollback would revert their (already acknowledged) writes as well
+            if depth == 0:
+                await self._db.commit()
 
     async def iter_items(
         self,
@@ -417,3 +557,8 @@ class DatabaseConnection:
         async with self._db.execute(f"PRAGMA {pragma}") as cursor:
             row = await cursor.fetchone()
             return int(row[0]) if row else 0
+
+    async def _maybe_commit(self) -> None:
+        """Commit now, unless the current task is inside a deferred_commit scope."""
+        if self._deferred_commit_depth.get() == 0:
+            await self._db.commit()

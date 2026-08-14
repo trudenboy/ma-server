@@ -42,6 +42,10 @@ from music_assistant.providers.emby.parsers import (
 )
 
 if TYPE_CHECKING:
+    from music_assistant_models.config_entries import (
+        ConfigEntry,
+        ProviderConfig,
+    )
     from music_assistant_models.provider import ProviderManifest
 
 from music_assistant.constants import (
@@ -71,47 +75,18 @@ async def setup(
     return EmbyProvider(mass, manifest, config, SUPPORTED_FEATURES)
 
 
-async def get_config_entries(
-    mass: MusicAssistant,
-    instance_id: str | None = None,
-    action: str | None = None,
-    values: dict[str, ConfigValueType] | None = None,
-) -> tuple[ConfigEntry, ...]:
-    """Get configuration entries for provider setup."""
-    # ruff: noqa: ARG001
-    return (
-        ConfigEntry(
-            key=CONF_IP_ADDRESS,
-            type=ConfigEntryType.STRING,
-            label="Server",
-            required=True,
-            description="The url of the Emby server to connect to.",
-        ),
-        ConfigEntry(
-            key=CONF_USERNAME,
-            type=ConfigEntryType.STRING,
-            label="Username",
-            required=True,
-            description="The username to authenticate to the remote server.",
-        ),
-        ConfigEntry(
-            key=CONF_PASSWORD,
-            type=ConfigEntryType.SECURE_STRING,
-            label="Password",
-            required=False,
-            description="The password to authenticate to the remote server.",
-        ),
-    )
-
-
 class EmbyProvider(MusicProvider):
     """Provider for an Emby music library (uses Emby REST API)."""
 
+    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+        """Get configuration entries for provider setup."""
+        return ()
+
     async def handle_async_init(self) -> None:
         """Initialize provider(instance) with given configuration."""
-        username = str(self.config.get_value(CONF_USERNAME))
-        password = str(self.config.get_value(CONF_PASSWORD) or "")
-        self._base_url = str(self.config.get_value(CONF_IP_ADDRESS)).rstrip("/") + "/"
+        username = str(self.get_setup_value(CONF_USERNAME))
+        password = str(self.get_setup_value(CONF_PASSWORD) or "")
+        self._base_url = str(self.get_setup_value(CONF_IP_ADDRESS)).rstrip("/") + "/"
         self._session = self.mass.http_session
 
         # stable device id

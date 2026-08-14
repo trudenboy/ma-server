@@ -1,151 +1,19 @@
 """Deezer music provider support for MusicAssistant."""
 
-import hashlib
-import uuid
-from asyncio import TaskGroup
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from math import ceil
-from typing import Any, Literal, cast
+from __future__ import annotations
 
-import deezer
-from aiohttp import ClientSession, ClientTimeout
-from Crypto.Cipher import Blowfish
-from deezer import exceptions as deezer_exceptions
-from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, ProviderConfig
-from music_assistant_models.enums import (
-    AlbumType,
-    ConfigEntryType,
-    ContentType,
-    ExternalID,
-    ImageType,
-    MediaType,
-    ProviderFeature,
-    StreamType,
-)
-from music_assistant_models.errors import (
-    AudioError,
-    InvalidDataError,
-    LoginFailed,
-    MediaNotFoundError,
-)
-from music_assistant_models.media_items import (
-    Album,
-    Artist,
-    AudioFormat,
-    ItemMapping,
-    MediaItemImage,
-    MediaItemMetadata,
-    MediaItemType,
-    Playlist,
-    ProviderMapping,
-    RecommendationFolder,
-    SearchResults,
-    Track,
-    UniqueList,
-)
-from music_assistant_models.provider import ProviderManifest
-from music_assistant_models.streamdetails import StreamDetails
+from typing import TYPE_CHECKING
 
-from music_assistant import MusicAssistant
-from music_assistant.constants import CONF_ENTRY_UNOFFICIAL_PROVIDER
-from music_assistant.controllers.cache import use_cache
-from music_assistant.helpers.app_vars import app_var  # type: ignore[attr-defined]
-from music_assistant.helpers.auth import AuthenticationHelper
-from music_assistant.helpers.datetime import utc_timestamp
-from music_assistant.helpers.util import infer_album_type, parse_title_and_version
-from music_assistant.models import ProviderInstanceType
-from music_assistant.models.music_provider import MusicProvider
+from .provider import SUPPORTED_FEATURES, DeezerProvider
 
-from .gw_client import DeezerGWError, GWClient
+if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ProviderConfig
+    from music_assistant_models.provider import ProviderManifest
 
-SUPPORTED_FEATURES = {
-    ProviderFeature.LIBRARY_ARTISTS,
-    ProviderFeature.LIBRARY_ALBUMS,
-    ProviderFeature.LIBRARY_TRACKS,
-    ProviderFeature.LIBRARY_PLAYLISTS,
-    ProviderFeature.LIBRARY_ALBUMS_EDIT,
-    ProviderFeature.LIBRARY_TRACKS_EDIT,
-    ProviderFeature.LIBRARY_ARTISTS_EDIT,
-    ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
-    ProviderFeature.ALBUM_METADATA,
-    ProviderFeature.TRACK_METADATA,
-    ProviderFeature.ARTIST_METADATA,
-    ProviderFeature.ARTIST_ALBUMS,
-    ProviderFeature.ARTIST_TOPTRACKS,
-    ProviderFeature.BROWSE,
-    ProviderFeature.SEARCH,
-    ProviderFeature.PLAYLIST_TRACKS_EDIT,
-    ProviderFeature.PLAYLIST_CREATE,
-    ProviderFeature.RECOMMENDATIONS,
-    ProviderFeature.SIMILAR_TRACKS,
-}
+    from music_assistant import MusicAssistant
+    from music_assistant.models import ProviderInstanceType
 
-
-@dataclass
-class DeezerCredentials:
-    """Class for storing credentials."""
-
-    app_id: int
-    app_secret: str
-    access_token: str
-
-
-CONF_ACCESS_TOKEN = "access_token"
-CONF_ARL_TOKEN = "arl_token"
-CONF_ACTION_AUTH = "auth"
-DEEZER_AUTH_URL = "https://connect.deezer.com/oauth/auth.php"
-RELAY_URL = "https://deezer.oauth.jonathanbangert.com/"
-DEEZER_PERMS = "basic_access,email,offline_access,manage_library,\
-manage_community,delete_library,listening_history"
-DEEZER_APP_ID = app_var(6)
-DEEZER_APP_SECRET = app_var(7)
-
-# Virtual playlist IDs for dynamic Deezer content
-FLOW_PLAYLIST_ID = "flow"
-RECOMMENDED_TRACKS_PLAYLIST_ID = "recommended_tracks"
-TOP_CHARTS_PLAYLIST_ID = "top_charts"
-RADIO_PLAYLIST_PREFIX = "radio_"
-MOOD_FLOW_PREFIX = "mood_flow_"
-
-# Curated Deezer radio station IDs
-CURATED_RADIO_IDS = [
-    37151,  # Hits
-    38305,  # The '80s
-    38295,  # The '70s
-    31061,  # Pop
-    37765,  # Rock classics
-    30901,  # Metal
-    30991,  # Hip Hop
-    30771,  # Indie
-    30621,  # Electronic
-    31031,  # Jazz
-    30661,  # Classical
-    36791,  # Latin Music
-    38225,  # Focus
-    39041,  # Happy Hour
-]
-
-
-async def get_access_token(
-    app_id: str, app_secret: str, code: str, http_session: ClientSession
-) -> str:
-    """Update the access_token."""
-    response = await http_session.post(
-        "https://connect.deezer.com/oauth/access_token.php",
-        params={"code": code, "app_id": app_id, "secret": app_secret},
-        ssl=False,
-    )
-    if response.status != 200:
-        msg = f"HTTP Error {response.status}: {response.reason}"
-        raise ConnectionError(msg)
-    response_text = await response.text()
-    try:
-        return response_text.split("=")[1].split("&")[0]
-    except Exception as error:
-        msg = "Invalid auth code"
-        raise LoginFailed(msg) from error
+__all__ = ["DeezerProvider"]
 
 
 async def setup(

@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
-    ConfigEntryType,
     ContentType,
     MediaType,
     PlaybackState,
@@ -52,6 +51,7 @@ if TYPE_CHECKING:
 
 CONF_MASS_PLAYER_ID = "mass_player_id"
 CONF_PUBLISH_NAME = "publish_name"
+DEFAULT_PUBLISH_NAME = "Music Assistant"
 
 # Special value for auto player selection
 PLAYER_ID_AUTO = "__auto__"
@@ -104,53 +104,6 @@ async def setup(
     return SpotifyConnectProvider(mass, manifest, config)
 
 
-async def get_config_entries(
-    mass: MusicAssistant,
-    instance_id: str | None = None,  # noqa: ARG001
-    action: str | None = None,  # noqa: ARG001
-    values: dict[str, ConfigValueType] | None = None,  # noqa: ARG001
-) -> tuple[ConfigEntry, ...]:
-    """
-    Return Config entries to setup this provider.
-
-    :param instance_id: id of an existing provider instance (None if new instance setup).
-    :param action: [optional] action key called from config entries UI.
-    :param values: the (intermediate) raw values for config entries sent with the action.
-    """
-    return (
-        CONF_ENTRY_WARN_PREVIEW,
-        ConfigEntry(
-            key=CONF_MASS_PLAYER_ID,
-            type=ConfigEntryType.STRING,
-            label="Connected Music Assistant Player",
-            description="The Music Assistant player connected to this Spotify Connect plugin. "
-            "When you start playback in the Spotify app to this virtual speaker, "
-            "the audio will play on the selected player. "
-            "Set to 'Auto' to automatically select a currently playing player, "
-            "or the first available player if none is playing.",
-            multi_value=False,
-            default_value=PLAYER_ID_AUTO,
-            options=[
-                ConfigValueOption("Auto (prefer playing player)", PLAYER_ID_AUTO),
-                *(
-                    ConfigValueOption(x.display_name, x.player_id)
-                    for x in sorted(
-                        mass.players.all_players(False, False), key=lambda p: p.display_name.lower()
-                    )
-                ),
-            ],
-            required=True,
-        ),
-        ConfigEntry(
-            key=CONF_PUBLISH_NAME,
-            type=ConfigEntryType.STRING,
-            label="Name to display in the Spotify app",
-            description="How should this Spotify Connect device be named in the Spotify app?",
-            default_value="Music Assistant",
-        ),
-    )
-
-
 class SpotifyConnectProvider(PluginProvider):
     """Implementation of a Spotify Connect Plugin (backed by go-librespot)."""
 
@@ -159,9 +112,12 @@ class SpotifyConnectProvider(PluginProvider):
     ) -> None:
         """Initialize MusicProvider."""
         super().__init__(mass, manifest, config, SUPPORTED_FEATURES)
-        # Default player ID from config (PLAYER_ID_AUTO or a specific player_id)
+        # Configured default player (PLAYER_ID_AUTO or a specific player id)
         self._default_player_id: str = (
-            cast("str", self.config.get_value(CONF_MASS_PLAYER_ID)) or PLAYER_ID_AUTO
+            cast("str", self.get_setup_value(CONF_MASS_PLAYER_ID)) or PLAYER_ID_AUTO
+        )
+        self._publish_name = (
+            cast("str", self.get_setup_value(CONF_PUBLISH_NAME)) or DEFAULT_PUBLISH_NAME
         )
         # Currently active player (the one currently playing or selected)
         self._active_player_id: str | None = None
@@ -267,7 +223,7 @@ class SpotifyConnectProvider(PluginProvider):
         """Return the AudioSources this plugin currently exposes."""
         return [self._audio_source]
 
-    async def get_stream_details(self, source_id: str, queue_id: str) -> StreamDetails:
+    async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """
         Return StreamDetails for streaming the Spotify Connect audio.
 
@@ -300,7 +256,7 @@ class SpotifyConnectProvider(PluginProvider):
         # check above re-runs on every play attempt.
         return StreamDetails(
             provider=self.instance_id,
-            item_id=source_id,
+            item_id=item_id,
             audio_format=self._audio_format,
             decoded_audio_format=self._decoded_audio_format,
             media_type=MediaType.AUDIO_SOURCE,
@@ -633,13 +589,11 @@ class SpotifyConnectProvider(PluginProvider):
             self.mass.players.trigger_player_update(prev_player_id)
 
     def _save_last_player_id(self, player_id: str) -> None:
-        """Persist the selected player ID to config as the new default."""
+        """Persist the selected player ID as the new default."""
         if self._default_player_id == player_id:
             return
         try:
-            self.mass.config.set_raw_provider_config_value(
-                self.instance_id, CONF_MASS_PLAYER_ID, player_id
-            )
+            self._update_setup_data(CONF_MASS_PLAYER_ID, player_id)
             self._default_player_id = player_id
         except Exception as err:
             self.logger.debug("Failed to persist player ID: %s", err)

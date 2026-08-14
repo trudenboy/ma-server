@@ -10,12 +10,13 @@ import secrets
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from sqlite3 import IntegrityError, OperationalError
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import jwt as pyjwt
 from music_assistant_models.auth import (
     AuthProviderType,
     AuthToken,
+    Scope,
     User,
     UserAuthProvider,
     UserRole,
@@ -28,8 +29,12 @@ from music_assistant_models.errors import (
 
 from music_assistant.constants import DB_TABLE_PLAYLOG, HOMEASSISTANT_SYSTEM_USER, MASS_LOGGER_NAME
 from music_assistant.controllers.webserver.helpers.auth_middleware import (
+    ROLE_SCOPES,
+    get_current_client_id,
+    get_current_peer_address,
     get_current_token,
     get_current_user,
+    has_scope,
 )
 from music_assistant.controllers.webserver.helpers.auth_providers import (
     AuthResult,
@@ -48,6 +53,7 @@ from music_assistant.helpers.jwt_auth import JWTHelper
 
 if TYPE_CHECKING:
     from music_assistant.controllers.webserver import WebserverController
+    from music_assistant.providers.hass import HomeAssistantProvider
 
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.auth")
 
@@ -124,6 +130,9 @@ class AuthenticationManager:
 
         self._has_users = await self._has_non_system_users()
 
+        # migrate the Home Assistant system user of pre-existing installs to the service role
+        await self._migrate_system_user_role()
+
         self._schedule_join_code_cleanup()
 
         self.logger.info(
@@ -139,274 +148,6 @@ class AuthenticationManager:
     def has_users(self) -> bool:
         """Check if any users exist in the system."""
         return self._has_users
-
-    async def _setup_database(self) -> None:
-        """Set up database schema and handle migrations."""
-        # Always create tables if they don't exist
-        await self._create_database_tables()
-
-        # Check current schema version
-        try:
-            if db_row := await self.database.get_row("settings", {"key": "schema_version"}):
-                prev_version = int(db_row["value"])
-            else:
-                prev_version = DB_SCHEMA_VERSION
-        except (KeyError, ValueError, Exception):
-            # settings table doesn't exist yet or other error
-            prev_version = 0
-
-        # Perform migration if needed
-        if prev_version < DB_SCHEMA_VERSION:
-            self.logger.warning(
-                "Performing database migration from schema version %s to %s",
-                prev_version,
-                DB_SCHEMA_VERSION,
-            )
-            await self._migrate_database(prev_version)
-
-        # Store current schema version
-        await self.database.insert_or_replace(
-            "settings",
-            {"key": "schema_version", "value": str(DB_SCHEMA_VERSION), "type": "int"},
-        )
-
-        # Create indexes
-        await self._create_database_indexes()
-        await self.database.commit()
-
-    async def _create_database_tables(self) -> None:
-        """Create database tables."""
-        # Settings table (for schema version and other settings)
-        await self.database.execute(
-            """
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                type TEXT
-            )
-            """
-        )
-        # Users table
-        await self.database.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                username TEXT NOT NULL UNIQUE,
-                role TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                display_name TEXT,
-                avatar_url TEXT,
-                preferences json NOT NULL DEFAULT '{}',
-                player_filter json NOT NULL DEFAULT '[]',
-                provider_filter json NOT NULL DEFAULT '[]'
-            )
-            """
-        )
-        # User auth provider links (many-to-many)
-        await self.database.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_auth_providers (
-                link_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                provider_type TEXT NOT NULL,
-                provider_user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(provider_type, provider_user_id),
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-            )
-            """
-        )
-        # Auth tokens table
-        await self.database.execute(
-            """
-            CREATE TABLE IF NOT EXISTS auth_tokens (
-                token_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                token_hash TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                expires_at TEXT,
-                last_used_at TEXT,
-                is_long_lived INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-            )
-            """
-        )
-        # Join codes table (for short code to JWT exchange, used by providers like party)
-        await self.database.execute(
-            """
-            CREATE TABLE IF NOT EXISTS join_codes (
-                code_id TEXT PRIMARY KEY,
-                code TEXT NOT NULL UNIQUE,
-                user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                max_uses INTEGER DEFAULT 0,
-                use_count INTEGER DEFAULT 0,
-                last_used_at TEXT,
-                device_name TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-            )
-            """
-        )
-        await self.database.commit()
-
-    async def _create_database_indexes(self) -> None:
-        """Create database indexes."""
-        await self.database.execute(
-            "CREATE INDEX IF NOT EXISTS idx_user_auth_providers_user "
-            "ON user_auth_providers(user_id)"
-        )
-        await self.database.execute(
-            "CREATE INDEX IF NOT EXISTS idx_user_auth_providers_provider "
-            "ON user_auth_providers(provider_type, provider_user_id)"
-        )
-        await self.database.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tokens_user ON auth_tokens(user_id)"
-        )
-        await self.database.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tokens_hash ON auth_tokens(token_hash)"
-        )
-        await self.database.execute(
-            "CREATE INDEX IF NOT EXISTS idx_join_codes_user ON join_codes(user_id)"
-        )
-
-    async def _migrate_database(self, from_version: int) -> None:
-        """Perform database migration.
-
-        :param from_version: The schema version to migrate from.
-        """
-        self.logger.info(
-            "Migrating auth database from version %s to %s", from_version, DB_SCHEMA_VERSION
-        )
-        # Migration to version 2: Recreate tables due to password salt breaking change
-        if from_version < 2:
-            # Drop all auth-related tables
-            await self.database.execute("DROP TABLE IF EXISTS auth_tokens")
-            await self.database.execute("DROP TABLE IF EXISTS user_auth_providers")
-            await self.database.execute("DROP TABLE IF EXISTS users")
-            await self.database.commit()
-
-            # Recreate tables with current schema
-            await self._create_database_tables()
-
-        # Migration to version 3: Add player_filter and provider_filter columns
-        if from_version < 3:
-            with contextlib.suppress(OperationalError):
-                # Column(s) may already exist
-                await self.database.execute(
-                    "ALTER TABLE users ADD COLUMN player_filter json NOT NULL DEFAULT '[]'"
-                )
-                await self.database.execute(
-                    "ALTER TABLE users ADD COLUMN provider_filter json NOT NULL DEFAULT '[]'"
-                )
-            await self.database.commit()
-
-        # Migration to version 4: Make usernames case-insensitive by converting to lowercase
-        if from_version < 4:
-            await self.database.execute("UPDATE users SET username = LOWER(username)")
-            await self.database.commit()
-
-        # Migration to version 5: Add join codes table
-        if from_version < 5:
-            await self.database.execute(
-                """
-                CREATE TABLE IF NOT EXISTS join_codes (
-                    code_id TEXT PRIMARY KEY,
-                    code TEXT NOT NULL UNIQUE,
-                    user_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    max_uses INTEGER DEFAULT 0,
-                    use_count INTEGER DEFAULT 0,
-                    last_used_at TEXT,
-                    device_name TEXT,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self.database.commit()
-
-    async def _get_or_create_jwt_secret(self) -> str:
-        """Get or create JWT secret key from database.
-
-        :return: JWT secret key for signing tokens.
-        """
-        # Try to get existing secret
-        if secret_row := await self.database.get_row("settings", {"key": "jwt_secret"}):
-            return str(secret_row["value"])
-
-        # Generate new secret
-        jwt_secret = JWTHelper.generate_secret_key()
-
-        # Store in database
-        await self.database.insert_or_replace(
-            "settings",
-            {"key": "jwt_secret", "value": jwt_secret, "type": "string"},
-        )
-        await self.database.commit()
-
-        self.logger.info("Generated new JWT secret key")
-        return jwt_secret
-
-    async def _setup_login_providers(self) -> None:
-        """Set up available login providers based on configuration."""
-        # Always enable built-in provider
-        self.login_providers["builtin"] = BuiltinLoginProvider(self.mass, "builtin", {})
-
-        # Home Assistant OAuth provider
-        # Automatically enabled if HA provider (plugin) is configured
-        ha_provider = None
-        for provider in self.mass.providers:
-            if provider.domain == "hass" and provider.available:
-                ha_provider = provider
-                break
-
-        if ha_provider:
-            # Get URL from the HA provider config
-            ha_url = ha_provider.config.get_value("url")
-            assert isinstance(ha_url, str)
-            ha_config: HomeAssistantProviderConfig = {"ha_url": ha_url}
-            self.login_providers["homeassistant"] = HomeAssistantOAuthProvider(
-                self.mass, "homeassistant", ha_config
-            )
-            self.logger.info(
-                "Home Assistant OAuth provider enabled (using URL from HA provider: %s)",
-                ha_url,
-            )
-
-    async def _sync_ha_oauth_provider(self) -> None:
-        """
-        Sync HA OAuth provider with HA provider availability (dynamic check).
-
-        Adds the provider if HA is available, removes it if HA is not available.
-        """
-        # Find HA provider
-        ha_provider = None
-        for provider in self.mass.providers:
-            if provider.domain == "hass" and provider.available:
-                ha_provider = provider
-                break
-
-        if ha_provider:
-            # HA provider exists and is available - ensure OAuth provider is registered
-            if "homeassistant" not in self.login_providers:
-                # Get URL from the HA provider config
-                ha_url = ha_provider.config.get_value("url")
-                assert isinstance(ha_url, str)
-                ha_config: HomeAssistantProviderConfig = {"ha_url": ha_url}
-                self.login_providers["homeassistant"] = HomeAssistantOAuthProvider(
-                    self.mass, "homeassistant", ha_config
-                )
-                self.logger.info(
-                    "Home Assistant OAuth provider dynamically enabled (using URL: %s)",
-                    ha_url,
-                )
-        # HA provider not available - remove OAuth provider if present
-        elif "homeassistant" in self.login_providers:
-            del self.login_providers["homeassistant"]
-            self.logger.info("Home Assistant OAuth provider removed (HA provider not available)")
 
     async def authenticate_with_credentials(
         self, provider_id: str, credentials: dict[str, Any]
@@ -531,10 +272,10 @@ class AuthenticationManager:
             return None
         return str(token_row["token_id"])
 
-    @api_command("auth/user", required_role="admin")
+    @api_command("auth/user", required_scope=Scope.USERS_READ)
     async def get_user(self, user_id: str) -> User | None:
         """
-        Get user by ID (admin only).
+        Get user by ID (requires the users.read scope).
 
         :param user_id: The user ID.
         :return: User object or None if not found.
@@ -546,7 +287,7 @@ class AuthenticationManager:
         return User(
             user_id=user_row["user_id"],
             username=user_row["username"],
-            role=UserRole(user_row["role"]),
+            role=user_row["role"],
             enabled=bool(user_row["enabled"]),
             created_at=datetime.fromisoformat(user_row["created_at"]),
             display_name=user_row["display_name"],
@@ -662,32 +403,6 @@ class AuthenticationManager:
 
         return user
 
-    async def _has_non_system_users(self) -> bool:
-        """Check if any non-system users exist."""
-        user_rows = await self.database.get_rows("users", limit=10)
-        return any(row["username"] != HOMEASSISTANT_SYSTEM_USER for row in user_rows)
-
-    async def _migrate_playlog_to_first_user(self, user_id: str) -> None:
-        """
-        Migrate all existing playlog entries to the first user.
-
-        This is called automatically when the first non-system user is created.
-        All existing playlog entries (which have NULL userid) will be updated
-        to belong to this first user.
-
-        :param user_id: The user ID of the first user.
-        """
-        try:
-            # Update all playlog entries with NULL userid to this user
-            await self.mass.music.database.execute(
-                f"UPDATE {DB_TABLE_PLAYLOG} SET userid = :userid WHERE userid IS NULL",
-                {"userid": user_id},
-            )
-            await self.mass.music.database.commit()
-            self.logger.info("Migrated existing playlog entries to first user: %s", user_id)
-        except Exception as err:
-            self.logger.warning("Failed to migrate playlog entries: %s", err)
-
     async def get_homeassistant_system_user(self) -> User:
         """
         Get or create the Home Assistant system user.
@@ -699,7 +414,7 @@ class AuthenticationManager:
         """
         username = HOMEASSISTANT_SYSTEM_USER
         display_name = "Home Assistant Integration"
-        role = UserRole.USER
+        role = UserRole.SERVICE
 
         normalized_username = normalize_username(username)
 
@@ -977,8 +692,9 @@ class AuthenticationManager:
         if not token_row:
             raise InvalidDataError("Token not found")
 
-        # Check permissions - users can only revoke their own tokens unless admin
-        if token_row["user_id"] != user.user_id and user.role != UserRole.ADMIN:
+        # Check permissions - users can only revoke their own tokens
+        # unless they hold the users.manage scope
+        if token_row["user_id"] != user.user_id and not has_scope(user, Scope.USERS_MANAGE):
             raise InsufficientPermissions("You can only revoke your own tokens")
 
         await self.database.delete("auth_tokens", {"token_id": token_id})
@@ -992,8 +708,29 @@ class AuthenticationManager:
             token_id,
         )
 
+    def subscribe_user_access_revoked(self, callback: Callable[[User], None]) -> Callable[[], None]:
+        """
+        Subscribe to a user's access being withdrawn.
+
+        Fires on deliberate access withdrawal: bulk token revocation
+        (revoke_tokens_for_user), account disable, and account deletion. Revoking a
+        single token (e.g. a logout) does not fire it, so credentials bound to the
+        account survive a plain logout.
+
+        :param callback: Called with the affected user.
+        :return: Callable that removes the subscription.
+        """
+        self._access_revoked_callbacks.append(callback)
+
+        def _unsubscribe() -> None:
+            with contextlib.suppress(ValueError):
+                self._access_revoked_callbacks.remove(callback)
+
+        return _unsubscribe
+
     async def revoke_tokens_for_user(self, user: User) -> int:
-        """Revoke all auth tokens for a user.
+        """
+        Revoke all auth tokens for a user.
 
         This is an internal method for programmatic use (e.g., when disabling guest access).
         Unlike revoke_token(), this does not require an authenticated user context.
@@ -1002,8 +739,6 @@ class AuthenticationManager:
         :return: Number of tokens revoked.
         """
         token_rows = await self.database.get_rows("auth_tokens", {"user_id": user.user_id})
-        if not token_rows:
-            return 0
 
         # Disconnect any WebSocket connections using these tokens
         for token_row in token_rows:
@@ -1016,13 +751,15 @@ class AuthenticationManager:
         )
         await self.database.commit()
 
-        self.logger.info("Revoked %d token(s) for user '%s'", len(token_rows), user.username)
         return len(token_rows)
 
     @api_command("auth/tokens")
     async def get_user_tokens(self, user_id: str | None = None) -> list[AuthToken]:
         """
         Get current user's auth tokens or another user's tokens (admin only).
+
+        The last_used_at timestamp is persisted at most once per hour, so it may lag
+        actual token usage by up to an hour.
 
         :param user_id: Optional user ID to get tokens for (admin only).
         :return: List of auth tokens.
@@ -1031,9 +768,10 @@ class AuthenticationManager:
         if not current_user:
             return []
 
-        # If user_id is provided and different from current user, require admin
+        # If user_id is provided and different from current user,
+        # require the users.manage scope
         if user_id and user_id != current_user.user_id:
-            if current_user.role != UserRole.ADMIN:
+            if not has_scope(current_user, Scope.USERS_MANAGE):
                 return []
             target_user = await self.get_user(user_id)
             if not target_user:
@@ -1046,10 +784,10 @@ class AuthenticationManager:
         )
         return [AuthToken.from_dict(dict(row)) for row in token_rows]
 
-    @api_command("auth/users", required_role="admin")
+    @api_command("auth/users", required_scope=Scope.USERS_READ)
     async def list_users(self) -> list[User]:
         """
-        Get all users (admin only).
+        Get all users (requires the users.read scope).
 
         System users are excluded from the list.
 
@@ -1065,7 +803,7 @@ class AuthenticationManager:
                 User(
                     user_id=row["user_id"],
                     username=row["username"],
-                    role=UserRole(row["role"]),
+                    role=row["role"],
                     enabled=bool(row["enabled"]),
                     created_at=datetime.fromisoformat(row["created_at"]),
                     display_name=row["display_name"],
@@ -1079,13 +817,13 @@ class AuthenticationManager:
 
     async def update_user_role(self, user_id: str, new_role: UserRole, admin_user: User) -> bool:
         """
-        Update a user's role (admin only).
+        Update a user's role (requires the users.manage scope).
 
         :param user_id: The user ID to update.
         :param new_role: The new role to assign.
-        :param admin_user: The admin user performing the action.
+        :param admin_user: The user performing the action.
         """
-        if admin_user.role != UserRole.ADMIN:
+        if not has_scope(admin_user, Scope.USERS_MANAGE):
             return False
 
         user_row = await self.database.get_row("users", {"user_id": user_id})
@@ -1107,7 +845,7 @@ class AuthenticationManager:
         )
         return True
 
-    @api_command("auth/user/enable", required_role="admin")
+    @api_command("auth/user/enable", required_scope=Scope.USERS_MANAGE)
     async def enable_user(self, user_id: str) -> None:
         """
         Enable user account (admin only).
@@ -1121,7 +859,7 @@ class AuthenticationManager:
         )
         self.logger.info("User account enabled (user_id=%s)", user_id)
 
-    @api_command("auth/user/disable", required_role="admin")
+    @api_command("auth/user/disable", required_scope=Scope.USERS_MANAGE)
     async def disable_user(self, user_id: str) -> None:
         """
         Disable user account (admin only).
@@ -1136,6 +874,11 @@ class AuthenticationManager:
         if user_id == admin_user.user_id:
             raise InvalidDataError("Cannot disable your own account")
 
+        # Look up the user before disabling (get_user hides disabled accounts)
+        user_row = await self.database.get_row("users", {"user_id": user_id})
+        if not user_row:
+            raise InvalidDataError("User not found")
+
         await self.database.update(
             "users",
             {"user_id": user_id},
@@ -1144,6 +887,12 @@ class AuthenticationManager:
 
         # Disconnect all WebSocket connections for this user
         self.webserver.disconnect_websockets_for_user(user_id)
+
+        # A disabled account's tokens stop authenticating, so credentials bound to its
+        # access must be withdrawn with them (they return on the next login after enable).
+        self._notify_user_access_revoked(
+            User(user_id=user_row["user_id"], username=user_row["username"], role=user_row["role"])
+        )
 
         self.logger.info("User account disabled (user_id=%s)", user_id)
 
@@ -1172,7 +921,8 @@ class AuthenticationManager:
         device_name: str | None = None,
         **extra_credentials: Any,
     ) -> dict[str, Any]:
-        """Authenticate user with credentials via WebSocket.
+        """
+        Authenticate user with credentials via WebSocket.
 
         This command allows clients to authenticate over the WebSocket connection
         using username/password or other provider-specific credentials.
@@ -1232,13 +982,14 @@ class AuthenticationManager:
                 "user_id": auth_result.user.user_id,
                 "username": auth_result.user.username,
                 "display_name": auth_result.user.display_name,
-                "role": auth_result.user.role.value,
+                "role": auth_result.user.role,
             },
         }
 
     @api_command("auth/providers", authenticated=False)
     async def get_providers(self) -> list[dict[str, Any]]:
-        """Get list of available authentication providers.
+        """
+        Get list of available authentication providers.
 
         Returns information about all available login providers including
         whether they require OAuth redirect flow.
@@ -1251,7 +1002,8 @@ class AuthenticationManager:
         provider_id: str,
         return_url: str | None = None,
     ) -> dict[str, str | None]:
-        """Get OAuth authorization URL for authentication.
+        """
+        Get OAuth authorization URL for authentication.
 
         For OAuth providers (like Home Assistant), this returns the URL that
         the user should visit in their browser to authorize the application.
@@ -1316,6 +1068,8 @@ class AuthenticationManager:
         Short-lived tokens (for regular user sessions) are only created during login
         and auto-renew on each use (sliding 30-day expiration window).
 
+        Long-lived tokens cannot be created for guest accounts.
+
         :param name: The name/description for the token (e.g., "Home Assistant", "Mobile App").
         :param user_id: Optional user ID to create token for (admin only).
         :return: The created token string.
@@ -1324,11 +1078,12 @@ class AuthenticationManager:
         if not current_user:
             raise AuthenticationRequired("Not authenticated")
 
-        # If user_id is provided and different from current user, require admin
+        # If user_id is provided and different from current user,
+        # require the users.manage scope
         if user_id and user_id != current_user.user_id:
-            if current_user.role != UserRole.ADMIN:
+            if not has_scope(current_user, Scope.USERS_MANAGE):
                 raise InsufficientPermissions(
-                    "Admin access required to create tokens for other users"
+                    "The users.manage scope is required to create tokens for other users"
                 )
             target_user = await self.get_user(user_id)
             if not target_user:
@@ -1336,12 +1091,16 @@ class AuthenticationManager:
         else:
             target_user = current_user
 
+        # Guest access is temporary by design, deny tokens that would outlive it
+        if target_user.role == UserRole.GUEST:
+            raise InsufficientPermissions("Long-lived tokens cannot be created for guest accounts")
+
         # Create a long-lived token (only long-lived tokens can be created via this command)
         token = await self.create_token(target_user, name, is_long_lived=True)
         self.logger.info("Created long-lived token '%s' for user '%s'", name, target_user.username)
         return token
 
-    @api_command("auth/user/create", required_role="admin")
+    @api_command("auth/user/create", required_scope=Scope.USERS_MANAGE)
     async def create_user_with_api(
         self,
         username: str,
@@ -1402,7 +1161,7 @@ class AuthenticationManager:
         self.logger.info("User created by admin: %s (role: %s)", username, role)
         return user
 
-    @api_command("auth/user/delete", required_role="admin")
+    @api_command("auth/user/delete", required_scope=Scope.USERS_MANAGE)
     async def delete_user(self, user_id: str) -> None:
         """
         Delete user account (admin only).
@@ -1429,6 +1188,12 @@ class AuthenticationManager:
         # Disconnect all WebSocket connections for this user
         self.webserver.disconnect_websockets_for_user(user_id)
 
+        # Deletion cascades the user's tokens away, so it must announce the access
+        # withdrawal itself for credentials bound to this user.
+        self._notify_user_access_revoked(
+            User(user_id=user_row["user_id"], username=user_row["username"], role=user_row["role"])
+        )
+
         self.logger.info(
             "User '%s' deleted by admin '%s'",
             user_row["username"],
@@ -1443,32 +1208,13 @@ class AuthenticationManager:
             raise AuthenticationRequired("Not authenticated")
         return current_user_obj
 
-    async def _update_profile_password(
-        self,
-        target_user: User,
-        password: str,
-        is_admin_update: bool,
-        current_user: User,
-    ) -> None:
-        """Update user password (helper method)."""
-        if len(password) < 8:
-            raise InvalidDataError("Password must be at least 8 characters")
-
-        builtin_provider = self.login_providers.get("builtin")
-        if not builtin_provider or not isinstance(builtin_provider, BuiltinLoginProvider):
-            raise InvalidDataError("Built-in auth not available")
-
-        # Update password (used for both admin resets and user password changes)
-        await builtin_provider.reset_password(target_user, password)
-
-        if is_admin_update:
-            self.logger.info(
-                "Password reset for user %s by admin %s",
-                target_user.username,
-                current_user.username,
-            )
-        else:
-            self.logger.info("Password changed for user %s", target_user.username)
+    @api_command("auth/scopes")
+    async def get_role_scopes(self) -> dict[str, list[str]]:
+        """Get the scopes granted to each of the builtin user roles."""
+        return {
+            str(role): sorted(str(scope) for scope in scopes)
+            for role, scopes in ROLE_SCOPES.items()
+        }
 
     async def update_user_filters(
         self,
@@ -1526,11 +1272,13 @@ class AuthenticationManager:
             raise AuthenticationRequired("Not authenticated")
 
         # Determine target user
-        is_admin = current_user_obj.role == UserRole.ADMIN
+        may_manage_users = has_scope(current_user_obj, Scope.USERS_MANAGE)
         if user_id and user_id != current_user_obj.user_id:
-            # Updating another user - requires admin
-            if not is_admin:
-                raise InsufficientPermissions("Admin access required")
+            # Updating another user - requires the users.manage scope
+            if not may_manage_users:
+                raise InsufficientPermissions(
+                    "The users.manage scope is required to update other users"
+                )
             target_user = await self.get_user(user_id)
             if not target_user:
                 raise InvalidDataError("User not found")
@@ -1538,10 +1286,12 @@ class AuthenticationManager:
             # Updating own profile
             target_user = current_user_obj
 
-        # Update role (admin only)
+        # Update role (requires the users.manage scope)
         if role:
-            if not is_admin:
-                raise InsufficientPermissions("Only admins can update user roles")
+            if not may_manage_users:
+                raise InsufficientPermissions(
+                    "The users.manage scope is required to update user roles"
+                )
 
             try:
                 new_role = UserRole(role)
@@ -1574,17 +1324,21 @@ class AuthenticationManager:
         if preferences is not None:
             target_user = await self.update_user_preferences(target_user, preferences)
 
-        # Update player_filter and provider_filter (admin only)
+        # Update player_filter and provider_filter (requires the users.manage scope)
         if player_filter is not None or provider_filter is not None:
-            if not is_admin:
-                raise InsufficientPermissions("Only admins can update player/provider filters")
+            if not may_manage_users:
+                raise InsufficientPermissions(
+                    "The users.manage scope is required to update player/provider filters"
+                )
             target_user = await self.update_user_filters(
                 target_user, player_filter, provider_filter
             )
 
         # Update password if provided
         if password:
-            await self._update_profile_password(target_user, password, is_admin, current_user_obj)
+            await self._update_profile_password(
+                target_user, password, may_manage_users, current_user_obj
+            )
 
         return target_user
 
@@ -1627,7 +1381,7 @@ class AuthenticationManager:
         providers = [UserAuthProvider.from_dict(dict(row)) for row in rows]
         return [p.to_dict() for p in providers]
 
-    @api_command("auth/user/unlink_provider", required_role="admin")
+    @api_command("auth/user/unlink_provider", required_scope=Scope.USERS_MANAGE)
     async def unlink_provider(self, user_id: str, provider_type: str) -> bool:
         """
         Unlink authentication provider from user (admin only).
@@ -1657,7 +1411,8 @@ class AuthenticationManager:
         max_uses: int = 1,
         device_name: str = "Short Code Login",
     ) -> tuple[str, datetime]:
-        """Generate a short join code for link/QR-based login.
+        """
+        Generate a short join code for link/QR-based login.
 
         This creates a short alphanumeric code that can be exchanged for a JWT token.
         Used for features like the party provider guest access, device pairing,
@@ -1707,8 +1462,535 @@ class AuthenticationManager:
 
         raise RuntimeError("Failed to generate a unique join code after 3 attempts")
 
+    async def revoke_join_codes(self, user: User) -> int:
+        """
+        Revoke all join codes for a user.
+
+        :param user: The user whose join codes should be revoked.
+        :return: Number of codes revoked.
+        """
+        cursor = await self.database.execute(
+            "DELETE FROM join_codes WHERE user_id = :user_id",
+            {"user_id": user.user_id},
+        )
+        await self.database.commit()
+
+        count = int(cursor.rowcount)
+        if count > 0:
+            self.logger.info("Revoked %d join code(s) for user %s", count, user.username)
+        return count
+
+    async def get_active_join_code(self, user: User) -> str | None:
+        """
+        Get the most recently created, non-expired join code for a user.
+
+        :param user: The user to look up codes for.
+        :return: The join code string if found, None otherwise.
+        """
+        now = utc()
+        cursor = await self.database.execute(
+            """
+            SELECT code FROM join_codes
+            WHERE user_id = :user_id
+            AND expires_at > :now
+            AND (max_uses = 0 OR use_count < max_uses)
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            {"user_id": user.user_id, "now": now.isoformat()},
+        )
+        row = await cursor.fetchone()
+        return str(row["code"]) if row else None
+
+    async def get_join_code_expiry(self, code: str, user: User | None = None) -> datetime | None:
+        """
+        Get the expiry datetime for an active join code.
+
+        :param code: The join code to look up.
+        :param user: Optional user that must own the join code.
+        :return: The expiry datetime if the code is active, None otherwise.
+        """
+        query = """
+            SELECT expires_at FROM join_codes
+            WHERE code = :code
+            AND expires_at > :now
+            AND (max_uses = 0 OR use_count < max_uses)
+            """
+        params: dict[str, Any] = {"code": code.upper(), "now": utc().isoformat()}
+        if user is not None:
+            query += "AND user_id = :user_id "
+            params["user_id"] = user.user_id
+        cursor = await self.database.execute(query + "LIMIT 1", params)
+        row = await cursor.fetchone()
+        return datetime.fromisoformat(str(row["expires_at"])) if row else None
+
+    @api_command("auth/join_code/exchange", authenticated=False)
+    async def exchange_join_code(self, code: str) -> dict[str, Any]:
+        """
+        Exchange a join code for an access token (public API).
+
+        This is the public API endpoint for short-code authentication.
+        Clients call this with a code (e.g., from QR scan or link) to receive a JWT token.
+
+        :param code: The short join code.
+        :return: Authentication result with access token if successful.
+        """
+        rate_limit_key, key_is_exclusive = _join_code_rate_limit_key()
+        async with self._join_code_exchange_lock:
+            if throttled := await self._check_join_code_rate_limit(rate_limit_key):
+                return throttled
+
+            token = await self._exchange_join_code(code)
+
+            if not token:
+                await self._join_code_rate_limiter.record_failed_attempt(rate_limit_key)
+                await self._join_code_global_rate_limiter.record_failed_attempt(
+                    JOIN_CODE_GLOBAL_RATE_LIMIT_KEY
+                )
+                return {
+                    "success": False,
+                    "error": "Invalid or expired join code",
+                }
+
+            # A bucket is only cleared when it belongs to one caller alone, so presenting a
+            # valid code never lifts the throttle for anyone else.
+            if key_is_exclusive:
+                await self._join_code_rate_limiter.clear_attempts(rate_limit_key)
+
+        # Decode token to get user info
+        try:
+            payload = self.jwt_helper.decode_token(token)
+            return {
+                "success": True,
+                "access_token": token,
+                "user": {
+                    "user_id": payload.get("sub"),
+                    "username": payload.get("username"),
+                    "role": payload.get("role"),
+                },
+            }
+        except pyjwt.InvalidTokenError:
+            return {
+                "success": False,
+                "error": "Failed to create access token",
+            }
+
+    @api_command("auth/join_codes", required_scope=Scope.USERS_MANAGE)
+    async def list_join_codes(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        """
+        List join codes, optionally filtered by user (admin only).
+
+        :param user_id: Optional user ID to filter codes for.
+        :return: List of join code records.
+        """
+        filter_args = {"user_id": user_id} if user_id else None
+        rows = await self.database.get_rows("join_codes", filter_args, limit=100)
+        return [dict(row) for row in rows]
+
+    @api_command("auth/join_code/revoke", required_scope=Scope.USERS_MANAGE)
+    async def revoke_join_code(self, code_id: str) -> None:
+        """
+        Revoke a specific join code (admin only).
+
+        :param code_id: The code ID to revoke.
+        """
+        code_row = await self.database.get_row("join_codes", {"code_id": code_id})
+        if not code_row:
+            raise InvalidDataError("Join code not found")
+
+        await self.database.delete("join_codes", {"code_id": code_id})
+        await self.database.commit()
+        self.logger.info("Join code revoked (code_id=%s)", code_id)
+
+    async def _setup_database(self) -> None:
+        """Set up database schema and handle migrations."""
+        # Always create tables if they don't exist
+        await self._create_database_tables()
+
+        # Check current schema version
+        try:
+            if db_row := await self.database.get_row("settings", {"key": "schema_version"}):
+                prev_version = int(db_row["value"])
+            else:
+                prev_version = DB_SCHEMA_VERSION
+        except KeyError, ValueError, Exception:
+            # settings table doesn't exist yet or other error
+            prev_version = 0
+
+        # Perform migration if needed
+        if prev_version < DB_SCHEMA_VERSION:
+            self.logger.warning(
+                "Performing database migration from schema version %s to %s",
+                prev_version,
+                DB_SCHEMA_VERSION,
+            )
+            await self._migrate_database(prev_version)
+
+        # Store current schema version
+        await self.database.insert_or_replace(
+            "settings",
+            {"key": "schema_version", "value": str(DB_SCHEMA_VERSION), "type": "int"},
+        )
+
+        # Create indexes
+        await self._create_database_indexes()
+        await self.database.commit()
+
+    async def _create_database_tables(self) -> None:
+        """Create database tables."""
+        # Settings table (for schema version and other settings)
+        await self.database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                type TEXT
+            )
+            """
+        )
+        # Users table
+        await self.database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                display_name TEXT,
+                avatar_url TEXT,
+                preferences json NOT NULL DEFAULT '{}',
+                player_filter json NOT NULL DEFAULT '[]',
+                provider_filter json NOT NULL DEFAULT '[]'
+            )
+            """
+        )
+        # User auth provider links (many-to-many)
+        await self.database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_auth_providers (
+                link_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                provider_type TEXT NOT NULL,
+                provider_user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(provider_type, provider_user_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            """
+        )
+        # Auth tokens table
+        await self.database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                token_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                last_used_at TEXT,
+                is_long_lived INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            """
+        )
+        # Join codes table (for short code to JWT exchange, used by providers like party)
+        await self.database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS join_codes (
+                code_id TEXT PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                max_uses INTEGER DEFAULT 0,
+                use_count INTEGER DEFAULT 0,
+                last_used_at TEXT,
+                device_name TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            """
+        )
+        await self.database.commit()
+
+    async def _create_database_indexes(self) -> None:
+        """Create database indexes."""
+        await self.database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_auth_providers_user "
+            "ON user_auth_providers(user_id)"
+        )
+        await self.database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_auth_providers_provider "
+            "ON user_auth_providers(provider_type, provider_user_id)"
+        )
+        await self.database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_user ON auth_tokens(user_id)"
+        )
+        await self.database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_hash ON auth_tokens(token_hash)"
+        )
+        await self.database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_join_codes_user ON join_codes(user_id)"
+        )
+
+    async def _migrate_database(self, from_version: int) -> None:
+        """
+        Perform database migration.
+
+        :param from_version: The schema version to migrate from.
+        """
+        self.logger.info(
+            "Migrating auth database from version %s to %s", from_version, DB_SCHEMA_VERSION
+        )
+        # Migration to version 2: Recreate tables due to password salt breaking change
+        if from_version < 2:
+            # Drop all auth-related tables
+            await self.database.execute("DROP TABLE IF EXISTS auth_tokens")
+            await self.database.execute("DROP TABLE IF EXISTS user_auth_providers")
+            await self.database.execute("DROP TABLE IF EXISTS users")
+            await self.database.commit()
+
+            # Recreate tables with current schema
+            await self._create_database_tables()
+
+        # Migration to version 3: Add player_filter and provider_filter columns
+        if from_version < 3:
+            with contextlib.suppress(OperationalError):
+                # Column(s) may already exist
+                await self.database.execute(
+                    "ALTER TABLE users ADD COLUMN player_filter json NOT NULL DEFAULT '[]'"
+                )
+                await self.database.execute(
+                    "ALTER TABLE users ADD COLUMN provider_filter json NOT NULL DEFAULT '[]'"
+                )
+            await self.database.commit()
+
+        # Migration to version 4: Make usernames case-insensitive by converting to lowercase
+        if from_version < 4:
+            await self.database.execute("UPDATE users SET username = LOWER(username)")
+            await self.database.commit()
+
+        # Migration to version 5: Add join codes table
+        if from_version < 5:
+            await self.database.execute(
+                """
+                CREATE TABLE IF NOT EXISTS join_codes (
+                    code_id TEXT PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    max_uses INTEGER DEFAULT 0,
+                    use_count INTEGER DEFAULT 0,
+                    last_used_at TEXT,
+                    device_name TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self.database.commit()
+
+    async def _get_or_create_jwt_secret(self) -> str:
+        """
+        Get or create JWT secret key from database.
+
+        :return: JWT secret key for signing tokens.
+        """
+        # Try to get existing secret
+        if secret_row := await self.database.get_row("settings", {"key": "jwt_secret"}):
+            return str(secret_row["value"])
+
+        # Generate new secret
+        jwt_secret = JWTHelper.generate_secret_key()
+
+        # Store in database
+        await self.database.insert_or_replace(
+            "settings",
+            {"key": "jwt_secret", "value": jwt_secret, "type": "string"},
+        )
+        await self.database.commit()
+
+        self.logger.info("Generated new JWT secret key")
+        return jwt_secret
+
+    async def _setup_login_providers(self) -> None:
+        """Set up available login providers based on configuration."""
+        # Always enable built-in provider
+        self.login_providers["builtin"] = BuiltinLoginProvider(self.mass, "builtin", {})
+
+        # Home Assistant OAuth provider
+        # Automatically enabled if HA provider (plugin) is configured
+        ha_provider = None
+        for provider in self.mass.providers:
+            if provider.domain == "hass" and provider.available:
+                ha_provider = provider
+                break
+
+        if ha_provider:
+            ha_provider = cast("HomeAssistantProvider", ha_provider)
+            ha_url = ha_provider.url
+            if not ha_url:
+                self.logger.warning(
+                    "Home Assistant provider has no URL configured, "
+                    "Home Assistant OAuth login is not available"
+                )
+                return
+            ha_config: HomeAssistantProviderConfig = {"ha_url": ha_url}
+            self.login_providers["homeassistant"] = HomeAssistantOAuthProvider(
+                self.mass, "homeassistant", ha_config
+            )
+            self.logger.info(
+                "Home Assistant OAuth provider enabled (using URL from HA provider: %s)",
+                ha_url,
+            )
+
+    async def _sync_ha_oauth_provider(self) -> None:
+        """
+        Sync HA OAuth provider with HA provider availability (dynamic check).
+
+        Adds the provider if HA is available, removes it if HA is not available.
+        """
+        # Find HA provider
+        ha_provider = None
+        for provider in self.mass.providers:
+            if provider.domain == "hass" and provider.available:
+                ha_provider = provider
+                break
+
+        if ha_provider:
+            # HA provider exists and is available - ensure OAuth provider is registered
+            if "homeassistant" not in self.login_providers:
+                ha_provider = cast("HomeAssistantProvider", ha_provider)
+                ha_url = ha_provider.url
+                if not ha_url:
+                    # missing URL must never break the login providers endpoint,
+                    # simply leave the HA OAuth provider unregistered
+                    self.logger.debug(
+                        "Home Assistant provider has no URL configured, "
+                        "Home Assistant OAuth login is not available"
+                    )
+                    return
+                ha_config: HomeAssistantProviderConfig = {"ha_url": ha_url}
+                self.login_providers["homeassistant"] = HomeAssistantOAuthProvider(
+                    self.mass, "homeassistant", ha_config
+                )
+                self.logger.info(
+                    "Home Assistant OAuth provider dynamically enabled (using URL: %s)",
+                    ha_url,
+                )
+        # HA provider not available - remove OAuth provider if present
+        elif "homeassistant" in self.login_providers:
+            del self.login_providers["homeassistant"]
+            self.logger.info("Home Assistant OAuth provider removed (HA provider not available)")
+
+    async def _has_non_system_users(self) -> bool:
+        """Check if any non-system users exist."""
+        user_rows = await self.database.get_rows("users", limit=10)
+        return any(row["username"] != HOMEASSISTANT_SYSTEM_USER for row in user_rows)
+
+    async def _migrate_system_user_role(self) -> None:
+        """Migrate the Home Assistant system user of pre-existing installs to the service role."""
+        user_row = await self.database.get_row(
+            "users", {"username": normalize_username(HOMEASSISTANT_SYSTEM_USER)}
+        )
+        if user_row and user_row["role"] != UserRole.SERVICE.value:
+            await self.database.update(
+                "users", {"user_id": user_row["user_id"]}, {"role": UserRole.SERVICE.value}
+            )
+            self.logger.info(
+                "Updated Home Assistant system user role to %s", UserRole.SERVICE.value
+            )
+
+    async def _migrate_playlog_to_first_user(self, user_id: str) -> None:
+        """
+        Migrate all existing playlog entries to the first user.
+
+        This is called automatically when the first non-system user is created.
+        All existing playlog entries (which have NULL userid) will be updated
+        to belong to this first user.
+
+        :param user_id: The user ID of the first user.
+        """
+        try:
+            # Update all playlog entries with NULL userid to this user
+            await self.mass.music.database.execute(
+                f"UPDATE {DB_TABLE_PLAYLOG} SET userid = :userid WHERE userid IS NULL",
+                {"userid": user_id},
+            )
+            await self.mass.music.database.commit()
+            self.logger.info("Migrated existing playlog entries to first user: %s", user_id)
+        except Exception as err:
+            self.logger.warning("Failed to migrate playlog entries: %s", err)
+
+    async def _update_profile_password(
+        self,
+        target_user: User,
+        password: str,
+        is_admin_update: bool,
+        current_user: User,
+    ) -> None:
+        """Update user password (helper method)."""
+        if len(password) < 8:
+            raise InvalidDataError("Password must be at least 8 characters")
+
+        builtin_provider = self.login_providers.get("builtin")
+        if not builtin_provider or not isinstance(builtin_provider, BuiltinLoginProvider):
+            raise InvalidDataError("Built-in auth not available")
+
+        # Update password (used for both admin resets and user password changes)
+        await builtin_provider.reset_password(target_user, password)
+
+        if is_admin_update:
+            self.logger.info(
+                "Password reset for user %s by admin %s",
+                target_user.username,
+                current_user.username,
+            )
+        else:
+            self.logger.info("Password changed for user %s", target_user.username)
+
+    async def _check_join_code_rate_limit(self, key: str) -> dict[str, Any] | None:
+        """
+        Check the join code exchange throttles that apply to the calling client.
+
+        :param key: Rate limit key identifying the calling client.
+        :return: The error result to return to the caller, or None if the attempt may proceed.
+        """
+        limiters = (
+            ("client", self._join_code_rate_limiter, key),
+            ("server", self._join_code_global_rate_limiter, JOIN_CODE_GLOBAL_RATE_LIMIT_KEY),
+        )
+        for scope, limiter, limiter_key in limiters:
+            allowed, remaining_delay = await limiter.check_rate_limit(limiter_key)
+            if allowed:
+                continue
+            # The attempted code is deliberately absent here: it has not been checked yet,
+            # so it may well be a valid one. Each failure that filled the bucket already
+            # logged its own (rejected, and therefore unusable) code.
+            self.logger.warning(
+                "Join code exchange throttled by the %s limit "
+                "(client=%s, client_failures=%d, server_failures=%d). "
+                "%d seconds remaining.",
+                scope,
+                key,
+                self._join_code_rate_limiter.get_attempt_count(key),
+                self._join_code_global_rate_limiter.get_attempt_count(
+                    JOIN_CODE_GLOBAL_RATE_LIMIT_KEY
+                ),
+                remaining_delay,
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Too many failed attempts. Please try again in {remaining_delay} seconds."
+                ),
+            }
+        return None
+
     async def _exchange_join_code(self, code: str) -> str | None:
-        """Exchange a join code for a JWT access token.
+        """
+        Exchange a join code for a JWT access token.
 
         The token is created for the user associated with the join code.
 
@@ -1733,7 +2015,11 @@ class AuthenticationManager:
         await self.database.commit()
 
         if not row:
-            self.logger.warning("Join code exchange rejected (code=%s)", code.upper())
+            self.logger.warning(
+                "Join code exchange rejected (client=%s, code=%s)",
+                get_current_client_id() or JOIN_CODE_ANONYMOUS_RATE_LIMIT_KEY,
+                _mask_join_code(code),
+            )
             return None
 
         user = await self.get_user(row["user_id"])
@@ -1756,44 +2042,6 @@ class AuthenticationManager:
         )
         return token
 
-    async def revoke_join_codes(self, user: User) -> int:
-        """Revoke all join codes for a user.
-
-        :param user: The user whose join codes should be revoked.
-        :return: Number of codes revoked.
-        """
-        cursor = await self.database.execute(
-            "DELETE FROM join_codes WHERE user_id = :user_id",
-            {"user_id": user.user_id},
-        )
-        await self.database.commit()
-
-        count = int(cursor.rowcount)
-        if count > 0:
-            self.logger.info("Revoked %d join code(s) for user %s", count, user.username)
-        return count
-
-    async def get_active_join_code(self, user: User) -> str | None:
-        """Get the most recently created, non-expired join code for a user.
-
-        :param user: The user to look up codes for.
-        :return: The join code string if found, None otherwise.
-        """
-        now = utc()
-        cursor = await self.database.execute(
-            """
-            SELECT code FROM join_codes
-            WHERE user_id = :user_id
-            AND expires_at > :now
-            AND (max_uses = 0 OR use_count < max_uses)
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            {"user_id": user.user_id, "now": now.isoformat()},
-        )
-        row = await cursor.fetchone()
-        return str(row["code"]) if row else None
-
     async def _cleanup_expired_join_codes(self) -> None:
         """Delete expired and exhausted join codes from the database."""
         now = utc()
@@ -1815,15 +2063,9 @@ class AuthenticationManager:
         self.mass.create_task(self._cleanup_expired_join_codes())
         self.mass.call_later(86400, self._schedule_join_code_cleanup)
 
-    @api_command("auth/join_code/exchange", authenticated=False)
-    async def exchange_join_code(self, code: str) -> dict[str, Any]:
-        """Exchange a join code for an access token (public API).
-
-        This is the public API endpoint for short-code authentication.
-        Clients call this with a code (e.g., from QR scan or link) to receive a JWT token.
-
-        :param code: The short join code.
-        :return: Authentication result with access token if successful.
+    async def _refresh_token_expiration(
+        self, token_row: Mapping[str, Any], user: User, is_long_lived: bool
+    ) -> dict[str, str] | None:
         """
         async with self._join_code_exchange_lock:
             allowed, remaining_delay = await self._join_code_rate_limiter.check_rate_limit(
@@ -1876,19 +2118,21 @@ class AuthenticationManager:
         :param user_id: Optional user ID to filter codes for.
         :return: List of join code records.
         """
-        filter_args = {"user_id": user_id} if user_id else None
-        rows = await self.database.get_rows("join_codes", filter_args, limit=100)
-        return [dict(row) for row in rows]
+        now = utc()
 
-    @api_command("auth/join_code/revoke", required_role="admin")
-    async def revoke_join_code(self, code_id: str) -> None:
-        """Revoke a specific join code (admin only).
+        if not is_long_lived:
+            created_at = datetime.fromisoformat(token_row["created_at"])
+            if now > created_at + timedelta(days=TOKEN_ABSOLUTE_MAX_EXPIRATION):
+                await self.database.delete("auth_tokens", {"token_id": token_row["token_id"]})
+                return None
 
-        :param code_id: The code ID to revoke.
-        """
-        code_row = await self.database.get_row("join_codes", {"code_id": code_id})
-        if not code_row:
-            raise InvalidDataError("Join code not found")
+        # The HTTP API authenticates on every request, so persisting activity per use
+        # would cost an UPDATE+commit (an fsync) per request. Skip the write while the
+        # stored timestamp is fresh; last_used_at and the sliding expiration then lag
+        # by at most this interval, which is negligible against the 30-day idle window.
+        if last_used_at := token_row["last_used_at"]:
+            if now - datetime.fromisoformat(last_used_at) < TOKEN_ACTIVITY_PERSIST_INTERVAL:
+                return {}
 
         await self.database.delete("join_codes", {"code_id": code_id})
         await self.database.commit()

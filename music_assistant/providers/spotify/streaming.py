@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import MediaType
-from music_assistant_models.errors import AudioError
+from music_assistant_models.errors import AudioError, LoginFailed
 
 from music_assistant.constants import VERBOSE_LOG_LEVEL
 from music_assistant.helpers.process import AsyncProcess
