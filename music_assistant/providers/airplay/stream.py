@@ -226,9 +226,10 @@ class AirPlayStream:
         self.device_min_frames: int = 0
         self.device_max_frames: int = 0
         # Minimum lead (ms) a warm commanded START needs for exact placement.
-        # Nonzero on the Apple splice timeline, where the receiver's queued
-        # audio plays out before the new content can begin; a warm group
-        # anchor must sit beyond the largest member value. 0 = no constraint.
+        # Nonzero on the splice timeline, the default for every native AirPlay 2
+        # session, where the receiver's queued audio plays out before the new
+        # content can begin; a warm group anchor must sit beyond the largest
+        # member value. 0 = no constraint.
         self.warm_lead_ms: int = 0
         # Audible instant (unix ms) of the delivery head frozen by the latest
         # warm flush, from the flushed ack (0 = none/no constraint). The warm
@@ -422,9 +423,12 @@ class AirPlayStream:
         """
         Flush the live stream in place and wait for the binary's acknowledgement.
 
-        Sends ``ACTION=FLUSH`` — the binary stops sending audio, flushes the
-        receiver, discards its input ring and drains stdin, then reports
-        ``[STATUS] flushed`` while keeping the connection and stdin reader alive.
+        Sends ``ACTION=FLUSH`` — the binary stops sending content, discards its
+        input ring and drains stdin, then reports ``[STATUS] flushed`` while
+        keeping the connection and stdin reader alive. The receiver is not asked
+        to discard on the splice timeline: its queued audio plays out and the
+        next START splices onto the same line, so a warm anchor has to clear
+        :attr:`warm_lead_ms` and :attr:`flushed_head_unix_ms`.
         The caller must have stopped feeding old audio before calling this; what
         it already wrote is seen through to the binary here, and stdin is held
         quiet until the flush is acknowledged, so the drain removes exactly the
@@ -603,10 +607,10 @@ class AirPlayStream:
         :param position_ms: Media position mapped to that first sample, used as
             the base for elapsed reporting.
         :param join: This start must land on an already-live group timeline (a
-            late joiner): the binary then enforces receiver clock readiness and
-            holds its ack until that resolves, so the returned instant is the one
-            the caller must map the joiner's content onto. Group/solo origin
-            starts leave it False.
+            late joiner): the binary holds its ack until its receiver clock
+            verification resolves whenever it arms, so the returned instant is
+            the one the caller must map the joiner's content onto. Group/solo
+            origin starts leave it False.
         :return: The true scheduled audible instant (unix ms) from the binary's
             started ack — the commanded instant when it was feasible, the
             corrected-forward one otherwise.
@@ -670,10 +674,10 @@ class AirPlayStream:
         )
         # The binary always acks with the TRUE scheduled instant (correcting an
         # infeasible one forward), so the caller can verify the contract and
-        # re-align a group. A join's ack is held back until the receiver clock
-        # verification resolves and therefore gets a much wider window than a
-        # plain start, which acks within the command round-trip. A reported
-        # failure answers the wait immediately.
+        # re-align a group. A join's ack is held back whenever the receiver
+        # clock verification arms, so it gets a much wider window than a plain
+        # start, which acks within the command round-trip. A reported failure
+        # answers the wait immediately.
         ack_timeout = (
             AIRPLAY_JOIN_START_ACK_TIMEOUT_MS if join else AIRPLAY_START_ACK_TIMEOUT_MS
         ) / 1000
@@ -999,8 +1003,9 @@ class AirPlayStream:
             str(self.pcm_format.bit_depth),
         ]
 
-        # The binary owns the playback lead/buffer (2000 ms default, clamped to
-        # the device-reported window); there is no user override for it.
+        # The binary owns the playback lead (2000 ms default, clamped to the
+        # device-reported window) and there is no user override for it; the
+        # receiver queue depth is the one tunable, passed as --latency below.
 
         # The endpoint must follow the same capability decision as the binary:
         # legacy RAOP uses _raop, while native and RAOP-compatible AP2 use _airplay.
