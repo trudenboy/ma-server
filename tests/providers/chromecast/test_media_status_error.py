@@ -17,6 +17,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 from music_assistant.providers.chromecast.player import ChromecastPlayer
+from tests.providers.chromecast.helpers import bind_media_status_helpers
 
 
 def _handle_media_status(fake: MagicMock, status: MagicMock) -> None:
@@ -29,7 +30,7 @@ def _fake_player() -> MagicMock:
     fake.active_cast_group = None
     fake._media_error_reported = False
     fake._flow_stream_underrun = MagicMock(return_value=False)
-    return fake
+    return bind_media_status_helpers(fake)
 
 
 def _error_status() -> MagicMock:
@@ -82,6 +83,25 @@ def test_error_logged_again_after_recovery() -> None:
     _handle_media_status(fake, _error_status())
 
     assert fake.logger.warning.call_count == 2
+
+
+def test_group_error_is_not_logged_by_every_member() -> None:
+    """A group's error reaches all its members, but only the group itself reports it."""
+    group = MagicMock()
+    # a plain spec= mock has no 'cc', which is set in __init__
+    group.__class__ = ChromecastPlayer  # type: ignore[assignment]
+    group.cc.media_controller.status = _error_status()
+    member = _fake_player()
+    member.active_cast_group = "group-uuid"
+    member.mass.players.get_player = MagicMock(return_value=group)
+
+    _handle_media_status(member, _error_status())
+
+    member.logger.warning.assert_not_called()
+    # assert the group status was really processed, so the check above cannot pass
+    # just because the member bailed out before reaching the error handling
+    member.mass.players.get_player.assert_called_once_with("group-uuid")
+    member.update_state.assert_called_once()
 
 
 def test_flow_stream_underrun_is_not_an_error() -> None:
