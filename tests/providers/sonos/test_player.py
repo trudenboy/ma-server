@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ConnectionTimeoutError
-from aiosonos.exceptions import CannotConnect
+from aiosonos.api.models import MusicService
+from aiosonos.api.models import PlayBackState as SonosPlayBackState
+from aiosonos.exceptions import CannotConnect, FailedCommand
+from music_assistant_models.enums import PlaybackState
+from music_assistant_models.player import PlayerMedia
 
 from music_assistant.providers.sonos.player import SonosPlayer
 

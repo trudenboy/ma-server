@@ -35,14 +35,12 @@ from .constants import (
     AIRPLAY_HIRES_SAMPLE_RATES,
     AIRPLAY_PCM_FORMAT,
     AIRPLAY_REJOIN_ATTEMPT_DELAYS,
-    ATV_PASSWORD_BIT,
     BASE_PLAYER_FEATURES,
     CONF_AIRPLAY_CREDENTIALS,
     CONF_AIRPLAY_PROTOCOL,
     CONF_ALAC_ENCODE,
     CONF_ENCRYPTION,
     CONF_ENTRY_SYNC_ADJUST_AIRPLAY,
-    CONF_FORCE_RAOP,
     CONF_IGNORE_VOLUME,
     CONF_PAIR_NOW,
     CONF_PAIRING_PASSWORD,
@@ -55,6 +53,11 @@ from .constants import (
     PASSWORD_BIT,
     PIN_REQUIRED,
     RAOP_DISCOVERY_TYPE,
+    STREAMING_MODE_AP2_COMPAT,
+    STREAMING_MODE_AP2_NTP,
+    STREAMING_MODE_AP2_PTP,
+    STREAMING_MODE_AUTO,
+    STREAMING_MODE_RAOP,
     StreamingProtocol,
 )
 from .helpers import (
@@ -62,6 +65,7 @@ from .helpers import (
     get_decoded_property,
     is_apple_device,
     is_macos_device,
+    parse_airplay_features,
     player_id_to_mac_address,
     supports_airplay2,
 )
@@ -169,19 +173,22 @@ class AirPlayPlayer(Player):
         # interactive setup flow (run_setup_flow) and stored in the player's setup_data.
         base_entries: list[ConfigEntry] = []
 
-        # Effective RAOP state from the current (stored) force-RAOP setting, so the
+        # Effective RAOP state from the current (stored) streaming mode, so the
         # RAOP-only entries show/hide consistently with it.
-        is_raop = self._force_raop_active or not self._is_airplay2_capable
+        is_raop = self.protocol == StreamingProtocol.RAOP
 
-        # "Force RAOP" escape hatch: only for AirPlay-2-capable non-Apple receivers
-        # (see _force_raop_available). Framed as a per-device workaround for a
-        # misbehaving AirPlay 2 implementation, not a general protocol choice.
-        if self._force_raop_available:
+        # Streaming-mode escape hatch: a per-device pin of the protocol/timing
+        # lane for receivers whose automatic route misbehaves. Only offered
+        # when the device actually has a lane to choose (Apple receivers are
+        # always native AirPlay 2 with PTP and get no entry).
+        mode_options = self.streaming_mode_options
+        if len(mode_options) > 1:
             base_entries.append(
                 ConfigEntry(
-                    key=CONF_FORCE_RAOP,
-                    type=ConfigEntryType.BOOLEAN,
-                    default_value=False,
+                    key=CONF_STREAMING_MODE,
+                    type=ConfigEntryType.STRING,
+                    options=mode_options,
+                    default_value=STREAMING_MODE_AUTO,
                     category="protocol_generic",
                     advanced=True,
                 )
@@ -633,17 +640,22 @@ class AirPlayPlayer(Player):
             self.update_state()
 
     async def play(self) -> None:
-        """Send PLAY (unpause) command to player."""
-        if self.group_members or self.synced_to:
+        """Handle PLAY (unpause) command on the player."""
+        session = self.stream.session if self.stream and self.stream.running else None
+        if self.group_members or self.synced_to or (session and session.parked):
             # Grouped pause parks the whole session (standby); unpausing one
-            # member cannot restart the group in sync. Resume via the queue
+            # member cannot restart the group in sync, and a parked member is
+            # held with nothing being fed until a re-anchor - which ACTION=PLAY
+            # does not carry, so it would report playback over silence. The park
+            # outlives the group, so a player left alone by an ungroup is keyed
+            # on the park itself, not on its membership. Resume via the queue
             # instead: play_media flushes and re-anchors every parked member at
             # one shared instant. The queue can belong to a linked native parent
             # (for example Sonos), so resolve it instead of using the AirPlay ID.
             active_queue = self.mass.players.get_active_queue(self)
             if active_queue is None:
                 raise PlayerCommandFailed(
-                    f"Cannot resume grouped AirPlay player {self.display_name} without an active queue"
+                    f"Cannot resume AirPlay player {self.display_name} without an active queue"
                 )
             await self.mass.player_queues.resume(active_queue.queue_id, fade_in=False)
             return
@@ -764,12 +776,20 @@ class AirPlayPlayer(Player):
             # handle removals first
             if player_ids_to_remove:
                 if self.player_id in player_ids_to_remove:
-                    if stream_session and len(stream_session.sync_clients) > 1:
-                        # Other clients remain: remove only this leader client,
-                        # session continues for remaining players (dynamic leader switch)
+                    # Callers only ask for this leader alone or for the whole group at once.
+                    # A partial self+subset removal would need the other requested members
+                    # released here as well, instead of returning right after the leader.
+                    remaining_members = [
+                        member_id
+                        for member_id in self._attr_group_members
+                        if member_id != self.player_id and member_id not in player_ids_to_remove
+                    ]
+                    if stream_session and remaining_members:
+                        # Members stay behind: remove only this leader client,
+                        # the session continues for the remaining players
                         await stream_session.remove_client(self, reason="leader removed from group")
                     elif stream_session:
-                        # Last client, stop the whole session
+                        # The whole group is being removed, tear the session down
                         await stream_session.stop()
                     self._attr_group_members = []
                     self.update_state()
@@ -965,15 +985,14 @@ class AirPlayPlayer(Player):
             bit_depth=24,
         )
 
-    def sync_volume_level(self) -> None:
+    @property
+    def owns_volume(self) -> bool:
         """
-        Sync volume from parent player if needed.
+        Return True if this output is the resolved owner of its own volume.
 
-        AirPlay players only report their volume level when we are actually streaming to them
-        and we remember the last used/reported volume level in the player config by default
-        but if we have a parent player, that may know better about the current volume level,
-        so we try to sync from that parent player if possible. If another control owns
-        the parent's volume, we play at unity gain instead.
+        AirPlay volume is the receiver's own volume: setting it writes through to the
+        device and persists there after the session ends. It may therefore only be set
+        when no other control owns the volume of this output.
         """
         if (
             self.protocol_parent_id
@@ -1054,12 +1073,22 @@ class AirPlayPlayer(Player):
         if rejoin_task and not rejoin_task.done() and rejoin_task is not asyncio.current_task():
             rejoin_task.cancel()
 
-    def _volume_control_routes_to_self(self, volume_control: str) -> bool:
-        """Return True if the given (resolved) volume control routes volume to this player."""
-        if volume_control == self.player_id:
+    def on_player_media_updated(self) -> None:
+        """Handle callback when the current media of the player is updated."""
+        if not self.stream or not self.stream.running:
+            return
+        metadata = self.state.current_media
+        if not metadata:
+            return
+        progress = int(metadata.corrected_elapsed_time or 0)
+        self.mass.create_task(self.stream.send_metadata(progress, metadata))
+
+    def _control_routes_to_self(self, control: str) -> bool:
+        """Return True if the given (resolved) control routes to this player."""
+        if control == self.player_id:
             return True
-        # bridge players riding on this player (e.g. Sendspin-over-AirPlay) forward volume here
-        if control_player := self.mass.players.get_player(volume_control):
+        # bridge players riding on this player (e.g. Sendspin-over-AirPlay) forward to us
+        if control_player := self.mass.players.get_player(control):
             return control_player.underlying_player_id == self.player_id
         return False
 
@@ -1121,26 +1150,6 @@ class AirPlayPlayer(Player):
         if not self.airplay_discovery_info:
             return False
         return supports_airplay2(self._advertised_features) or not self.raop_discovery_info
-
-    @property
-    def _force_raop_available(self) -> bool:
-        """
-        Return whether the "force RAOP" escape hatch applies to this device.
-
-        Offered only for AirPlay-2-capable non-Apple receivers that also advertise
-        a RAOP service to fall back to. Genuine Apple devices are always AirPlay 2,
-        while RAOP-only and AirPlay-2-only devices have nothing to force.
-        """
-        return (
-            self._is_airplay2_capable
-            and self.raop_discovery_info is not None
-            and not is_apple_device(self.device_info.manufacturer, self.device_info.model)
-        )
-
-    @property
-    def _force_raop_active(self) -> bool:
-        """Return whether RAOP is being forced through the escape-hatch toggle."""
-        return self._force_raop_available and bool(self.config.get_value(CONF_FORCE_RAOP, False))
 
     async def _run_streaming_pairing(
         self, session: SetupSession, collected: dict[str, ConfigValueType]
@@ -1359,16 +1368,6 @@ class AirPlayPlayer(Player):
             port=port,
             device_id=device_id,
         )
-
-    def _on_player_media_updated(self) -> None:
-        """Handle callback when the current media of the player is updated."""
-        if not self.stream or not self.stream.running:
-            return
-        metadata = self.state.current_media
-        if not metadata:
-            return
-        progress = int(metadata.corrected_elapsed_time or 0)
-        self.mass.create_task(self.stream.send_metadata(progress, metadata))
 
     async def _get_session_pcm_format(
         self, sync_clients: list[AirPlayPlayer], media: PlayerMedia

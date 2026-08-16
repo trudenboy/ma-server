@@ -32,17 +32,20 @@ if TYPE_CHECKING:
     from .player import AirPlayPlayer
     from .provider import AirPlayProvider
 
-# What each readiness outcome means for the join anchor: only a projection moves
-# it, every other outcome leaves the join floor carrying it alone, so the note
-# says which of the two happened and why. STALLED has no note because it never
-# reaches an anchor - a stalled joiner is refused the join before that.
+# What each readiness outcome means for the join anchor: a projection only moves
+# it when it clears the join floor, which otherwise carries the anchor alone, so
+# the note says which bound the outcome set. STALLED has no note because it never
+# reaches a join anchor - a stalled joiner is refused the join before that.
 _CLOCK_READINESS_NOTES: dict[ClockReadiness, str] = {
-    ClockReadiness.PROJECTED: "usable in {out:.2f}s; anchoring just past that",
+    ClockReadiness.PROJECTED: "usable in {out:.2f}s; anchoring no earlier than that",
     ClockReadiness.NOT_APPLICABLE: "runs on NTP timing, so there is none to wait for; "
     "anchoring on the join floor",
     ClockReadiness.UNREPORTED: "was not reported within {timeout:.1f}s (a slow device, or a "
     "receiver that never answered); anchoring on the join floor",
 }
+# A locked clock projects an instant that has already passed - the common case,
+# since only a cold receiver is still probing - so its note reads back in time.
+_CLOCK_LOCKED_NOTE = "became usable {ago:.2f}s ago; anchoring on the join floor"
 
 
 class AirPlayStreamSession:
@@ -54,6 +57,7 @@ class AirPlayStreamSession:
         sync_clients: list[AirPlayPlayer],
         pcm_format: AudioFormat,
         media: PlayerMedia,
+        requested_volume: int | None = None,
     ) -> None:
         """
         Initialize AirPlayStreamSession.
@@ -62,12 +66,16 @@ class AirPlayStreamSession:
         :param sync_clients: List of AirPlay players to stream to.
         :param pcm_format: PCM format of the input stream.
         :param media: Queue media that owns the stream session.
+        :param requested_volume: Volume level explicitly requested for this session (an
+            announcement volume), already applied to its members. Omit for a regular
+            stream, which only carries a volume when this output owns it.
         """
         assert sync_clients
         self.prov = airplay_provider
         self.mass = airplay_provider.mass
         self.pcm_format = pcm_format
         self.media = media
+        self.requested_volume = requested_volume
         self.sync_clients = sync_clients
         self._audio_source_task: asyncio.Task[None] | None = None
         self._player_ffmpeg: dict[str, FFMpeg] = {}
@@ -271,6 +279,7 @@ class AirPlayStreamSession:
         self._pcm_buffer.clear()
         self._client_skip_bytes.clear()
         self._reset_member_shifts()
+        self.parked = True
         return True
 
     async def stop(self, force: bool = False) -> None:
@@ -509,13 +518,18 @@ class AirPlayStreamSession:
             return anchor_at, due, prime_slice, skip
 
         now = time.time()
+        clock_out = ready_at_unix_ms / 1000 - now
+        if readiness is ClockReadiness.PROJECTED and clock_out <= 0:
+            clock_note = _CLOCK_LOCKED_NOTE.format(ago=abs(clock_out))
+        else:
+            clock_note = _CLOCK_READINESS_NOTES.get(readiness, "").format(
+                out=clock_out,
+                timeout=AIRPLAY_CLOCK_READY_TIMEOUT_MS / 1000,
+            )
         self.prov.logger.debug(
             "Late joiner %s: receiver clock %s",
             airplay_player.player_id,
-            _CLOCK_READINESS_NOTES.get(readiness, "").format(
-                out=ready_at_unix_ms / 1000 - now,
-                timeout=AIRPLAY_CLOCK_READY_TIMEOUT_MS / 1000,
-            ),
+            clock_note,
         )
         async with self._lock:
             if not self._session_is_live():
@@ -546,8 +560,8 @@ class AirPlayStreamSession:
             # the session lock, stall the whole group's feed. Anchored, the
             # binary drains the prime as it streams in. The START does not
             # re-anchor the session timeline (the group keeps playing). Its ack
-            # is awaited WITHOUT the session lock: the binary holds that ack
-            # until the receiver's clock readiness resolves, which would
+            # is awaited WITHOUT the session lock: the binary can hold that ack
+            # until its receiver clock verification resolves, which would
             # otherwise starve every other member's feed for that whole wait.
             actual = await stream.start(start_unix_ms + adjust_ms, position_ms, join=True)
         except asyncio.CancelledError:
@@ -978,7 +992,7 @@ class AirPlayStreamSession:
         Return the shared audible-start instant for a readiness-confirmed start.
 
         :param warm: True for a warm re-start over live connections (seek/next/
-            resume-from-park). Members on the Apple splice timeline report a
+            resume-from-park). Members on the splice timeline report a
             minimum warm lead — their queued audio plays out before the new
             content can begin — and the shared anchor must sit beyond the
             largest member value so every member splices at the same instant.
@@ -1169,6 +1183,8 @@ class AirPlayStreamSession:
             )
         self.start_unix_ms = target_ms
         self.start_time = target_ms / 1000
+        # the only place a session (re)gains a live timeline, so any park ends here
+        self.parked = False
 
     async def _flush_member(self, player: AirPlayPlayer) -> bool:
         """Flush one member's live stream in place and report the binary's ack."""

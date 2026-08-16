@@ -5,7 +5,14 @@ from urllib.parse import urlparse
 
 import aiohttp
 import pytest
-from aiolibdatachannel import DataChannel, IceServer, LogLevel, PeerConnection, RTCConfiguration
+from aiolibdatachannel import (
+    DataChannel,
+    IceServer,
+    LogLevel,
+    PeerConnection,
+    RTCConfiguration,
+    RTCError,
+)
 from cryptography.hazmat.primitives import serialization
 
 from music_assistant.constants import VERBOSE_LOG_LEVEL
@@ -16,7 +23,8 @@ from music_assistant.controllers.webserver.remote_access import (
     RemoteAccessManager,
 )
 from music_assistant.controllers.webserver.remote_access.gateway import (
-    MA_API_CHUNK_SIZE,
+    DATA_CHANNEL_CHUNK_SIZE,
+    HTTP_PROXY_CONCURRENCY,
     WebRTCGateway,
     WebRTCSession,
     _is_usable_ice_url,
@@ -25,6 +33,8 @@ from music_assistant.helpers.webrtc_certificate import (
     _generate_certificate,
     _remote_id_from_certificate,
 )
+
+_GATEWAY_MODULE = "music_assistant.controllers.webserver.remote_access.gateway"
 
 
 async def test_remote_id_from_certificate() -> None:
@@ -691,10 +701,9 @@ async def test_http_proxy_request_cannot_change_host(
         key_pem=key_pem,
         local_ws_url="ws://localhost:8095/ws",
     )
-    session = WebRTCSession(session_id="s1", pc=Mock())
 
     await gateway._handle_http_proxy_request(
-        session, {"id": "1", "method": "GET", "path": malicious_path}
+        None, {"id": "1", "method": "GET", "path": malicious_path}
     )
 
     parsed = urlparse(captured_url["url"])
@@ -732,9 +741,8 @@ async def test_http_proxy_request_keeps_the_unverified_dial_on_this_host(
         key_pem=key_pem,
         local_ws_url="wss://127.0.0.1:8095/ws",
     )
-    session = WebRTCSession(session_id="s1", pc=Mock())
 
-    await gateway._handle_http_proxy_request(session, {"id": "1", "method": "GET", "path": "/info"})
+    await gateway._handle_http_proxy_request(None, {"id": "1", "method": "GET", "path": "/info"})
 
     assert captured_kwargs["ssl"] is False
     assert captured_kwargs["allow_redirects"] is False
@@ -859,10 +867,12 @@ class _FakeBidiChannel:
     what the gateway sent back on ``sent``.
     """
 
-    def __init__(self, label: str = "ma-api") -> None:
+    def __init__(self, label: str = "ma-api", max_message_size: int = 256 * 1024) -> None:
         self.label = label
         self.is_open = True
+        self.is_closed = False
         self.closed = False
+        self.max_message_size = max_message_size
         self.sent: list[str | bytes] = []
         self._inbound: asyncio.Queue[str | bytes | None] = asyncio.Queue()
 
@@ -870,6 +880,8 @@ class _FakeBidiChannel:
         return
 
     async def send(self, data: str | bytes) -> None:
+        # a real send always suspends, which is what lets concurrent senders interleave
+        await asyncio.sleep(0)
         self.sent.append(data)
 
     def feed(self, message: str | bytes) -> None:
@@ -878,6 +890,7 @@ class _FakeBidiChannel:
 
     def close(self) -> None:
         self.closed = True
+        self.is_closed = True
         self.is_open = False
         self._inbound.put_nowait(None)
 
@@ -901,6 +914,9 @@ class _FakeHttpSession:
         self.dialed: list[str] = []
         self.dial_kwargs: list[dict[str, Any]] = []
         self.websockets: dict[str, _FakeLocalWS] = {}
+        self.requested: list[str] = []
+        self.response_body = b""
+        self.bodies: dict[str, bytes] = {}
 
     async def ws_connect(self, url: str, **kwargs: Any) -> _FakeLocalWS:
         self.dialed.append(url)
@@ -908,6 +924,18 @@ class _FakeHttpSession:
         local_ws = _FakeLocalWS()
         self.websockets[url] = local_ws
         return local_ws
+
+    def request(self, _method: str, url: str, **_kwargs: Any) -> AsyncMock:
+        """Serve this url's entry in ``bodies``, falling back to ``response_body``."""
+        self.requested.append(url)
+        response = AsyncMock()
+        response.status = 200
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.read = AsyncMock(return_value=self.bodies.get(url, self.response_body))
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=response)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
 
 
 class _FakePeerConnection:

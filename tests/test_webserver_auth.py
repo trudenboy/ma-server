@@ -14,7 +14,7 @@ import pytest
 from music_assistant_models.auth import AuthProviderType, UserRole
 from music_assistant_models.errors import InsufficientPermissions, InvalidDataError
 
-from music_assistant.constants import HOMEASSISTANT_SYSTEM_USER
+from music_assistant.constants import CONF_PLAYERS, CONF_PROVIDERS, HOMEASSISTANT_SYSTEM_USER
 from music_assistant.controllers.config import ConfigController
 from music_assistant.controllers.webserver.auth import (
     JOIN_CODE_COOLDOWN_SECONDS,
@@ -46,6 +46,7 @@ from music_assistant.controllers.webserver.helpers.auth_providers import (
     LoginRateLimiter,
 )
 from music_assistant.helpers.datetime import utc
+from music_assistant.helpers.json import json_loads
 from music_assistant.mass import MusicAssistant
 
 

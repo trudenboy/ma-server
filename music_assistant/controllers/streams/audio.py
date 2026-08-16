@@ -232,6 +232,13 @@ class StreamsAudio:
                         and prov_media.provider_instance not in preferred_providers
                     ):
                         continue
+                    # the second pass is there to widen to providers the steering held back,
+                    # not to give a mapping a second chance: without a user provider filter
+                    # the first pass already tried them all, so re-attempting one just buys
+                    # the same failure at the cost of another provider round-trip
+                    attempt = (prov_media.provider_instance, prov_media.item_id)
+                    if attempt in attempted:
+                        continue
                     # guard that provider is available
                     music_prov = mass.get_provider(prov_media.provider_instance)
                     if TYPE_CHECKING:  # avoid circular import
@@ -706,8 +713,8 @@ class StreamsAudio:
         ) as resp:
             resp.raise_for_status()
             raw_data = await resp.read()
-            encoding = resp.charset or await detect_charset(raw_data)
-            master_m3u_data = raw_data.decode(encoding)
+            encoding = await detect_charset(raw_data, preferred=resp.charset)
+            master_m3u_data = raw_data.decode(encoding, errors="replace")
         substreams = parse_m3u(master_m3u_data)
         # There is a chance that we did not get a master playlist with subplaylists
         # but just a single master/sub playlist with the actual audio stream(s)

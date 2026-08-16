@@ -43,6 +43,7 @@ from music_assistant.providers.sendspin.helpers import (
 from music_assistant.providers.sendspin.player import (
     SendspinBasePlayer,
     SendspinPlayer,
+    SendspinSourcePlayer,
     SendspinVisualizerPlayer,
 )
 from music_assistant.providers.sendspin.security import (
