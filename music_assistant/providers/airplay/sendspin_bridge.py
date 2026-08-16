@@ -467,6 +467,8 @@ class SendspinAirPlayBridge:
         """
         if not self._bridge_role:
             return
+        # Both sides hold the device-scale level, so a value read back here compares
+        # equal to the one the role just sent instead of bouncing between the two.
         self._bridge_role.update_player_state(
             volume=self.airplay_player.volume_level,
             muted=bool(self.airplay_player.volume_muted),
@@ -751,10 +753,9 @@ class SendspinAirPlayBridge:
             # Resolving and recording the decision never awaits, so two bridges
             # starting together cannot both find their group still undecided.
             self._use_shared_ptp = self._resolve_shared_ptp()
-            # Connecting is what re-sends VOLUME= to the device, so this is the one
-            # place the sync belongs: a kept process never reaches here and would
-            # otherwise be left playing at a volume nobody told it about.
-            self.airplay_player.sync_volume_state()
+            # A cold connect is the only path that can still act on the latch, so the
+            # release belongs here: a kept process never reaches this point.
+            self.airplay_player.release_foreign_mute_latch()
             await stream.connect(self._use_shared_ptp)
             await stream.wait_for_connection()
             if asyncio.current_task() is not self._airplay_stream_start_task:
@@ -955,10 +956,22 @@ class SendspinAirPlayBridge:
 
     def _on_volume_change(self, volume: int) -> None:
         """Forward volume changes to the AirPlay player."""
+        # The level is already on the AirPlay device's scale, so it is applied as-is.
+        # Where the role is the parent's volume control - a parent with no volume of
+        # its own, while the bridge streams - a volume from Music Assistant arrives
+        # here having passed the controller and been scaled into the parent's min/max
+        # range, so routing it back through cmd_volume_set would scale it a second
+        # time and return over the same route, settling the speaker below the level
+        # that was asked for. A volume a Sendspin controller set never passed the
+        # parent at all: that is an externally changed volume like any other, clamped
+        # to the limits on the parent's state update.
         self.mass.create_task(self.airplay_player.volume_set(volume))
 
     def _on_mute_change(self, muted: bool) -> None:
         """Forward mute changes to the AirPlay player."""
+        # Applied here for the same reason as the volume above. A mute has no scale
+        # to get wrong, but it would come straight back through the role, and an
+        # unchanged mute is not a command the controller drops.
         self.mass.create_task(self.airplay_player.volume_mute(muted))
 
     def _on_bridge_stream_end(self) -> None:

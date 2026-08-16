@@ -9,7 +9,6 @@ import time
 from typing import TYPE_CHECKING, cast
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
-from music_assistant_models.constants import PLAYER_CONTROL_NATIVE
 from music_assistant_models.enums import (
     ConfigEntryType,
     ContentType,
@@ -35,13 +34,11 @@ from .constants import (
     AIRPLAY_HIRES_SAMPLE_RATES,
     AIRPLAY_PCM_FORMAT,
     AIRPLAY_REJOIN_ATTEMPT_DELAYS,
-    ATV_PASSWORD_BIT,
     BASE_PLAYER_FEATURES,
     CONF_AIRPLAY_CREDENTIALS,
     CONF_BUFFER_DEPTH,
     CONF_ENCRYPTION,
     CONF_ENTRY_SYNC_ADJUST_AIRPLAY,
-    CONF_FORCE_RAOP,
     CONF_IGNORE_VOLUME,
     CONF_PAIR_NOW,
     CONF_PAIRING_PASSWORD,
@@ -50,11 +47,17 @@ from .constants import (
     CONF_PASSWORD_INVALID,
     CONF_RAOP_CREDENTIALS,
     CONF_STORED_VOLUME,
+    CONF_STREAMING_MODE,
     FALLBACK_VOLUME,
     LEGACY_PAIRING_BIT,
     PASSWORD_BIT,
     PIN_REQUIRED,
     RAOP_DISCOVERY_TYPE,
+    STREAMING_MODE_AP2_COMPAT,
+    STREAMING_MODE_AP2_NTP,
+    STREAMING_MODE_AP2_PTP,
+    STREAMING_MODE_AUTO,
+    STREAMING_MODE_RAOP,
     StreamingProtocol,
 )
 from .helpers import (
@@ -62,6 +65,7 @@ from .helpers import (
     get_decoded_property,
     is_apple_device,
     is_macos_device,
+    parse_airplay_features,
     player_id_to_mac_address,
     supports_airplay2,
 )
@@ -129,23 +133,71 @@ class AirPlayPlayer(Player):
     def protocol(self) -> StreamingProtocol:
         """Get the streaming protocol to use/prefer for this player."""
         # AirPlay 2 whenever the device can speak it and RAOP is not being forced;
-        # RAOP for legacy receivers (or when the force-RAOP escape hatch is set).
-        if self._is_airplay2_capable and not self._force_raop_active:
+        # RAOP for legacy receivers (or when the RAOP streaming mode is set).
+        if self._is_airplay2_capable and self.streaming_mode != STREAMING_MODE_RAOP:
             return StreamingProtocol.AIRPLAY2
         return StreamingProtocol.RAOP
+
+    @property
+    def streaming_mode(self) -> str:
+        """
+        Return the effective per-player streaming mode.
+
+        Automatic unless the (advanced) streaming-mode setting pins a lane the
+        device actually offers; a stored value the device no longer advertises
+        falls back to Automatic rather than forcing an impossible route.
+        """
+        value = str(self.config.get_value(CONF_STREAMING_MODE, STREAMING_MODE_AUTO))
+        offered = {option.value for option in self.streaming_mode_options}
+        return value if value in offered else STREAMING_MODE_AUTO
+
+    @property
+    def streaming_mode_options(self) -> list[ConfigValueOption]:
+        """
+        Return the streaming-mode options this device can actually offer.
+
+        Every option is an escape from the automatic AirPlay 2 route, gated on
+        the device's own advertisements: the AirPlay 2 lanes need AirPlay 2
+        capability (PTP timing additionally needs the SupportsPTP bit), and
+        legacy RAOP needs an advertised _raop service to fall back to. A
+        RAOP-only device has no alternative lane and keeps Automatic only,
+        which hides the entry entirely. Apple receivers get every lane except
+        NTP timing — they render silence on an NTP-timed realtime stream
+        (hardware-measured). Of their lanes, the compatibility flow and
+        legacy RAOP are the escapes for networks where the PTP ports are
+        blocked; pinning PTP is an explicit choice of the normal lane.
+        """
+        options = [ConfigValueOption(STREAMING_MODE_AUTO, "Automatic (recommended)")]
+        if not self._is_airplay2_capable:
+            return options
+        apple = is_apple_device(self.device_info.manufacturer, self.device_info.model)
+        features = parse_airplay_features(self._advertised_features)
+        if (features >> 41) & 1:
+            options.append(ConfigValueOption(STREAMING_MODE_AP2_PTP, "AirPlay 2 - PTP timing"))
+        if not apple:
+            options.append(ConfigValueOption(STREAMING_MODE_AP2_NTP, "AirPlay 2 - NTP timing"))
+        options.append(
+            ConfigValueOption(STREAMING_MODE_AP2_COMPAT, "AirPlay 2 - compatibility mode")
+        )
+        if self.raop_discovery_info is not None:
+            options.append(ConfigValueOption(STREAMING_MODE_RAOP, "AirPlay 1 (RAOP)"))
+        return options
 
     @property
     def protocol_override(self) -> StreamingProtocol | None:
         """
         Return the user-forced streaming protocol, or None for automatic selection.
 
-        The only override a user can set is the "force RAOP" escape hatch (offered
-        for AirPlay-2-capable non-Apple receivers whose AirPlay 2 implementation
-        misbehaves). Otherwise the cliairplay binary resolves the route itself from
-        the mDNS TXT records (--protocol auto) and the ``protocol`` property above
-        only reflects MA's own planning heuristic (timing, ports).
+        Only the RAOP streaming mode forces the protocol outright; the AirPlay 2
+        modes stay on the AirPlay 2 protocol and pin the flow/timing through the
+        binary's --protocol/--timing arguments instead. Otherwise the cliairplay
+        binary resolves the route itself from the mDNS TXT records (--protocol
+        auto) and the ``protocol`` property above only reflects MA's own planning
+        heuristic (timing, ports).
         """
-        return StreamingProtocol.RAOP if self._force_raop_active else None
+        if self.streaming_mode == STREAMING_MODE_RAOP:
+            return StreamingProtocol.RAOP
+        return None
 
     @property
     def hires_playback_enabled(self) -> bool:
@@ -194,17 +246,13 @@ class AirPlayPlayer(Player):
     @property
     def password_required(self) -> bool:
         """Return if the device announces that it is password protected."""
-        # Three announcement forms, verified against live devices: receivers
-        # publish the classic pw boolean and/or the password bit in sf/flags,
-        # except Apple TVs - they keep the password bit raised at all times, so
-        # for them only the tvOS-specific flags bit counts. Enforcement can also
-        # exist WITHOUT any announcement (stale TXT after the password was
-        # enabled); that case is caught at connect time via password_invalid.
-        flags = self._get_flags()
-        if flags & ATV_PASSWORD_BIT:
-            return True
-        is_apple_tv = (self.device_info.model or "").startswith("AppleTV")
-        if flags & PASSWORD_BIT and not is_apple_tv:
+        # Two announcement forms, verified against live devices (including Apple
+        # TVs, which raise the password bit only while a password is actually
+        # set): receivers publish the password bit in sf/flags and/or the classic
+        # pw boolean. Enforcement can also exist WITHOUT any announcement (stale
+        # TXT after the password was enabled); that case is caught at connect
+        # time via password_invalid.
+        if self._get_flags() & PASSWORD_BIT:
             return True
         if raop_info := self.raop_discovery_info:
             return (raop_info.decoded_properties.get("pw") or "").lower() == "true"
@@ -311,19 +359,22 @@ class AirPlayPlayer(Player):
         # interactive setup flow (run_setup_flow) and stored in the player's setup_data.
         base_entries: list[ConfigEntry] = []
 
-        # Effective RAOP state from the current (stored) force-RAOP setting, so the
+        # Effective RAOP state from the current (stored) streaming mode, so the
         # RAOP-only entries show/hide consistently with it.
-        is_raop = self._force_raop_active or not self._is_airplay2_capable
+        is_raop = self.protocol == StreamingProtocol.RAOP
 
-        # "Force RAOP" escape hatch: only for AirPlay-2-capable non-Apple receivers
-        # (see _force_raop_available). Framed as a per-device workaround for a
-        # misbehaving AirPlay 2 implementation, not a general protocol choice.
-        if self._force_raop_available:
+        # Streaming-mode escape hatch: a per-device pin of the protocol/timing
+        # lane for receivers whose automatic route misbehaves. Only offered
+        # when the device actually has a lane to choose (Apple receivers are
+        # always native AirPlay 2 with PTP and get no entry).
+        mode_options = self.streaming_mode_options
+        if len(mode_options) > 1:
             base_entries.append(
                 ConfigEntry(
-                    key=CONF_FORCE_RAOP,
-                    type=ConfigEntryType.BOOLEAN,
-                    default_value=False,
+                    key=CONF_STREAMING_MODE,
+                    type=ConfigEntryType.STRING,
+                    options=mode_options,
+                    default_value=STREAMING_MODE_AUTO,
                     category="protocol_generic",
                     advanced=True,
                 )
@@ -562,8 +613,8 @@ class AirPlayPlayer(Player):
 
     async def volume_set(self, volume_level: int) -> None:
         """Send VOLUME_SET command to given player."""
-        # Record before sending: the connect-time volume resync reads this attribute,
-        # so a send that suspends first would let the resync push the stale level.
+        # Record before sending: the connect-time volume push reads this attribute,
+        # so a send that suspends first would let that push send the stale level.
         self._attr_volume_level = volume_level
         if self.stream and self.stream.running and self.volume_muted is not True:
             await self.stream.send_cli_command(f"VOLUME={volume_level}")
@@ -813,35 +864,40 @@ class AirPlayPlayer(Player):
             bit_depth=24,
         )
 
-    def sync_volume_state(self, *, adopt_parent_volume: bool = True) -> None:
+    @property
+    def owns_volume(self) -> bool:
         """
-        Sync volume and mute from the parent player if needed.
+        Return True if this output is the resolved owner of its own volume.
 
-        AirPlay players only report their volume level when we are actually streaming to them
-        and we remember the last used/reported volume level in the player config by default
-        but if we have a parent player, that may know better about the current volume level,
-        so we try to sync from that parent player if possible. If another control owns
-        the parent's volume, we play at unity gain instead.
-
-        Both controls are resolved against this player as the rendering output, so which
-        control is deemed to own them does not depend on the parent already pointing at us.
-
-        :param adopt_parent_volume: Set to False when the volume of the stream about to start
-            was explicitly requested by the caller, so the parent's level does not overwrite
-            it. The mute release always runs: a latch left behind by another control would
-            silence the stream regardless of the level it plays at.
+        AirPlay volume is the receiver's own volume: setting it writes through to the
+        device and persists there after the session ends. It may therefore only be set
+        when no other control owns the volume of this output.
         """
-        if not self.protocol_parent_id:
+        if not (parent_id := self.protocol_parent_id):
+            # a standalone AirPlay player has no other interface to defer to
+            return True
+        if not (parent_player := self.mass.players.get_player(parent_id)):
+            return True
+        return self._control_routes_to_self(parent_player.volume_control_for_output(self.player_id))
+
+    def release_foreign_mute_latch(self) -> None:
+        """Clear our mute latch when another control owns the mute of this output."""
+        if not self._attr_volume_muted:
+            # nothing latched, so nothing that could silence this stream
             return
-        parent_player = self.mass.players.get_player(self.protocol_parent_id)
-        if not parent_player:
+        if not (parent_id := self.protocol_parent_id):
             return
-        volume_changed = self._sync_volume_level(
-            parent_player, adopt_parent_volume=adopt_parent_volume
-        )
-        mute_changed = self._sync_mute_state(parent_player)
-        if volume_changed or mute_changed:
-            self.update_state()
+        if not (parent_player := self.mass.players.get_player(parent_id)):
+            return
+        if self._control_routes_to_self(parent_player.mute_control_for_output(self.player_id)):
+            # our own mute, applied through the parent
+            return
+        # The mute belongs to a control that does not own this output (a sibling interface,
+        # the receiver itself, or nothing at all). Our mute is a latch that only an explicit
+        # unmute clears, so leaving it set would report a mute we do not own and turn the
+        # next volume command into a silent one.
+        self._attr_volume_muted = False
+        self.update_state()
 
     async def on_config_updated(self) -> None:
         """Handle logic when the player config is updated."""
@@ -900,76 +956,6 @@ class AirPlayPlayer(Player):
             return
         progress = int(metadata.corrected_elapsed_time or 0)
         self.mass.create_task(self.stream.send_metadata(progress, metadata))
-
-    def _sync_volume_level(self, parent_player: Player, *, adopt_parent_volume: bool) -> bool:
-        """
-        Adopt the parent's volume level if it owns this output, return True if changed.
-
-        :param parent_player: The parent player to resolve the volume control against.
-        :param adopt_parent_volume: False to keep our own level where we would otherwise
-            adopt the parent's. The unity gain reset still applies: a control that owns
-            the volume of this output attenuates on the device itself.
-        """
-        volume_control = parent_player.volume_control_for_output(self.player_id)
-        if volume_control == PLAYER_CONTROL_NATIVE:
-            # Native parent volume is on the receiver/amplifier scale.
-            # Keep the AirPlay child volume learned from DACP feedback instead.
-            return False
-        if not self._control_routes_to_self(volume_control):
-            # Another control (e.g. DLNA/Chromecast hardware volume) owns the parent's
-            # volume; play at unity gain so we don't attenuate on top of it.
-            # Not persisted, so the last software volume survives a switch back.
-            if self._attr_volume_level == 100:
-                return False
-            self._attr_volume_level = 100
-            return True
-        if not adopt_parent_volume:
-            return False
-        if parent_player.state.volume_level is None:
-            return False
-        if parent_player.state.volume_level == 0:
-            # A parent volume of 0 usually means the (idle) sibling interface
-            # feeding the parent doesn't know the real device volume, e.g. the
-            # cast side of the same device reports 0 while in standby. Adopting
-            # it would start the stream hard muted, so keep our own last known
-            # volume instead.
-            return False
-        # The parent's state volume is logical (0-100) while a volume command reaches
-        # this player already scaled into the parent's min/max range, so the two are
-        # compared on the parent's scale: a level that already reads back as the
-        # parent's is left alone rather than re-derived, which for a range that does
-        # not divide evenly would round it a step further away on every stream.
-        parent_id = parent_player.player_id
-        if (
-            self._attr_volume_level is not None
-            and self.mass.players.scale_volume_from_device(parent_id, self._attr_volume_level)
-            == parent_player.state.volume_level
-        ):
-            return False
-        self._attr_volume_level = self.mass.players.scale_volume_to_device(
-            parent_id, parent_player.state.volume_level
-        )
-        self.mass.config.set_raw_player_config_value(
-            self.player_id, CONF_STORED_VOLUME, self._attr_volume_level
-        )
-        return True
-
-    def _sync_mute_state(self, parent_player: Player) -> bool:
-        """Release a mute owned by another control, return True if changed."""
-        if not self._attr_volume_muted:
-            # nothing latched, so nothing that could silence this stream
-            return False
-        if self._control_routes_to_self(parent_player.mute_control_for_output(self.player_id)):
-            # our own mute, applied through the parent
-            return False
-        # The mute belongs to a control that does not own this output (a sibling interface,
-        # the receiver itself, or nothing at all). Our mute is a latch that only an explicit
-        # unmute clears, so leaving it set would start the stream silent and swallow every
-        # volume command after it. The parent's mute state is deliberately not adopted here:
-        # it is resolved through the ambient control, which is the very thing that may be
-        # pointing at another interface.
-        self._attr_volume_muted = False
-        return True
 
     def _control_routes_to_self(self, control: str) -> bool:
         """Return True if the given (resolved) control routes to this player."""
@@ -1038,26 +1024,6 @@ class AirPlayPlayer(Player):
         if not self.airplay_discovery_info:
             return False
         return supports_airplay2(self._advertised_features) or not self.raop_discovery_info
-
-    @property
-    def _force_raop_available(self) -> bool:
-        """
-        Return whether the "force RAOP" escape hatch applies to this device.
-
-        Offered only for AirPlay-2-capable non-Apple receivers that also advertise
-        a RAOP service to fall back to. Genuine Apple devices are always AirPlay 2,
-        while RAOP-only and AirPlay-2-only devices have nothing to force.
-        """
-        return (
-            self._is_airplay2_capable
-            and self.raop_discovery_info is not None
-            and not is_apple_device(self.device_info.manufacturer, self.device_info.model)
-        )
-
-    @property
-    def _force_raop_active(self) -> bool:
-        """Return whether RAOP is being forced through the escape-hatch toggle."""
-        return self._force_raop_available and bool(self.config.get_value(CONF_FORCE_RAOP, False))
 
     async def _run_streaming_pairing(
         self, session: SetupSession, collected: dict[str, ConfigValueType]
