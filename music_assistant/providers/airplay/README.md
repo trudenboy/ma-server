@@ -112,16 +112,27 @@ to target) the same feature-bit test the binary uses is mirrored in
 `supports_airplay2()`: any device advertising AirPlay 2 gets AirPlay 2, RAOP is
 only used for devices that do not support it.
 
-### Force RAOP (escape hatch)
+### Streaming mode (escape hatch)
 
-The only user override is the advanced per-player `force_raop` boolean. It is
-offered **only** for AirPlay-2-capable non-Apple receivers that also advertise a
-RAOP service — an escape hatch for a device whose AirPlay 2 implementation
-misbehaves. When enabled, the stream is sent with `--protocol raop`.
+The only user override is the advanced per-player `streaming_mode` selector. It
+pins the protocol/timing lane for a device whose automatic route misbehaves, and
+each option is offered only when the device can actually use it: the AirPlay 2
+lanes need AirPlay 2 support, legacy RAOP needs an advertised `_raop` service,
+and Apple receivers get every lane except NTP timing (they render silence on an
+NTP-timed realtime stream). The modes map
+onto the binary's `--protocol`/`--timing` arguments. Music Assistant writes the
+setting itself in exactly one case: a device that advertises PTP but is measured
+never answering a clock probe (AirPlay 2 video-class TVs) is switched to
+"AirPlay 2 - NTP timing" and playback restarts on it; setting it back to
+Automatic retries PTP.
 
-The toggle is deliberately not offered where it would be meaningless: genuine
-Apple devices (HomePod / Apple TV) are always AirPlay 2 (a stray persisted value
-is ignored), and RAOP-only / AirPlay-2-only devices have nothing to force.
+The selector is hidden only for RAOP-only devices (no alternative lane; a
+stray persisted value is ignored). Apple devices (HomePod / Apple TV) get
+every lane except NTP timing — they render silence on an NTP-timed realtime
+stream (hardware-measured) — leaving pinned PTP, the compatibility flow and
+legacy RAOP as escape hatches for networks where the PTP ports are blocked.
+AirPlay-2-only devices get the AirPlay 2 lanes without RAOP: they are the
+class the NTP escape exists for.
 
 ## Discovery and Player Setup
 
@@ -334,6 +345,12 @@ Handled in `_handle_dacp_request()` in [provider.py](provider.py):
 | `device-prevent-playback=1` | Device switched to another source or powered off |
 | `device-prevent-playback=0` | Device ready for playback again |
 
+### Volume Ownership
+
+An AirPlay volume command sets the receiver's own volume, and that level stays behind on the device after the session ends. Music Assistant therefore only sends one when nothing else owns the volume of this output: on a device that is also reachable through a native provider or another protocol (a Sonos speaker, an AV receiver), the stream simply plays at the level the device is already set to, and volume stays with that provider.
+
+A volume is still sent when the AirPlay output itself is the resolved volume control, when a mute has to travel with the stream, and when a session asks for a specific level (an announcement).
+
 ### Volume Feedback
 
 Devices can report their own volume changes back over DACP; Music Assistant applies them unless `ignore_volume` is set. Genuine Apple devices are auto-set to ignore these reports (they manage volume internally).
@@ -535,7 +552,7 @@ keeps their exposed player id stable and their Universal Player merging intact.
 ## Configuration Options
 
 ### Protocol Selection
-- **`force_raop`**: Advanced per-player escape hatch to force the legacy RAOP protocol (default: off). Only offered for AirPlay 2-capable non-Apple devices that also advertise RAOP; route selection is otherwise fully automatic (the binary resolves it from the mDNS TXT)
+- **`streaming_mode`**: Advanced per-player pin of the protocol/timing lane (default: Automatic). Options are offered per advertised capability; route selection is otherwise fully automatic (the binary resolves it from the mDNS TXT). Auto-set to NTP timing when the device is measured never answering the PTP clock
 
 ### General
 - **`password`**: Device password, stored encrypted (hidden). It is entered through the player's setup flow, not the settings form: a device that announces password protection without one stored - or that rejects the stored one - is marked as needing setup, which offers the password step again

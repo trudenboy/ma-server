@@ -126,7 +126,9 @@ class AnnouncementsMixin:
 
         async def _handle_cmd_stop(self, player_id: str) -> None: ...
 
-        async def _handle_cmd_volume_set(self, player_id: str, volume_level: int) -> None: ...
+        async def _handle_cmd_volume_set(
+            self, player_id: str, volume_level: int, *, record_target: bool = True
+        ) -> None: ...
 
         async def _handle_cmd_volume_mute(
             self, player: Player, mute_control: str, muted: bool
@@ -488,7 +490,8 @@ class AnnouncementsMixin:
             async with TaskManager(self.mass) as tg:
                 for volume_player_id, prev_volume in prev_volumes.items():
                     tg.create_task(self._handle_cmd_volume_set(volume_player_id, prev_volume))
-            # restore mute after the volume, because setting a volume unmutes the player again
+            # restore mute after the volume: a fake mute is simulated with the volume itself,
+            # so it only sticks once the level it hides behind is back in place
             async with TaskManager(self.mass) as tg:
                 for muted_player in muted_players:
                     tg.create_task(self._set_announcement_mute(muted_player, True))
@@ -740,7 +743,8 @@ class AnnouncementsMixin:
         async with TaskManager(self.mass) as tg:
             for volume_player_id, prev_volume in prev_volumes.items():
                 tg.create_task(self._handle_cmd_volume_set(volume_player_id, prev_volume))
-        # restore mute after the volume, because setting a volume unmutes the player again
+        # restore mute after the volume: a fake mute is simulated with the volume itself,
+        # so it only sticks once the level it hides behind is back in place
         async with TaskManager(self.mass) as tg:
             for muted_player_id in prev_muted:
                 if not (muted_player := self.get_player(muted_player_id)):
@@ -843,7 +847,11 @@ class AnnouncementsMixin:
         :param announce_player: The player (or linked protocol) that plays the announcement.
         """
         volume_control = player.volume_control_for_output(announce_player.player_id)
-        if volume_control in (PLAYER_CONTROL_NATIVE, announce_player.player_id):
+        if volume_control == PLAYER_CONTROL_NATIVE:
+            # A native volume lives on the player itself, so only its own output can
+            # apply it: a linked protocol rendering the audio has no way to reach it.
+            return announce_player.player_id == player.player_id
+        if volume_control == announce_player.player_id:
             # the volume lives on the device the announcing output talks to
             return True
         # a bridge player riding on the announcing output forwards its volume to it
