@@ -24,7 +24,6 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import (
-    ActionUnavailable,
     LoginFailed,
     MediaNotFoundError,
     MusicAssistantError,
@@ -697,26 +696,15 @@ class YandexYnisonProvider(PluginProvider):
                         current_target, str(self._audio_source.uri)
                     )
                 msg = f"Player switching is disabled; source must remain on {current_target}"
-                raise ActionUnavailable(msg)
+                # NOTE: Using RuntimeError as a temporary workaround until
+                # music-assistant/server updates the AudioSource lifecycle
+                # contract to accept ActionUnavailable in addition to RuntimeError
+                # (see https://github.com/music-assistant/server/pull/5589#discussion_r3794988694).
+                # Once MA's streams controller catches both exceptions, this should
+                # be changed to: raise ActionUnavailable(msg)
+                raise RuntimeError(msg)
 
         if self._effective_stream_mode == STREAM_MODE_MAX_QUALITY:
-            track_id = self._pending_restart_track_id or (
-                self._ynison.state.current_track_id if self._ynison else None
-            )
-            details = self._prefetched_stream_details.get(track_id or "")
-            if details is not None:
-                signature = self._effective_signature_for_player(details, player_id)
-                self._apply_dynamic_signature(signature)
-                self._dynamic_session_signature = signature
-                self.logger.info(
-                    "Dynamic source selected on %s: source=%s effective=%s/%dHz/%dbit/%dch",
-                    player_id,
-                    details.audio_format,
-                    signature[0].value,
-                    signature[1],
-                    signature[2],
-                    signature[3],
-                )
             if not self._format_restart_requested:
                 self._pending_restart_track_id = None
                 self._dynamic_target_track_id = None
@@ -1835,6 +1823,10 @@ class YandexYnisonProvider(PluginProvider):
         self._remember_stream_details(track_id, details)
         current = self._dynamic_session_signature
         if signature == current:
+            latest_progress = progress_ms
+            if self._ynison and self._ynison.state.current_track_id == track_id:
+                latest_progress = self._ynison.state.progress_ms
+            self._seek_position_ms = latest_progress
             self.logger.info(
                 "Dynamic track %s continues current session with %s/%dHz/%dbit/%dch",
                 track_id,
@@ -1889,34 +1881,46 @@ class YandexYnisonProvider(PluginProvider):
         generation: int,
     ) -> None:
         """Launch a dynamic session only after resolving the real source format."""
-        details = await self._get_dynamic_stream_details(track_id, generation)
-        if generation != self._dynamic_generation:
-            self.logger.debug("Discarding stale dynamic launch for %s", track_id)
-            return
-        if self._ynison and (
-            self._ynison.state.is_paused or self._ynison.state.current_track_id != track_id
-        ):
-            self.logger.debug("Cancelling obsolete dynamic launch for %s", track_id)
-            return
+        launched = False
+        try:
+            details = await self._get_dynamic_stream_details(track_id, generation)
+            if generation != self._dynamic_generation:
+                self.logger.debug("Discarding stale dynamic launch for %s", track_id)
+                return
+            if self._ynison and (
+                self._ynison.state.is_paused or self._ynison.state.current_track_id != track_id
+            ):
+                self.logger.debug("Cancelling obsolete dynamic launch for %s", track_id)
+                return
 
-        self._remember_stream_details(track_id, details)
-        signature = self._effective_signature_for_player(details, queue_id)
-        self._apply_dynamic_signature(signature)
-        self._dynamic_session_signature = signature
-        latest_progress = progress_ms
-        if self._ynison and self._ynison.state.current_track_id == track_id:
-            latest_progress = self._ynison.state.progress_ms
-        self._seek_position_ms = latest_progress
-        self.logger.info(
-            "Starting dynamic session for %s: source=%s effective=%s/%dHz/%dbit/%dch",
-            track_id,
-            details.audio_format,
-            signature[0].value,
-            signature[1],
-            signature[2],
-            signature[3],
-        )
-        await self.mass.player_queues.play_media(queue_id, str(self._audio_source.uri))
+            self._remember_stream_details(track_id, details)
+            signature = self._effective_signature_for_player(details, queue_id)
+            self._apply_dynamic_signature(signature)
+            self._dynamic_session_signature = signature
+            latest_progress = progress_ms
+            if self._ynison and self._ynison.state.current_track_id == track_id:
+                latest_progress = self._ynison.state.progress_ms
+            self._seek_position_ms = latest_progress
+            self.logger.info(
+                "Starting dynamic session for %s: source=%s effective=%s/%dHz/%dbit/%dch",
+                track_id,
+                details.audio_format,
+                signature[0].value,
+                signature[1],
+                signature[2],
+                signature[3],
+            )
+            await self.mass.player_queues.play_media(queue_id, str(self._audio_source.uri))
+            launched = True
+        finally:
+            if (
+                not launched
+                and generation == self._dynamic_generation
+                and self._dynamic_target_track_id == track_id
+            ):
+                self._dynamic_target_track_id = None
+                if self._current_streaming_track_id is None and self._active_player_id == queue_id:
+                    self._active_player_id = None
 
     async def _prefetch_next_dynamic_track(
         self,

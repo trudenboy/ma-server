@@ -17,7 +17,6 @@ from music_assistant_models.enums import (
     ProviderType,
 )
 from music_assistant_models.errors import (
-    ActionUnavailable,
     LoginFailed,
     MediaNotFoundError,
     PlayerCommandFailed,
@@ -465,7 +464,7 @@ class TestSourceSelection:
         provider._default_player_id = "default-player"
         mass.players.get_player.return_value = MagicMock()
 
-        with pytest.raises(ActionUnavailable, match="Player switching is disabled"):
+        with pytest.raises(RuntimeError, match="Player switching is disabled"):
             await provider.on_source_selected("main", "other-player", "other-player", "session_1")
 
         # Should have redirected to the configured default via play_media
@@ -492,7 +491,7 @@ class TestSourceSelection:
         mass.players.get_player.return_value = MagicMock()
 
         for _ in range(3):
-            with pytest.raises(ActionUnavailable, match="Player switching is disabled"):
+            with pytest.raises(RuntimeError, match="Player switching is disabled"):
                 await provider.on_source_selected(
                     "main", "other-player", "other-player", "session_1"
                 )
@@ -3104,6 +3103,12 @@ class TestDynamicSessionCoordinator:
         provider = _make_provider()
         self._enable(provider, [(44_100, 16), (96_000, 24)])
         provider._dynamic_session_signature = (ContentType.PCM_S24LE, 96_000, 24, 2)
+        provider._ynison = _mock_ynison(
+            _make_ynison_state(
+                progress_ms=4_321,
+                playable_list=[{"playable_id": "track2"}],
+            )
+        )
         _stub_attr(
             provider,
             "_get_dynamic_stream_details",
@@ -3115,6 +3120,7 @@ class TestDynamicSessionCoordinator:
         provider.mass.player_queues.play_media.assert_not_awaited()
         assert provider._track_changed_event.is_set()
         assert provider._pending_restart_track_id is None
+        assert provider._seek_position_ms == 4_321
 
     async def test_stale_generation_cannot_start_session(self) -> None:
         """A completed fetch from an obsolete track/device generation must be discarded."""
@@ -3214,10 +3220,12 @@ class TestDynamicSessionCoordinator:
         with pytest.raises(RuntimeError, match="bug"):
             provider._effective_signature_for_player(self._details(96_000, 24), "player1")
 
-    async def test_on_source_selected_recalculates_for_actual_consumer(self) -> None:
-        """The callback must replace a target guess before MA requests StreamDetails."""
+    async def test_on_source_selected_keeps_advertised_pcm_for_actual_consumer(self) -> None:
+        """Selection must not change PCM after direct consumers fixed StreamDetails."""
         provider = _make_provider()
         self._enable(provider, [(44_100, 16), (96_000, 24)])
+        provider._dynamic_session_signature = (ContentType.PCM_S24LE, 96_000, 24, 2)
+        provider._apply_dynamic_signature(provider._dynamic_session_signature)
         provider._pending_restart_track_id = "track2"
         provider._prefetched_stream_details["track2"] = self._details(96_000, 24)
         actual = MagicMock()
@@ -3229,7 +3237,7 @@ class TestDynamicSessionCoordinator:
         await provider.on_source_selected("main", "bridge1", "player1", "session2")
 
         details = await provider.get_stream_details("main", MediaType.AUDIO_SOURCE)
-        assert details.audio_format.sample_rate == 48_000
+        assert details.audio_format.sample_rate == 96_000
         assert details.audio_format.bit_depth == 24
         assert provider._pending_restart_track_id is None
 
@@ -3253,6 +3261,41 @@ class TestDynamicSessionCoordinator:
         await provider._launch_dynamic_session("track1", 100, "player1", 7)
 
         assert observed == [(96_000, 9_876)]
+
+    async def test_failed_initial_dynamic_launch_restores_retryable_state(self) -> None:
+        """A failed launch must not suppress a retry for the same track."""
+        provider = _make_provider()
+        self._enable(provider, [(96_000, 24)])
+        provider._dynamic_target_track_id = "track1"
+        _stub_attr(
+            provider,
+            "_get_dynamic_stream_details",
+            AsyncMock(side_effect=MediaNotFoundError("missing")),
+        )
+
+        with pytest.raises(MediaNotFoundError, match="missing"):
+            await provider._launch_dynamic_session("track1", 100, "player1", 7)
+
+        assert provider._dynamic_target_track_id is None
+        assert provider._active_player_id is None
+
+    async def test_failed_dynamic_play_media_restores_retryable_state(self) -> None:
+        """A launch rejected by the player queue must leave playback stopped."""
+        provider = _make_provider()
+        self._enable(provider, [(96_000, 24)])
+        provider._dynamic_target_track_id = "track1"
+        _stub_attr(
+            provider,
+            "_get_dynamic_stream_details",
+            AsyncMock(return_value=self._details(96_000, 24)),
+        )
+        provider.mass.player_queues.play_media.side_effect = PlayerCommandFailed("unavailable")
+
+        with pytest.raises(PlayerCommandFailed, match="unavailable"):
+            await provider._launch_dynamic_session("track1", 100, "player1", 7)
+
+        assert provider._dynamic_target_track_id is None
+        assert provider._active_player_id is None
 
     async def test_next_track_prefetch_uses_immediate_playable_successor(self) -> None:
         """Prefetch must use index + 1 and retain current plus next details only."""
