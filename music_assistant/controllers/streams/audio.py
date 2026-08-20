@@ -75,6 +75,8 @@ from music_assistant.controllers.streams.constants import (
     CACHE_CATEGORY_RESOLVED_RADIO_URL,
     CACHE_PROVIDER,
     CONF_ALLOW_CROSSFADE_SAME_ALBUM,
+    STREAMDETAILS_INBAND_TITLE_HANDOFF_KEY,
+    STREAMDETAILS_INBAND_TITLE_KEY,
 )
 from music_assistant.controllers.streams.ogg_handler import get_chained_ogg_stream
 from music_assistant.controllers.streams.smart_fades import SmartFadesMixer
@@ -406,7 +408,9 @@ class StreamsAudio:
                         )
 
             audio_source = get_chained_ogg_stream(
-                mass, streamdetails.path, metadata_callback=_on_inband_metadata
+                mass,
+                streamdetails.path,
+                metadata_callback=partial(self._handle_inband_metadata, streamdetails),
             )
             seek_position = 0  # seeking not possible on radio streams
         elif stream_type == StreamType.HLS:
@@ -575,7 +579,7 @@ class StreamsAudio:
             ):
                 # url is playlist, we need to unfold it
                 try:
-                    substreams = await fetch_playlist(mass, url)
+                    substreams = await parse_playlist_data(url, playlist_data, playlist_charset)
                     if not any(x for x in substreams if x.length):
                         for line in substreams:
                             if not line.is_url:
@@ -1492,10 +1496,6 @@ class StreamsAudio:
                     self.mass.player_queues.prepare_next_audio_buffer(queue_item.queue_id)
                 yield chunk
                 del chunk
-            # if we received no audio and the buffer has a producer error,
-            # the error was swallowed by the FFmpeg stdin feeder - re-raise it
-            if bytes_received == 0 and audio_buffer.has_error:
-                raise AudioError("Failed to stream audio") from audio_buffer._producer_error
             finished = True
         except AudioError as err:
             streamdetails.stream_error = True
@@ -2122,6 +2122,26 @@ class StreamsAudio:
                     bytes_written += pcm_sample_size
                     crossfade_buffer = crossfade_buffer[pcm_sample_size:]
 
+            # A source error after partial audio must not look like a completed item.
+            # Progress reporting skips items with stream_error, so the item is not
+            # marked played; move on to the next queue item like the zero-audio path.
+            if first_chunk_received and queue_track.streamdetails.stream_error:
+                if _superseded():
+                    return
+                self.logger.warning(
+                    "Track %s (%s) on queue %s aborted by a stream error - skipping",
+                    queue_track.name,
+                    queue_track.streamdetails.uri,
+                    queue.display_name,
+                )
+                # the audio sent so far will still play out; keep the play log entry
+                # honest about how much of this item was actually streamed
+                play_log_entry.seconds_streamed = bytes_written / pcm_sample_size
+                if last_fadeout_part:
+                    # crossfade into this item never happened — undo the eager seek_position
+                    queue_track.streamdetails.seek_position = raw_seek_position
+                continue
+
             #### HANDLE END OF TRACK
             if not first_chunk_received:
                 self.logger.warning(
@@ -2132,6 +2152,8 @@ class StreamsAudio:
                 )
                 queue_track.streamdetails.stream_error = True
                 play_log_entry.seconds_streamed = 0
+                if last_fadeout_part:
+                    queue_track.streamdetails.seek_position = raw_seek_position
                 continue
             if last_fadeout_part:
                 # edge case: we did not get enough data to make the crossfade

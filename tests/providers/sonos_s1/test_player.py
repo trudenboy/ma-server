@@ -31,7 +31,7 @@ def sonos_player() -> SonosPlayer:
     """Create a SonosPlayer with a mocked soco device and provider."""
     provider = MagicMock()
     provider.mass.streams.resolve_stream_url = AsyncMock(return_value=STREAM_URL)
-    return SonosPlayer(provider=provider, soco=_make_soco())
+    return SonosPlayer(provider=provider, soco=_make_soco(), fixed_volume=False)
 
 
 def _make_media() -> PlayerMedia:
@@ -81,7 +81,7 @@ async def _subscribe_with_failing_speaker(player: SonosPlayer) -> None:
 
 async def test_failed_subscribe_marks_the_speaker_offline() -> None:
     """A failed subscription must take the speaker offline and release the lock."""
-    player = SonosPlayer(provider=MagicMock(), soco=_make_soco())
+    player = SonosPlayer(provider=MagicMock(), soco=_make_soco(), fixed_volume=False)
 
     await _subscribe_with_failing_speaker(player)
 
@@ -91,7 +91,7 @@ async def test_failed_subscribe_marks_the_speaker_offline() -> None:
 
 async def test_speaker_can_resubscribe_after_a_failed_subscribe() -> None:
     """A speaker that failed to subscribe must still be able to subscribe later."""
-    player = SonosPlayer(provider=MagicMock(), soco=_make_soco())
+    player = SonosPlayer(provider=MagicMock(), soco=_make_soco(), fixed_volume=False)
     await _subscribe_with_failing_speaker(player)
 
     with patch.object(player, "_subscribe_target", AsyncMock()) as subscribe_target:
@@ -103,7 +103,7 @@ async def test_speaker_can_resubscribe_after_a_failed_subscribe() -> None:
 
 async def test_speaker_taken_offline_mid_subscribe_keeps_no_subscriptions() -> None:
     """A speaker that goes offline while subscribing must not keep the subscriptions it created."""
-    player = SonosPlayer(provider=MagicMock(), soco=_make_soco())
+    player = SonosPlayer(provider=MagicMock(), soco=_make_soco(), fixed_volume=False)
     subscribing = asyncio.Event()
     speaker_responds = asyncio.Event()
 
@@ -134,7 +134,7 @@ async def test_speaker_taken_offline_mid_subscribe_keeps_no_subscriptions() -> N
 
 async def test_speaker_going_offline_is_not_resubscribed_halfway() -> None:
     """No new subscriptions may be created while a speaker is still going offline."""
-    player = SonosPlayer(provider=MagicMock(), soco=_make_soco())
+    player = SonosPlayer(provider=MagicMock(), soco=_make_soco(), fixed_volume=False)
     unsubscribing = asyncio.Event()
     speaker_responds = asyncio.Event()
 

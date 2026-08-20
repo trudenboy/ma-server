@@ -307,7 +307,6 @@ class SendspinProvider(PlayerProvider):
         self._manual_ip_config = tuple(address for address in manual_ip_config if address.strip())
         self._pending_unregisters = {}
         self._bridge_identifiers = {}
-        self._headless_client_ids: set[str] = set()
         self._bridge_underlying_players = {}
         self._bridge_static_delay_defaults = {}
         self._bridge_player_types: dict[str, PlayerType] = {}
@@ -913,7 +912,7 @@ class SendspinProvider(PlayerProvider):
     async def _handle_client_added(self, client_id: str, event_version: int) -> None:  # noqa: PLR0915
         """Handle a new client connection asynchronously."""
         try:
-            if self._unloading or client_id in self._headless_client_ids:
+            if self._unloading:
                 return
             sendspin_client = self.server_api.get_client(client_id)
             if sendspin_client is None:
@@ -1000,9 +999,6 @@ class SendspinProvider(PlayerProvider):
         """Handle a client disconnection asynchronously."""
         try:
             if self._unloading:
-                return
-            if client_id in self._headless_client_ids:
-                self._headless_client_ids.discard(client_id)
                 return
             self.logger.debug("Client %s disconnected", client_id)
             if not self._is_current_client_event(client_id, event_version):

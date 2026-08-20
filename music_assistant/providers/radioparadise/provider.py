@@ -16,8 +16,12 @@ from music_assistant_models.media_items import (
     Radio,
     SearchResults,
 )
-from music_assistant_models.streamdetails import StreamDetails
+from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 
+from music_assistant.controllers.streams.constants import (
+    STREAMDETAILS_INBAND_TITLE_HANDOFF_KEY,
+    STREAMDETAILS_INBAND_TITLE_KEY,
+)
 from music_assistant.models.music_provider import MusicProvider
 
 from . import parsers
@@ -94,6 +98,7 @@ class RadioParadiseProvider(MusicProvider):
             duration=0,
             stream_metadata_update_callback=self._update_stream_metadata,
             stream_metadata_update_interval=STREAM_METADATA_UPDATE_INTERVAL,
+            data={STREAMDETAILS_INBAND_TITLE_HANDOFF_KEY: True},
         )
 
         # Set initial metadata if available so the first frame the listener sees
@@ -191,6 +196,44 @@ class RadioParadiseProvider(MusicProvider):
         # now_playing returns flat song data; no next song or block data is available.
         return {"current": data, "next": None, "block_data": None}
 
+    async def _match_icy_title(
+        self, channel_id: str, icy_title: str, data: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """
+        Resolve an in-band ICY title against (cached) play API block data.
+
+        :param channel_id: Radio Paradise channel ID (0-5).
+        :param icy_title: Cleaned in-band stream title ("Artist - Title" form).
+        :param data: StreamDetails scratch dict holding the cached block.
+        :returns: Metadata dict in the shape of _get_channel_metadata, or None
+            when the title cannot be resolved to a block song.
+        """
+        block = data.get("block_data")
+        if block and (song := find_song_by_stream_title(block.get("song", {}), icy_title)):
+            return {
+                "current": song,
+                "next": get_next_song(block["song"], song),
+                "block_data": block,
+            }
+        fresh = await self._fetch_json(f"{PLAY_API_URL}{channel_id}", channel_id)
+        if not fresh or "song" not in fresh:
+            return None
+        song = find_song_by_stream_title(fresh["song"], icy_title)
+        if song is None:
+            # The API served a stale or future block; keep the cached one.
+            self.logger.debug(
+                "Play API block for channel %s does not contain current title %r; discarding",
+                channel_id,
+                icy_title,
+            )
+            return None
+        data["block_data"] = fresh
+        return {
+            "current": song,
+            "next": get_next_song(fresh["song"], song),
+            "block_data": fresh,
+        }
+
     async def _update_stream_metadata(
         self, stream_details: StreamDetails, elapsed_time: int
     ) -> None:
@@ -206,6 +249,7 @@ class RadioParadiseProvider(MusicProvider):
         item_id = stream_details.item_id
         if stream_details.data is None:
             stream_details.data = {}
+        data = stream_details.data
 
         try:
             metadata = await self._get_channel_metadata(item_id)

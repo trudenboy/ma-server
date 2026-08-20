@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 
 from music_assistant_models.enums import ContentType
+from music_assistant_models.errors import AudioError
 from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.helpers.ffmpeg import FFMpeg

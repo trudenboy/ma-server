@@ -186,7 +186,7 @@ class TracksController(MediaControllerBase[Track]):
         track.artists = UniqueList(track_artists)
         return track
 
-    async def library_items(
+    async def library_items(  # noqa: PLR0913
         self,
         favorite: bool | None = None,
         search: str | None = None,
@@ -205,6 +205,9 @@ class TracksController(MediaControllerBase[Track]):
         :param order_by: Order by field (e.g. 'sort_name', 'timestamp_added').
         :param provider: Filter by provider instance ID (single string or list).
         """
+        reachable_via = self._resolve_reachable_via(reachable_via)
+        if reachable_via is not None and not reachable_via:
+            return []
         extra_query_params: dict[str, Any] = {}
         extra_query_parts: list[str] = []
         extra_join_parts: list[str] = []
@@ -246,7 +249,7 @@ class TracksController(MediaControllerBase[Track]):
             limit=limit,
             offset=offset,
             order_by=order_by,
-            provider_filter=self._ensure_provider_filter(provider),
+            provider_filter=self._provider_filter_considering_reachability(provider, reachable_via),
             extra_query_parts=extra_query_parts,
             extra_query_params=extra_query_params,
             extra_join_parts=extra_join_parts,
@@ -278,7 +281,9 @@ class TracksController(MediaControllerBase[Track]):
                 genre_ids=genre,
                 limit=limit,
                 order_by=order_by,
-                provider_filter=self._ensure_provider_filter(provider),
+                provider_filter=self._provider_filter_considering_reachability(
+                    provider, reachable_via
+                ),
                 extra_query_parts=extra_query_parts,
                 extra_query_params=extra_query_params,
                 extra_join_parts=extra_join_parts,
@@ -581,7 +586,7 @@ class TracksController(MediaControllerBase[Track]):
                     fallback=search_result_item,
                 )
                 if compare_track(base_track, prov_track, strict=strict, track_albums=ref_albums):
-                    matches.extend(search_result_item.provider_mappings)
+                    matches.extend(prov_track.provider_mappings)
 
         if not matches:
             self.logger.debug(
@@ -665,7 +670,12 @@ class TracksController(MediaControllerBase[Track]):
         return db_id
 
     async def _update_library_item(
-        self, item_id: str | int, update: Track, overwrite: bool = False
+        self,
+        item_id: str | int,
+        update: Track,
+        overwrite: bool = False,
+        *,
+        set_album: bool = True,
     ) -> None:
         """Update Track record in the database, merging data."""
         db_id = int(item_id)  # ensure integer
@@ -708,7 +718,7 @@ class TracksController(MediaControllerBase[Track]):
         artists = update.artists if overwrite else cur_item.artists + update.artists
         await self._set_track_artists(db_id, artists, overwrite=overwrite)
         # update/set track album
-        if update.album:
+        if update.album and set_album:
             await self._set_track_album(
                 db_id=db_id,
                 album=update.album,
@@ -717,6 +727,10 @@ class TracksController(MediaControllerBase[Track]):
                 overwrite=overwrite,
             )
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
+
+    async def _update_library_item_for_merge(self, item_id: int, update: Track) -> None:
+        """Merge track model state without replacing existing album relations."""
+        await self._update_library_item(item_id, update, set_album=False)
 
     async def _set_track_album(
         self,

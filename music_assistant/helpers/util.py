@@ -656,12 +656,12 @@ def parse_title_and_version(title: str, track_version: str | None = None) -> tup
         # Clean up dangling hyphens and extra spaces
         title = re.sub(r"\s*-\s*$", "", title)
         title = re.sub(r"\s+", " ", title).strip()
-        return title, version
+        return title, track_version or ""
 
     # Strip video/audio suffixes like "(Official Video)"
     if strip_for_display:
         title = _DISPLAY_STRIP_PATTERN.sub("", title).strip()
-        return title, version
+        return title, track_version or ""
 
     # Standard version parsing
     for parts in (
@@ -700,10 +700,14 @@ def parse_title_and_version(title: str, track_version: str | None = None) -> tup
             for version_str in VERSION_PARTS:
                 if version_str in clean_part:
                     # Preserve original casing (and any nested brackets) for output
-                    version = _strip_outer_markers(title_part)
+                    version_part = _strip_outer_markers(title_part)
+                    if version_part.casefold() not in version_keys:
+                        version_parts.append(version_part)
+                        version_keys.add(version_part.casefold())
                     title = title.replace(title_part, "").strip()
-                    return title, version
-    return title, version
+                    break
+    title = re.sub(r"\s{2,}", " ", title).strip()
+    return title, " ".join(version_parts)
 
 
 def _balanced_bracket_groups(text: str, open_char: str, close_char: str) -> list[str]:
@@ -1572,12 +1576,13 @@ async def detect_charset(data: bytes, fallback: str = "utf-8", preferred: str | 
         return "utf-8-sig"
 
     if preferred:
-        # a declared charset is only worth anything if Python has a codec for it:
-        # servers do send misspelled or plain made-up names in their Content-Type
+        # a declared charset is only worth anything if Python can actually decode text with
+        # it: servers do send misspelled or plain made-up names in their Content-Type, and a
+        # handful of names that do resolve to a codec still cannot decode text (base64, idna)
         try:
-            codecs.lookup(preferred)
-        except LookupError:
-            LOGGER.debug("Ignoring unknown charset: %s", preferred)
+            data[:16].decode(preferred, errors="replace")
+        except (LookupError, ValueError) as err:
+            LOGGER.debug("Ignoring unusable charset %s: %s", preferred, err)
         else:
             return preferred
 

@@ -524,6 +524,26 @@ async def test_rolling_buffer_fifo() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rolling_buffer_drained_surfaces_producer_error() -> None:
+    """A drained rolling buffer raises the producer error instead of a clean EOF."""
+
+    async def _failing_source() -> AsyncGenerator[bytes]:
+        yield ONE_SECOND_CHUNK
+        msg = "test error"
+        raise RuntimeError(msg)
+
+    buf = AudioBuffer(TEST_PCM_FORMAT, mode=BufferMode.ROLLING)
+    buf.fill(_failing_source(), source_name="test")
+    while not buf.has_error:
+        await asyncio.sleep(0.01)
+
+    # the buffered chunk is still delivered before the error surfaces
+    assert await buf._get() == ONE_SECOND_CHUNK
+    with pytest.raises(RuntimeError, match="test error"):
+        await buf._get()
+
+
+@pytest.mark.asyncio
 async def test_seekable_buffer_backpressure() -> None:
     """SEEKABLE mode waits on put when full, consumer frees space on get."""
     buf = AudioBuffer(TEST_PCM_FORMAT, buffer_size=BufferSize.MINIMAL)
@@ -532,7 +552,9 @@ async def test_seekable_buffer_backpressure() -> None:
     # use fill() so there's an active producer task (eviction only happens
     # when the producer is running and needs space)
     buf.fill(_make_source(max_size + 5), source_name="test")
-    await asyncio.sleep(0.1)
+    async with asyncio.timeout(5):
+        async with buf._data_available:
+            await buf._data_available.wait_for(lambda: buf.size_seconds == max_size)
 
     assert buf.size_seconds == max_size
 
