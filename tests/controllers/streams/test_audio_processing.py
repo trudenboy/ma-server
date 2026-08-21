@@ -931,6 +931,81 @@ async def test_stale_flow_generator_does_not_mutate_active_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_flow_producer_does_not_interleave_the_play_log() -> None:
+    """A second flow request for one session keeps the play log of the first out of the queue."""
+
+    def _flow_item(item_id: str) -> Any:
+        return SimpleNamespace(
+            queue_item_id=item_id,
+            name=item_id,
+            media_type=MediaType.TRACK,
+            duration=300,
+            extra_attributes={},
+            streamdetails=SimpleNamespace(
+                fade_in=False,
+                stream_error=False,
+                uri=f"test://{item_id}",
+                seek_position=0,
+                duration=300,
+                buffer=None,
+                seconds_streamed=None,
+                is_realtime=False,
+                audio_format=_format(ContentType.PCM_F32LE, 48000, 32),
+            ),
+        )
+
+    items = {item_id: _flow_item(item_id) for item_id in ("item-1", "item-2")}
+
+    async def _load_next(_queue_id: str, current_id: str) -> Any:
+        if current_id == "item-1":
+            return items["item-2"]
+        raise QueueEmpty
+
+    mass = MagicMock()
+    queue_data = SimpleNamespace(session_id="session-1", flow_mode_stream_log=[])
+    mass.player_queues.queue_data.return_value = queue_data
+    mass.player_queues.load_next_queue_item = _load_next
+    mass.streams.get_crossfade_mode.return_value = CrossfadeMode.DISABLED
+    mass.config.get_raw_core_config_value.return_value = 0
+    mass.player_queues.get_active_queue.return_value = None
+    audio = StreamsAudio(cast("Any", mass))
+
+    async def _one_chunk(*_args: object, **_kwargs: object) -> AsyncGenerator[bytes]:
+        yield b"\x00" * 16
+
+    audio.get_queue_item_stream = _one_chunk  # type: ignore[method-assign]
+    queue = cast(
+        "Any",
+        SimpleNamespace(
+            queue_id="queue-1",
+            display_name="Queue",
+            flow_mode=False,
+            overlay_enabled=False,
+            overlay_source=None,
+        ),
+    )
+    pcm_format = _format(ContentType.PCM_F32LE, 48000, 32)
+
+    # the probing connection opens the flow url and logs its first track
+    first = audio.get_queue_flow_stream(queue, items["item-1"], pcm_format, session_id="session-1")
+    await anext(first)
+    assert [entry.queue_item_id for entry in queue_data.flow_mode_stream_log] == ["item-1"]
+
+    # the connection that really plays opens the same url and publishes its own play log
+    second = audio.get_queue_flow_stream(queue, items["item-1"], pcm_format, session_id="session-1")
+    await anext(second)
+    live_log = queue_data.flow_mode_stream_log
+
+    # the first producer moves on to its next track; that entry must not reach the live log
+    await anext(first)
+    assert queue_data.flow_mode_stream_log is live_log
+    assert [entry.queue_item_id for entry in live_log] == ["item-1"]
+
+    await first.aclose()
+    await second.aclose()
+
+
+@pytest.mark.asyncio
 async def test_flow_source_error_skips_item_without_completing_it() -> None:
     """An item-stream error skips to the next queue item; the flow itself continues."""
     mass = MagicMock()
@@ -940,6 +1015,7 @@ async def test_flow_source_error_skips_item_without_completing_it() -> None:
         uri="audiobookshelf://book",
         seek_position=0,
         duration=3600,
+        is_realtime=False,
     )
     queue_item = SimpleNamespace(
         queue_item_id="item-1",
@@ -1007,6 +1083,8 @@ async def test_flow_zero_audio_skip_restores_seek_position(
         seek_position=0,
         seconds_streamed=0,
         duration=120,
+        buffer=SimpleNamespace(eof=True, cancelled=False, has_error=False, max_size_seconds=300),
+        is_realtime=False,
     )
     first_item = SimpleNamespace(
         queue_id="queue-1",
@@ -1020,12 +1098,19 @@ async def test_flow_zero_audio_skip_restores_seek_position(
     raw_seek_position = 12
     skipped_streamdetails = SimpleNamespace(
         audio_format=pcm_format,
+        buffer=SimpleNamespace(
+            has_error=False,
+            is_valid=lambda *_args: True,
+            duration_available=16,
+            ready=SimpleNamespace(is_set=lambda: True),
+        ),
         fade_in=False,
         stream_error=False,
         uri="test://skipped",
         seek_position=raw_seek_position,
         seconds_streamed=0,
         duration=120,
+        is_realtime=False,
     )
     skipped_item = SimpleNamespace(
         queue_id="queue-1",
@@ -1034,7 +1119,7 @@ async def test_flow_zero_audio_skip_restores_seek_position(
         media_type=MediaType.TRACK,
         media_item=None,
         streamdetails=skipped_streamdetails,
-        extra_attributes={},
+        extra_attributes={"playback_speed": 2.0},
     )
     queue = SimpleNamespace(
         queue_id="queue-1",
@@ -1067,6 +1152,7 @@ async def test_flow_zero_audio_skip_restores_seek_position(
         )
     )
     monkeypatch.setattr(audio.smart_fades_mixer, "build", build)
+    eager_seek_positions: list[float] = []
 
     async def _item_stream(
         queue_item: SimpleNamespace,
@@ -1074,8 +1160,11 @@ async def test_flow_zero_audio_skip_restores_seek_position(
         **_kwargs: object,
     ) -> AsyncGenerator[bytes]:
         if queue_item is first_item:
+            # warmup worth of audio, then a full crossfade tail
             yield bytes(pcm_format.pcm_sample_size * 8)
-            yield bytes(pcm_format.pcm_sample_size)
+            yield bytes(pcm_format.pcm_sample_size * 8)
+        else:
+            eager_seek_positions.append(queue_item.streamdetails.seek_position)
 
     monkeypatch.setattr(audio, "get_queue_item_stream", _item_stream)
     stream = audio.get_queue_flow_stream(
@@ -1089,7 +1178,85 @@ async def test_flow_zero_audio_skip_restores_seek_position(
         pass
 
     build.assert_awaited_once()
+    assert eager_seek_positions == [32]
     assert skipped_streamdetails.seek_position == raw_seek_position
+
+
+@pytest.mark.parametrize(
+    ("source_cancelled", "expected_duration"),
+    [(True, 300), (False, 3)],
+    ids=["aborted_source", "clean_source"],
+)
+@pytest.mark.asyncio
+async def test_flow_does_not_write_back_a_duration_for_an_aborted_source(
+    monkeypatch: pytest.MonkeyPatch, source_cancelled: bool, expected_duration: int
+) -> None:
+    """An externally cancelled buffer ends in a clean EOF that must not shorten the item."""
+    mass = MagicMock()
+    pcm_format = _format(ContentType.PCM_S16LE, 8000, 16)
+    streamdetails = SimpleNamespace(
+        audio_format=pcm_format,
+        buffer=SimpleNamespace(cancelled=source_cancelled),
+        fade_in=False,
+        stream_error=False,
+        uri="test://track",
+        seek_position=0,
+        seconds_streamed=0,
+        duration=300,
+        is_realtime=False,
+    )
+    queue_track = SimpleNamespace(
+        queue_id="queue-1",
+        queue_item_id="item-1",
+        name="track",
+        media_type=MediaType.TRACK,
+        media_item=None,
+        streamdetails=streamdetails,
+        duration=300,
+        extra_attributes={},
+    )
+    queue = SimpleNamespace(
+        queue_id="queue-1",
+        display_name="Queue",
+        flow_mode=False,
+        overlay_enabled=False,
+        overlay_source=None,
+    )
+    queue_data = SimpleNamespace(session_id="session-1", flow_mode_stream_log=[])
+    mass.player_queues.queue_data.return_value = queue_data
+    mass.player_queues.load_next_queue_item = AsyncMock(side_effect=QueueEmpty)
+    mass.player_queues.get.return_value = queue
+    mass.streams.get_crossfade_mode.return_value = CrossfadeMode.DISABLED
+    mass.config.get_raw_core_config_value.return_value = 8
+    mass.streams.audio_processing.update_item_context = MagicMock()
+    mass.player_queues.queue_buffer_completed = MagicMock()
+    player = MagicMock()
+    player.config.get_value.return_value = "fixed_48000"
+    player.get_supported_sample_rates.return_value = []
+    mass.players.get_player.return_value = player
+    audio = StreamsAudio(cast("Any", mass))
+    audio.setup()
+
+    async def _item_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[bytes]:
+        # a cancelled buffer stops yielding without an error, exactly like a real EOF
+        for _ in range(3):
+            yield bytes(pcm_format.pcm_sample_size)
+
+    monkeypatch.setattr(audio, "get_queue_item_stream", _item_stream)
+    stream = audio.get_queue_flow_stream(
+        cast("Any", queue), cast("Any", queue_track), pcm_format, session_id="session-1"
+    )
+
+    chunks = [chunk async for chunk in stream]
+
+    assert len(chunks) == 3
+    assert streamdetails.duration == expected_duration
+    assert queue_track.duration == expected_duration
+    # the honest streamed amount is always recorded, only the duration is protected
+    assert streamdetails.seconds_streamed == 3
+    entry = queue_data.flow_mode_stream_log[0]
+    assert entry.seconds_streamed == 3
+    assert entry.duration == (None if source_cancelled else 3)
 
 
 def _manager_context(

@@ -33,10 +33,12 @@ from music_assistant.controllers.streams.constants import (
     CONF_BUFFER_SIZE_DEFAULT,
     RADIO_BUFFER_SIZE,
     SEEK_WAIT_THRESHOLD,
+    STREAM_SLOT_WAIT_TIMEOUT,
     BufferMode,
     BufferSize,
 )
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
+from music_assistant.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
     from music_assistant_models.streamdetails import StreamDetails
@@ -48,6 +50,10 @@ LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.audio_buffer")
 # Callback signature for chunk observers: (chunk_position_seconds, pcm_data)
 # Empty bytes signals EOF (no more chunks will follow).
 ChunkCallback = Callable[[int, bytes], None]
+
+# Maximum seconds to wait for the first playable audio, on top of any time the producer
+# is allowed to spend waiting for a provider source-stream slot.
+BUFFER_READY_TIMEOUT: Final[int] = 15
 
 
 class AudioBufferEOF(Exception):
@@ -138,6 +144,26 @@ class AudioBuffer:
         return len(self._chunks)
 
     @property
+    def duration_available(self) -> float:
+        """Return the exact duration of resident PCM audio in seconds."""
+        return sum(len(chunk) for chunk in self._chunks) / self.pcm_format.pcm_sample_size
+
+    @property
+    def is_buffering(self) -> bool:
+        """Return whether the upstream source producer is still active."""
+        return self._producer_task is not None and not self._producer_task.done()
+
+    @property
+    def eof(self) -> bool:
+        """
+        Return whether the source stopped producing.
+
+        A source that failed after delivering audio also ends here, so pair this with
+        ``has_error`` when a clean finish is what matters.
+        """
+        return self._eof_received
+
+    @property
     def first_buffered_chunk(self) -> int:
         """Return the chunk number of the oldest chunk still retained in the buffer."""
         return self._discarded_chunks
@@ -180,14 +206,18 @@ class AudioBuffer:
         chunks_ahead = seek_chunk - total_chunks
         return chunks_ahead <= SEEK_WAIT_THRESHOLD
 
-    async def get_raw_stream(self, seek_position_ms: int = 0) -> AsyncGenerator[bytes]:
+    async def get_raw_stream(
+        self, seek_position_ms: int = 0, exact_seek: bool = False
+    ) -> AsyncGenerator[bytes]:
         """
         Get raw (unprocessed) PCM audio from the buffer.
 
         :param seek_position_ms: Starting position in milliseconds.
+        :param exact_seek: Preserve millisecond precision instead of quantizing to 100 ms.
         """
-        # align to 100ms steps to avoid rounding issues
-        seek_position_ms = (seek_position_ms // 100) * 100
+        if not exact_seek:
+            # align regular user seeks to 100ms steps to avoid rounding issues
+            seek_position_ms = (seek_position_ms // 100) * 100
         chunk_number = seek_position_ms // 1000
         # handle fractional seek: trim leading samples from the first chunk
         fractional_ms = seek_position_ms % 1000
@@ -242,6 +272,7 @@ class AudioBuffer:
         output_format: AudioFormat,
         seek_position_ms: int = 0,
         filter_params: list[str] | None = None,
+        exact_seek: bool = False,
     ) -> AsyncGenerator[bytes]:
         """
         Get processed audio from the buffer.
@@ -252,16 +283,21 @@ class AudioBuffer:
         :param output_format: The desired output PCM format.
         :param seek_position_ms: Starting position in milliseconds.
         :param filter_params: FFmpeg filter parameters to apply.
+        :param exact_seek: Preserve millisecond precision for the input buffer position.
         """
         needs_ffmpeg = bool(filter_params) or self.pcm_format != output_format
 
         if not needs_ffmpeg:
-            async for chunk in self.get_raw_stream(seek_position_ms=seek_position_ms):
+            async for chunk in self.get_raw_stream(
+                seek_position_ms=seek_position_ms, exact_seek=exact_seek
+            ):
                 yield chunk
             return
 
         async for chunk in get_ffmpeg_stream(
-            audio_input=self.get_raw_stream(seek_position_ms=seek_position_ms),
+            audio_input=self.get_raw_stream(
+                seek_position_ms=seek_position_ms, exact_seek=exact_seek
+            ),
             input_format=self.pcm_format,
             output_format=output_format,
             filter_params=filter_params,
@@ -355,6 +391,7 @@ class AudioBuffer:
         seek_position_ms: int = 0,
         wait_ready: bool = False,
         reason: str = "",
+        source_wait_timeout: float | None = STREAM_SLOT_WAIT_TIMEOUT,
     ) -> AudioBuffer:
         """
         Get or create an AudioBuffer for the given streamdetails.
@@ -367,8 +404,16 @@ class AudioBuffer:
         :param seek_position_ms: Position in milliseconds to start from.
         :param wait_ready: If True, wait for the first chunk before returning.
         :param reason: Caller context for logging (e.g. 'prepare', 'streaming').
+        :param source_wait_timeout: Maximum seconds the producer may wait for a free
+            source-stream slot on the providing music provider, or None to wait
+            without a timeout.
+        :raises AudioError: If the buffer does not become ready, wrapping the typed
+            producer error (e.g. ProviderStreamLimitError) when there is one.
         """
         log_prefix = f"get_buffer[{reason}]" if reason else "get_buffer"
+        # the producer may spend its source wait before the first byte arrives,
+        # so the readiness budget covers that wait on top of the audio itself
+        ready_timeout = BUFFER_READY_TIMEOUT + (source_wait_timeout or 0)
         # determine buffer size from config
         buffer_size = BufferSize(
             mass.config.get_raw_core_config_value(
@@ -405,13 +450,17 @@ class AudioBuffer:
                     seek_position_ms,
                     existing_buffer._discarded_chunks,
                 )
+                if wait_ready:
+                    await existing_buffer._wait_until_ready(streamdetails, ready_timeout)
                 return existing_buffer
 
         # convert ms to seconds for get_media_stream (FFmpeg works in seconds)
         seek_seconds = seek_position_ms // 1000
 
-        # for large seeks without existing buffer, start at seek position
-        buffer_seek_seconds = seek_seconds if seek_seconds > 60 else 0
+        # for large seeks without existing buffer, start at seek position.
+        # A realtime source can not produce the skipped audio any faster than playback,
+        # so it always seeks at the source instead of buffering up to the seek point.
+        buffer_seek_seconds = seek_seconds if streamdetails.is_realtime or seek_seconds > 60 else 0
 
         pcm_format = AudioFormat(
             content_type=ContentType.from_bit_depth(streamdetails.audio_format.bit_depth),
@@ -433,7 +482,14 @@ class AudioBuffer:
             if streamdetails.queue_id
             else SmartFadesMode.DISABLED
         )
-        if crossfade_enabled:
+        dynamic_normalization = (
+            streamdetails.volume_normalization_mode == VolumeNormalizationMode.DYNAMIC
+        )
+        if streamdetails.is_realtime:
+            # a realtime source fills the buffer at playback pace, so every second of
+            # audio asked for here is a second of extra startup delay
+            ready_threshold = 2 if crossfade_enabled or dynamic_normalization else 1
+        elif crossfade_enabled:
             ready_threshold = 8
         elif streamdetails.volume_normalization_mode == VolumeNormalizationMode.DYNAMIC:
             ready_threshold = 5
@@ -472,23 +528,60 @@ class AudioBuffer:
 
         # start filling from the media stream (seek in seconds for FFmpeg)
         audio_source = mass.streams.audio.get_media_stream(
-            streamdetails, pcm_format, seek_position=buffer_seek_seconds, filter_params=None
+            streamdetails,
+            pcm_format,
+            seek_position=buffer_seek_seconds,
+            filter_params=None,
+            source_wait_timeout=source_wait_timeout,
         )
         audio_buffer.fill(audio_source, source_name=streamdetails.uri)
 
         if wait_ready:
-            try:
-                await asyncio.wait_for(audio_buffer.ready.wait(), timeout=15)
-            except TimeoutError:
-                raise AudioError("Timeout waiting for audio data") from audio_buffer._producer_error
-            # ready was signaled but check if it was due to a producer error
-            # (ready is also set by _notify_on_producer_error)
-            if audio_buffer.has_error:
-                raise AudioError("Failed to stream audio") from audio_buffer._producer_error
+            await audio_buffer._wait_until_ready(streamdetails, ready_timeout)
 
         return audio_buffer
 
     # -- Private methods --
+
+    async def _wait_until_ready(self, streamdetails: StreamDetails, ready_timeout: float) -> None:
+        """
+        Wait until this buffer can serve playback or raise its producer failure.
+
+        :param streamdetails: Stream details currently referencing this buffer.
+        :param ready_timeout: Maximum seconds to wait for enough buffered audio.
+        """
+        async with self._ready_wait_lock:
+            if not self.ready.is_set():
+                try:
+                    await asyncio.wait_for(self.ready.wait(), timeout=ready_timeout)
+                except TimeoutError as err:
+                    producer_error = await self._clear_failed_buffer(streamdetails)
+                    if isinstance(producer_error, AudioError):
+                        raise producer_error from err
+                    raise AudioError("Timeout waiting for audio data") from (producer_error or err)
+            # ready was signaled but check if it was due to a producer error
+            # (ready is also set by _notify_on_producer_error)
+            if not self.has_error:
+                return
+            producer_error = await self._clear_failed_buffer(streamdetails)
+            # surface a typed producer failure (e.g. a source capacity limit) as-is,
+            # so callers can act on it instead of on a generic wrapper
+            if isinstance(producer_error, AudioError):
+                raise producer_error
+            raise AudioError("Failed to stream audio") from producer_error
+
+    async def _clear_failed_buffer(self, streamdetails: StreamDetails) -> Exception | None:
+        """
+        Detach and clear this buffer after preparation failed.
+
+        :param streamdetails: Stream details currently referencing this buffer.
+        :return: The producer error recorded before the buffer was cleared.
+        """
+        producer_error = self._producer_error
+        if streamdetails.buffer is self:
+            streamdetails.buffer = None
+        await asyncio.shield(self.clear())
+        return producer_error
 
     async def _put(self, chunk: bytes) -> None:
         """

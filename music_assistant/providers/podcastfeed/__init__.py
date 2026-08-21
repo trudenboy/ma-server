@@ -126,7 +126,7 @@ class PodcastMusicprovider(MusicProvider):
     async def get_podcast(self, prov_podcast_id: str) -> Podcast:
         """Get full artist details by id."""
         if prov_podcast_id != self.podcast_id:
-            raise RuntimeError(f"Podcast id not in provider: {prov_podcast_id}")
+            raise MediaNotFoundError(f"Podcast id not in provider: {prov_podcast_id}")
         return await self._parse_podcast()
 
     @use_cache(3600)  # Cache for 1 hour
@@ -149,7 +149,7 @@ class PodcastMusicprovider(MusicProvider):
     ) -> AsyncGenerator[PodcastEpisode]:
         """List all episodes for the podcast."""
         if prov_podcast_id != self.podcast_id:
-            raise Exception(f"Podcast id not in provider: {prov_podcast_id}")
+            raise MediaNotFoundError(f"Podcast id not in provider: {prov_podcast_id}")
         # sort episodes by published date
         episodes: list[dict[str, Any]] = self.parsed_podcast["episodes"]
         if episodes and episodes[0].get("published", 0) != 0:

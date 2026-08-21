@@ -43,6 +43,15 @@ BUFFER_SIZE_MAP: Final[dict[str, int]] = {
 # Buffer size for radio streams (short rolling buffer)
 RADIO_BUFFER_SIZE: Final[int] = 15
 
+# Ceiling on how fast a single queue item is handed to a player, once it has had its opening
+# burst. Music Assistant serves audio for listening, not for collecting: at twice playback the
+# player's buffer still grows in realtime, while pulling a whole catalogue takes about as long
+# as listening to it would. These are the fastest we go, not a target - a player that needs
+# feeding more gently (Chromecast is the known case) can be paced slower than this.
+# Do not remove this to "fix" slow buffering; raise the burst instead. See the usage policy.
+SINGLE_ITEM_READRATE: Final[str] = "2"
+SINGLE_ITEM_READRATE_INITIAL_BURST: Final[str] = "30"
+
 # Time to keep the flow stream response open after the last audio byte of a queue.
 # Players buffer a few seconds ahead of what they actually render; some of them drop
 # that buffer the moment the connection is closed, cutting off the end of the queue.
@@ -89,6 +98,16 @@ def _get_default_buffer_size() -> str:
 CONF_BUFFER_SIZE_DEFAULT: Final[str] = _get_default_buffer_size()
 CONF_ALLOW_CROSSFADE_SAME_ALBUM: Final[str] = "allow_crossfade_same_album"
 CONF_SMART_FADES_LOG_LEVEL: Final[str] = "smart_fades_log_level"
+
+# Maximum wait for a provider source-stream slot before a speculative attempt gives up.
+STREAM_SLOT_WAIT_TIMEOUT: Final[float] = 5.0
+
+# Total capacity budget when an actual playback start retries/reselects provider mappings.
+STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT: Final[float] = 15.0
+
+# Maximum time spent searching other streaming providers for an alternative mapping
+# when every known candidate is capacity-saturated.
+STREAM_SLOT_MATCH_TIMEOUT: Final[float] = 5.0
 
 # Maximum seconds we wait for the buffer to catch up on a forward seek.
 # Beyond this, the stream is re-fetched at the seek position.

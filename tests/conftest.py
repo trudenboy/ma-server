@@ -17,7 +17,13 @@ from zeroconf.asyncio import AsyncZeroconf
 from music_assistant.controllers.cache import CacheController
 from music_assistant.controllers.config import ConfigController
 from music_assistant.mass import MusicAssistant
-from tests.common import suppress_auto_loaded_providers, use_ephemeral_server_ports, utf8_safe
+from tests.common import (
+    suppress_auto_loaded_providers,
+    suppress_initial_library_sync,
+    use_ephemeral_server_ports,
+    utf8_safe,
+    wait_for_boot_to_settle,
+)
 
 NUMBA_CACHE_DIR = pytest.StashKey[tempfile.TemporaryDirectory[str]]()
 
@@ -140,9 +146,12 @@ async def mass(tmp_path: pathlib.Path) -> AsyncGenerator[MusicAssistant]:
         # keep the fixture isolated from the developer's machine: no auto-loaded device
         # providers and no local_audio bridging the host's sound devices as players
         suppress_auto_loaded_providers(),
+        # keep the booted instance quiet: no library sync firing into a running test
+        suppress_initial_library_sync(),
     ):
         try:
             await mass_instance.start()
+            await wait_for_boot_to_settle(mass_instance)
             yield mass_instance
         finally:
             # also stop after a failed boot: pytest holds on to the setup traceback,

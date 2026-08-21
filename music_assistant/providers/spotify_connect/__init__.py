@@ -1,25 +1,18 @@
 """
 Spotify Connect plugin for Music Assistant.
 
-We tie a single player to a single Spotify Connect daemon (go-librespot).
+We tie a single player to a single Spotify Connect daemon.
 The provider has multi instance support, so multiple players can be linked to
 multiple Spotify Connect daemons.
 
-go-librespot is driven entirely over its local HTTP+WebSocket API: the WebSocket
-``/events`` stream feeds player/session/metadata/volume state into Music Assistant,
-and transport + volume commands are issued via the REST endpoints. Playback control
-works without a configured Spotify *music* provider or the Spotify Web API.
+The MA-facing logic lives in ``provider.py``; everything specific to one
+Spotify Connect implementation (currently go-librespot) lives behind the
+``SpotifyConnectBackend`` contract in ``base.py`` (one implementation per subdirectory).
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import os
-import time
-from collections.abc import AsyncGenerator
-from contextlib import suppress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
@@ -49,52 +42,22 @@ if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
 
-CONF_MASS_PLAYER_ID = "mass_player_id"
-CONF_PUBLISH_NAME = "publish_name"
-DEFAULT_PUBLISH_NAME = "Music Assistant"
-
-# Special value for auto player selection
-PLAYER_ID_AUTO = "__auto__"
-
-SUPPORTED_FEATURES = {ProviderFeature.AUDIO_SOURCE}
-
-# stable id for the single AudioSource this provider exposes;
-# combined with the provider instance_id this forms the persistent uri
-AUDIO_SOURCE_ID = "main"
-
-# go-librespot volume scale; we pin volume_steps to this so the daemon's 0..max
-# volume maps 1:1 to a 0-100 percentage.
-VOLUME_STEPS = 100
-
-# Read size for pulling PCM off the daemon's stdout.
-STREAM_READ_CHUNK = 16384
-
-# When playback is paused the daemon stops writing PCM. If no PCM arrives for
-# this long while we're not in a 'playing' state, end the stream (clean EOF) so
-# the player leaves the playing state; the next 'playing' event re-streams.
-PAUSE_EOF_TIMEOUT_S = 0.5
-
-# Port range the go-librespot API server binds to (loopback only, one per instance).
-API_PORT_RANGE_START = 38800
-API_PORT_RANGE_END = 38900
-
-# Seconds to wait for the daemon to report 'playing' after a resume request.
-PLAYBACK_START_TIMEOUT_S = 3.0
-
-# Debounce before acting on an externally-triggered 'playing' event (see
-# _deferred_play_media_fire for why).
-PLAY_MEDIA_DEBOUNCE_S = 0.5
-
-# Ignore Spotify volume events for this long after a session becomes active, so
-# the player's own volume wins over librespot's initial value on (re)connect.
-INITIAL_VOLUME_GRACE_S = 3.0
-
-# User-facing message for the "not the active Spotify device" failure.
-# {0} is the Spotify Connect device's published name (see _not_active_error).
-NOT_ACTIVE_DEVICE_MESSAGE = (
-    "'{0}' is not the active Spotify playback device. "
-    "Open the Spotify app, select it as the playback device, and try again."
-)
+__all__ = [
+    "BACKEND_GO_LIBRESPOT",
+    "BACKEND_SOLOIST",
+    "CONF_API_KEY",
+    "CONF_BACKEND",
+    "CONF_MASS_PLAYER_ID",
+    "CONF_PUBLISH_NAME",
+    "CONF_SOLOIST_CONSENT",
+    "CONF_VOLUME_MODE",
+    "DEFAULT_PUBLISH_NAME",
+    "PLAYER_ID_AUTO",
+    "SUPPORTED_FEATURES",
+    "VOLUME_MODE_OPTIONS",
+    "SpotifyConnectProvider",
+    "setup",
+]
 
 
 async def setup(

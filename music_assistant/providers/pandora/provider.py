@@ -109,6 +109,11 @@ class PandoraProvider(MusicProvider):
     _sessions: dict[str, PandoraStationSession]
     _socks_proxy: bool = False
 
+    @property
+    def max_concurrent_streams(self) -> int:
+        """Pandora enforces single-device streaming (stream violation on concurrent use)."""
+        return 1
+
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return Config entries to configure this provider."""
         return (

@@ -337,7 +337,11 @@ class StreamsController(CoreController):
                     "/single/{session_id}/{queue_id}/{queue_item_id}/{player_id}.{fmt}",
                     self.serve_queue_item_stream,
                 ),
-                ("*", "/command/{queue_id}/{command}.mp3", self.serve_command_request),
+                (
+                    "*",
+                    "/command/{session_id}/{queue_id}/{command}.mp3",
+                    self.serve_command_request,
+                ),
                 ("*", "/announcement/{player_id}.{fmt}", self.serve_announcement_stream),
                 (
                     "*",
@@ -404,8 +408,7 @@ class StreamsController(CoreController):
         # handle raw pcm without exact format specifiers
         if output_codec.is_pcm() and ";" not in fmt:
             fmt += f";codec=pcm;rate={44100};bitrate={16};channels={2}"
-        extra_data = media.custom_data or {}
-        session_id = extra_data.get("session_id")
+        session_id = media.queue_session_id
         queue_item_id = media.queue_item_id
         if not session_id or not queue_item_id:
             raise InvalidDataError("Can not resolve stream URL: Invalid PlayerMedia data")
@@ -799,6 +802,10 @@ class StreamsController(CoreController):
         """Handle special 'command' request for a player."""
         self._log_request(request)
         queue_id = request.match_info["queue_id"]
+        session_id = request.match_info["session_id"]
+        queue_data = self.mass.player_queues.queue_data_or_none(queue_id)
+        if queue_data is None or queue_data.session_id != session_id:
+            raise web.HTTPNotFound(reason=f"Unknown (or invalid) session: {session_id}")
         command = request.match_info["command"]
         if command == "next":
             self.mass.create_task(self.mass.player_queues.next(queue_id))
@@ -1026,10 +1033,7 @@ class StreamsController(CoreController):
             protocol_player = self.mass.players.get_player(player_id) if player_id else None
             queue_id = media.source_id
             queue = self.mass.player_queues.get(queue_id)
-            queue_session_id = cast(
-                "str | None",
-                (media.custom_data or {}).get("session_id"),
-            )
+            queue_session_id = media.queue_session_id
             crossfade_needs_flow_mode = (
                 # if the player(queue) has crossfade enabled but the player(protocol)
                 # does not support gapless playback, we need to enforce flow mode

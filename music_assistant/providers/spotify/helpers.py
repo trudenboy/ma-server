@@ -9,6 +9,7 @@ import platform
 import re
 import tempfile
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -134,7 +135,7 @@ async def librespot_credentials_via_token(librespot_bin: str, access_token: str)
                 f"Librespot rejected the playback authorization: {output.decode().strip()}"
             )
         credentials_file = os.path.join(cache_dir, CREDENTIALS_FILE)
-        if not os.path.exists(credentials_file):
+        if not Path(credentials_file).exists():
             raise LoginFailed("Librespot did not store a playback credential")
         return await asyncio.to_thread(_read_credentials_file, credentials_file)
 
@@ -309,7 +310,7 @@ async def _await_credentials_file(cache_dir: str) -> str:
     """Poll librespot's cache directory until it holds a complete credential file."""
     credentials_file = os.path.join(cache_dir, CREDENTIALS_FILE)
     while True:
-        if os.path.exists(credentials_file):
+        if Path(credentials_file).exists():
             try:
                 return await asyncio.to_thread(_read_credentials_file, credentials_file)
             except OSError, ValueError:

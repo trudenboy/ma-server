@@ -253,6 +253,7 @@ def _media_fingerprint(fingerprint: dict[str, Any], prefix: str, media: PlayerMe
     fingerprint[f"{prefix}.duration"] = media.duration
     fingerprint[f"{prefix}.source_id"] = media.source_id
     fingerprint[f"{prefix}.queue_item_id"] = media.queue_item_id
+    fingerprint[f"{prefix}.queue_session_id"] = media.queue_session_id
     fingerprint[f"{prefix}.elapsed_time"] = media.elapsed_time
     fingerprint[f"{prefix}.elapsed_time_last_updated"] = media.elapsed_time_last_updated
     # the palette object is carried/reused as-is until the image changes,
@@ -294,6 +295,7 @@ def _state_fingerprint(state: PlayerState) -> dict[str, Any]:
         "active_group": state.active_group,
         "enabled": state.enabled,
         "hide_in_ui": state.hide_in_ui,
+        "private": state.private,
         "expose_to_ha": state.expose_to_ha,
         "icon": state.icon,
         "group_volume": state.group_volume,
@@ -383,6 +385,7 @@ class Player(ABC):
     _attr_needs_poll: bool = False
     _attr_poll_interval: int = 30
     _attr_hidden_by_default: bool = False
+    _attr_private: bool = False
     _attr_expose_to_ha_by_default: bool = True
     _attr_enabled_by_default: bool = True
     _attr_needs_setup: bool = False
@@ -528,6 +531,11 @@ class Player(ABC):
     def hidden_by_default(self) -> bool:
         """Return if the player should be hidden in the UI by default."""
         return self._attr_hidden_by_default
+
+    @property
+    def private(self) -> bool:
+        """Return if the player may not be offered to other clients as a target."""
+        return self._attr_private
 
     @property
     def expose_to_ha_by_default(self) -> bool:
@@ -2465,6 +2473,7 @@ class Player(ABC):
         device_info = self._attr_device_info
         return {
             "type": self.type,
+            "private": self.private,
             "available": self.available,
             "name": self.name,
             "needs_setup": self.needs_setup,
@@ -2606,6 +2615,7 @@ class Player(ABC):
             name=self.display_name,
             enabled=self.enabled,
             hide_in_ui=self.hide_in_ui,
+            private=self.private,
             expose_to_ha=self.expose_to_ha,
             icon=self.icon,
             group_volume=self.group_volume,

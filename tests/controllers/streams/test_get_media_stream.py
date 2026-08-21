@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from contextlib import suppress
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from music_assistant_models.enums import ContentType, MediaType, StreamType
-from music_assistant_models.errors import AudioError
+from music_assistant_models.enums import ContentType, MediaType, ProviderType, StreamType
+from music_assistant_models.errors import AudioError, ProviderUnavailableError
 from music_assistant_models.media_items import AudioFormat
 from music_assistant_models.streamdetails import MultiPartPath, StreamDetails
 
 import music_assistant.controllers.streams.audio as audio_mod
 from music_assistant.controllers.streams.audio import StreamsAudio
+from music_assistant.controllers.streams.audio_buffer import AudioBuffer
+from music_assistant.models.music_provider import MusicProvider, ProviderStreamLimitError
 
 # input args a provider may attach to its StreamDetails (podcastfeed does exactly this).
 # Kept as a tuple so the tests below can never assert against a mutated expectation.
@@ -45,6 +49,7 @@ class _FakeFFMpeg:
         self.returncode: int | None = 0
         self.log_history: list[str] = []
         self.proc = MagicMock(pid=1234)
+        self.stdin_feeder_exception: Exception | None = None
         type(self).last_instance = self
 
     async def start(self) -> None:
@@ -103,6 +108,7 @@ def _make_streamdetails(
     *,
     audio_format: AudioFormat,
     decoded_audio_format: AudioFormat | None = None,
+    extra_input_args: list[str] | None = None,
 ) -> StreamDetails:
     return StreamDetails(
         provider="test_provider",
@@ -112,6 +118,7 @@ def _make_streamdetails(
         media_type=MediaType.AUDIO_SOURCE,
         stream_type=StreamType.NAMED_PIPE,
         path="/tmp/fake-fifo",  # noqa: S108
+        extra_input_args=extra_input_args or [],
     )
 
 
@@ -154,6 +161,78 @@ class _TwoMinuteFFMpeg(_FakeFFMpeg):
     async def iter_chunked(self, _chunk_size: int) -> AsyncGenerator[bytes]:
         for _ in range(self.seconds_emitted):
             yield b"\x00" * _PCM_SAMPLE_SIZE
+
+
+class _FailingStartFFMpeg(_FakeFFMpeg):
+    """FFMpeg double that fails while opening its source."""
+
+    async def start(self) -> None:
+        """Fail source startup."""
+        raise RuntimeError("source failed")
+
+
+class _FeederErrorFFMpeg(_FakeFFMpeg):
+    """FFMpeg double whose input feeder failed before producing PCM."""
+
+    error: Exception
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.stdin_feeder_exception = self.error
+
+    async def iter_chunked(self, _chunk_size: int) -> AsyncGenerator[bytes]:
+        """Yield no PCM after the feeder failure."""
+        if _chunk_size < 0:
+            yield b""
+
+
+class _LimitedProvider(MusicProvider):
+    """Music provider with one source-stream slot."""
+
+    @property
+    def max_concurrent_streams(self) -> int:
+        """Return one source-stream slot."""
+        return 1
+
+    def get_audio_stream(
+        self, _streamdetails: StreamDetails, seek_position: int = 0
+    ) -> AsyncGenerator[bytes]:
+        """Yield a custom source chunk."""
+        del seek_position
+
+        async def _source() -> AsyncGenerator[bytes]:
+            yield b"source"
+
+        return _source()
+
+
+def _limited_provider() -> _LimitedProvider:
+    """Build a one-slot music provider."""
+    mass = MagicMock()
+    manifest = MagicMock()
+    manifest.type = ProviderType.MUSIC
+    manifest.domain = "limited"
+    manifest.name = "Limited"
+    config = MagicMock()
+    config.name = "Limited"
+    config.instance_id = "limited--1"
+    config.get_value.return_value = "GLOBAL"
+    provider = _LimitedProvider(mass, manifest, config)
+    # a provider that can serve a stream is a loaded one
+    provider.available = True
+    return provider
+
+
+def _provider_http_streamdetails(provider: MusicProvider) -> StreamDetails:
+    """Build HTTP stream details owned by the given provider."""
+    return StreamDetails(
+        provider=provider.instance_id,
+        item_id="track-1",
+        audio_format=AudioFormat(content_type=ContentType.MP3),
+        media_type=MediaType.TRACK,
+        stream_type=StreamType.HTTP,
+        path="http://test.invalid/track.mp3",
+    )
 
 
 def _multi_part_streamdetails() -> StreamDetails:

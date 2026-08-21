@@ -68,7 +68,8 @@ class UniversalPlayerProvider(PlayerProvider):
 
         Universal players are created dynamically by the PlayerController,
         not through discovery. However, we restore previously created
-        universal players from config.
+        universal players from config. Native players that match a restored
+        universal player take it over, which removes the universal player.
         """
         async with self._lock:
             for player_conf in await self.mass.config.get_player_configs(
@@ -550,8 +551,9 @@ class UniversalPlayerProvider(PlayerProvider):
                     default_parent,
                 )
                 self.mass.players._migrate_universal_player_config(player_id, default_parent)
-                self.mass.players._repoint_group_memberships(player_id, default_parent)
-                self.mass.players.delete_player_config(player_id)
+                self.mass.players.delete_player_config(
+                    player_id, replacement_player_id=default_parent
+                )
             return
 
         stored_protocol_ids = valid_protocol_ids
