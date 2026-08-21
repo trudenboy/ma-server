@@ -72,10 +72,6 @@ _KNOWN_EXTENSIONS = (".mp3", ".json", ".flac", ".aac")
 PARTY_CACHE_TTL = 10.0
 PARTY_CALL_TIMEOUT = 5.0
 
-# player_queues.items() serves one page at a time, so a queue longer than this is
-# walked page by page rather than trusted to arrive in one call.
-_QUEUE_SCAN_PAGE = 500
-
 # The local proxy modes encode audio themselves, so they carry the core streamserver's
 # pacing ceiling rather than handing a track over as fast as ffmpeg can produce it.
 # See the usage policy note on SINGLE_ITEM_READRATE.
@@ -111,10 +107,7 @@ async def _is_media_item_uri(uri: str) -> bool:
     Both spellings of a raw URL — bare, and wrapped as ``builtin://<media_type>/<url>`` —
     resolve to the builtin provider, which would make the server fetch and play whatever
     the caller names, so the resolved provider is what decides rather than the uri text.
-
-    The menus only ever hand out uris of library or music provider items. Whatever the
-    user queued from the MA interface is vetted against that queue instead, so this
-    answers for the uri text alone.
+    The bridge only ever hands out uris of library or music provider items.
     """
     if "://" not in uri:
         # keeps an item_id-shaped value away from parse_uri's local-file branch
@@ -1442,7 +1435,7 @@ small {{ color: #666; display: block; margin-top: 4px; }}
         player_id = _strip_known_extension(request.match_info["player_id"])
 
         uri = request.query.get("uri")
-        if not uri:
+        if not uri or not await _is_media_item_uri(uri):
             return web.Response(status=400, text="Invalid uri parameter")
 
         from_playlist = request.query.get("from_playlist") == "1"
@@ -1452,9 +1445,6 @@ small {{ color: #666; display: block; margin-top: 4px; }}
             return web.Response(status=404, text="Player not found")
         if rejected := self._reject_invalid_stream_token(request, player_id):
             return rejected
-        # the queue check runs last so an unauthorized caller learns nothing from it
-        if not await _is_media_item_uri(uri) and not self._uri_is_in_player_queue(player_id, uri):
-            return web.Response(status=400, text="Invalid uri parameter")
         self.provider.on_player_activity(player_id)
 
         # When MA is driving the queue (next/prev from MA UI), current_media is
