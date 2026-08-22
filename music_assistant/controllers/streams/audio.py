@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Iterable
 from contextlib import aclosing, asynccontextmanager, nullcontext
 from dataclasses import dataclass
@@ -141,6 +142,205 @@ class CrossfadeData:
 def overlay_active(queue: PlayerQueue) -> bool:
     """Return True if the given queue has an audio overlay enabled and a source selected."""
     return queue.overlay_enabled and queue.overlay_source is not None
+
+
+class _IncomingFadePrefetcher:
+    """
+    Collect the incoming track's fade-in while the outgoing track's tail is held back.
+
+    A flow stream emits nothing while it gathers the audio a transition blends in, so the
+    player hears that wait as lost lead. Gathering it alongside the held-back tail instead
+    of after it keeps audio flowing right up to the transition. The collected audio and the
+    still-open stream are handed over together, so the track is decoded exactly once and the
+    seam is a plain continuation.
+    """
+
+    def __init__(
+        self, audio: StreamsAudio, pcm_format: AudioFormat, session_id: str | None
+    ) -> None:
+        """
+        Initialize the prefetcher for one flow stream.
+
+        :param audio: Audio sub-controller used to open the incoming track's stream.
+        :param pcm_format: Shared PCM format of the flow stream.
+        :param session_id: Queue session that owns the flow stream.
+        """
+        self._audio = audio
+        self._pcm_format = pcm_format
+        self._session_id = session_id
+        self._queue_item_id: str | None = None
+        self._streamdetails: StreamDetails | None = None
+        self._seek_position = 0
+        self._stream: AsyncGenerator[bytes] | None = None
+        self._chunks: deque[bytes] = deque()
+        self._target = 0
+        self._failed = False
+        self._collected_at_handover = 0
+        self._task: asyncio.Task[None] | None = None
+
+    def ensure_started(
+        self,
+        queue: PlayerQueue,
+        queue_item: QueueItem,
+        crossfade_mode: CrossfadeMode,
+        standard_crossfade_duration: int,
+    ) -> None:
+        """
+        Start collecting the next track's fade-in when it can be served from its buffer.
+
+        Does nothing when a prefetch is already running or the next track is not prepared
+        yet, so this is safe (and cheap) to call for every chunk of the outgoing track.
+
+        :param queue: Queue being streamed.
+        :param queue_item: Queue item whose tail is currently held back.
+        :param crossfade_mode: Crossfade mode selected for this queue item.
+        :param standard_crossfade_duration: Configured standard overlap in seconds.
+        """
+        if self._task is not None or crossfade_mode == CrossfadeMode.DISABLED:
+            return
+        next_item = self._audio.mass.player_queues.get_next_item(
+            queue.queue_id, queue_item.queue_item_id
+        )
+        if (
+            next_item is None
+            or next_item.queue_item_id == queue_item.queue_item_id
+            or next_item.media_type != MediaType.TRACK
+            or (streamdetails := next_item.streamdetails) is None
+            or streamdetails.is_realtime
+            # without a duration the read below cannot be kept clear of the track's end
+            or not streamdetails.duration
+            or (audio_buffer := cast("AudioBuffer | None", streamdetails.buffer)) is None
+            or audio_buffer.has_error
+            or not audio_buffer.is_valid()
+        ):
+            return
+        overlap: float = (
+            SMART_CROSSFADE_DURATION
+            if crossfade_mode == CrossfadeMode.SMART_CROSSFADE
+            else standard_crossfade_duration
+        )
+        # never read a track to its end in the background: that would report it to its
+        # provider as streamed before a single second of it has reached the player.
+        # A track always plays at its own pace, so what is left of it after the seek is
+        # also what is left of the stream.
+        seek_position = int(streamdetails.seek_position)
+        overlap = min(overlap, (streamdetails.duration - seek_position) / 2)
+        if overlap <= 0:
+            return
+        self._target = int(self._pcm_format.pcm_sample_size * overlap)
+        self._queue_item_id = next_item.queue_item_id
+        self._streamdetails = streamdetails
+        self._seek_position = seek_position
+        self._chunks = deque()
+        self._stream = self._audio.get_queue_item_stream(
+            next_item,
+            pcm_format=self._pcm_format,
+            seek_position=seek_position,
+            playback_speed=cast("float", next_item.extra_attributes.get("playback_speed", 1.0)),
+            raise_on_error=False,
+            session_id=self._session_id,
+            prepared_buffer=audio_buffer,
+        )
+        self._task = asyncio.create_task(self._collect(self._stream, self._chunks))
+        self._audio.logger.debug(
+            "Prefetching %.0f seconds of %s while the tail of %s is held back",
+            overlap,
+            next_item.name,
+            queue_item.name,
+        )
+
+    async def take(self, queue_item: QueueItem, seek_position: int) -> AsyncGenerator[bytes] | None:
+        """
+        Hand over the prefetched stream for the given queue item.
+
+        Returns None unless the prefetch is for exactly the track and position the flow
+        stream is about to play and is still usable; the caller then opens the stream
+        itself, which also gives a broken source its chance to be re-resolved.
+
+        :param queue_item: Queue item the flow stream is about to play.
+        :param seek_position: Position in seconds the item is to be streamed from.
+        """
+        if self._task is None:
+            return None
+        if (
+            self._queue_item_id != queue_item.queue_item_id
+            or self._streamdetails is not queue_item.streamdetails
+            or self._seek_position != seek_position
+        ):
+            await self.close()
+            return None
+        # stop collecting: from here the flow stream reads the same generator itself
+        self._target = 0
+        await self._task
+        if self._failed or (self._streamdetails is not None and self._streamdetails.stream_error):
+            await self.close()
+            return None
+        chunks, stream = self._chunks, self._stream
+        assert stream is not None
+        self._collected_at_handover = sum(len(chunk) for chunk in chunks)
+        self._reset()
+        return self._replay(chunks, stream)
+
+    @property
+    def collected_at_handover(self) -> int:
+        """Return how many bytes the last handover already had in hand."""
+        return self._collected_at_handover
+
+    async def close(self) -> None:
+        """Abandon a pending prefetch and release the incoming track's stream."""
+        task, stream = self._task, self._stream
+        # stop the collector before dropping the handles, so a task still running
+        # cannot write into the state a next prefetch starts from
+        self._target = 0
+        if task is not None:
+            task.cancel()
+            # gather consumes the collector's own cancellation but still lets a
+            # cancellation of this task through, so a stopped flow really stops
+            await asyncio.gather(task, return_exceptions=True)
+        if stream is not None:
+            await stream.aclose()
+        self._reset()
+
+    # --- Private methods ---
+
+    def _reset(self) -> None:
+        """Drop the handles of the current prefetch so a next one can start."""
+        self._task = None
+        self._stream = None
+        self._queue_item_id = None
+        self._streamdetails = None
+        self._seek_position = 0
+        self._chunks = deque()
+        self._target = 0
+        self._failed = False
+
+    async def _collect(self, stream: AsyncGenerator[bytes], chunks: deque[bytes]) -> None:
+        """Read the incoming track until the fade-in target is reached."""
+        collected = 0
+        try:
+            async for chunk in stream:
+                chunks.append(chunk)
+                collected += len(chunk)
+                # re-read the target every chunk: it drops to zero on handover
+                if collected >= self._target:
+                    return
+            # the target is kept clear of the track's end, so running out here means the
+            # source gave up early and the flow stream is better off opening it again
+            self._failed = True
+        except Exception as err:
+            # the flow stream opens the track itself rather than inheriting a dead stream
+            self._failed = True
+            self._audio.logger.warning("Failed to prefetch the incoming fade-in: %s", err)
+
+    async def _replay(
+        self, chunks: deque[bytes], stream: AsyncGenerator[bytes]
+    ) -> AsyncGenerator[bytes]:
+        """Yield the collected audio, then continue from the same stream."""
+        async with aclosing(stream):
+            while chunks:
+                yield chunks.popleft()
+            async for chunk in stream:
+                yield chunk
 
 
 class StreamsAudio:
@@ -1641,6 +1841,17 @@ class StreamsAudio:
             crossfade_mode,
             "true" if crossfade_data else "false",
         )
+        # report the fade this item was actually faded into; the fade leaving it is
+        # only known once the next item's overlap has been selected further down
+        self._report_crossfade_mode(
+            queue.queue_id,
+            queue_item,
+            pcm_format,
+            crossfade_data.crossfade_mode if crossfade_data else CrossfadeMode.DISABLED,
+            session_id,
+            # only radio carries an overlay outside flow mode, and this path is tracks-only
+            overlay_enabled=False,
+        )
 
         buffer = b""
         bytes_written = 0
@@ -1904,6 +2115,7 @@ class StreamsAudio:
         queue_track = None
         last_fadeout_part: bytes = b""
         last_streamdetails: StreamDetails | None = None
+        last_queue_track: QueueItem | None = None
         last_play_log_entry: PlayLogEntry | None = None
         # Snapshot the queue's current session_id. PlayerQueues rotates this on
         # every new stream session, so if a newer producer takes over the queue
@@ -1969,28 +2181,39 @@ class StreamsAudio:
             return pq_data.session_id != flow_session_id
 
         queue_exhausted = False
-        while True:
-            # bail out early if a newer producer has taken over this queue,
-            # so we don't append another entry to a stream log we no longer own
-            if _superseded():
-                self.logger.debug(
-                    "Flow stream for queue %s superseded (session %s -> %s) "
-                    "- exiting before next track",
-                    queue.display_name,
-                    flow_session_id,
-                    pq_data.session_id,
-                )
-                return
-            # get (next) queue item to stream
-            if queue_track is None:
-                queue_track = start_queue_item
-            else:
-                try:
-                    queue_track = await self.mass.player_queues.load_next_queue_item(
-                        queue.queue_id, queue_track.queue_item_id
+        incoming_prefetcher = _IncomingFadePrefetcher(self, pcm_format, flow_session_id)
+        try:
+            while True:
+                # bail out early if a newer producer has taken over this queue,
+                # so we don't append another entry to a stream log we no longer own
+                if _superseded():
+                    self.logger.debug(
+                        "Flow stream for queue %s superseded (session %s -> %s) "
+                        "- exiting before next track",
+                        queue.display_name,
+                        flow_session_id,
+                        pq_data.session_id,
                     )
-                except QueueEmpty:
-                    queue_exhausted = True
+                    return
+                # get (next) queue item to stream
+                if queue_track is None:
+                    queue_track = start_queue_item
+                else:
+                    try:
+                        queue_track = await self.mass.player_queues.load_next_queue_item(
+                            queue.queue_id, queue_track.queue_item_id
+                        )
+                    except QueueEmpty:
+                        queue_exhausted = True
+                        break
+
+                if self._flow_stream_needs_restart(
+                    queue_track,
+                    pcm_format,
+                    flow_supported_sample_rates,
+                    flow_mode_sample_rate_conf,
+                    is_first_track=queue_track is start_queue_item,
+                ):
                     break
 
             if queue_track.media_type == MediaType.RADIO:
@@ -2098,7 +2321,7 @@ class StreamsAudio:
                 # bookkeeping mutates seconds_streamed / duration on the log
                 if _superseded():
                     self.logger.debug(
-                        "Flow stream for queue %s superseded - stopping chunk yield",
+                        "Flow stream for queue %s superseded - exiting before playlog append",
                         queue.display_name,
                     )
                     return

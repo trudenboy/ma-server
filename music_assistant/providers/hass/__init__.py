@@ -44,6 +44,7 @@ from music_assistant.constants import VERBOSE_LOG_LEVEL
 from music_assistant.controllers.cache import use_cache
 from music_assistant.helpers.datetime import iso_from_utc_timestamp
 from music_assistant.helpers.json import SerializableType
+from music_assistant.helpers.tts import TTSLanguageNotSupportedError
 from music_assistant.helpers.util import lock, try_parse_int
 from music_assistant.models.plugin import AIEngine, PluginProvider, TTSEngine
 

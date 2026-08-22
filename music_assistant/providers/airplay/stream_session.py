@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Coroutine
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.errors import PlayerCommandFailed
@@ -867,9 +867,12 @@ class AirPlayStreamSession:
         pcm_sample_size = self.pcm_format.pcm_sample_size
         watchdog_task = asyncio.create_task(self._silence_watchdog(pcm_sample_size))
         try:
-            async for chunk in audio_source:
-                if not self.sync_clients:
-                    break
+            # the loop below leaves early once the clients are gone; closing the source
+            # from here releases its decoders instead of waiting on the garbage collector
+            async with aclosing(audio_source):
+                async for chunk in audio_source:
+                    if not self.sync_clients:
+                        break
 
                 await self._write_chunk_to_all_players(chunk)
                 self.seconds_streamed += len(chunk) / pcm_sample_size
