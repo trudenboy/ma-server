@@ -28,7 +28,7 @@ def _parse(episode: dict[str, Any]) -> PodcastEpisode | None:
     return parse_podcast_episode(
         episode=episode,
         prov_podcast_id="podcast-1",
-        episode_cnt=1,
+        position=1,
         instance_id="podcastfeed--test",
         domain="podcastfeed",
     )

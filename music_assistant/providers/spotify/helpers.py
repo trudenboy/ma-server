@@ -9,6 +9,7 @@ import platform
 import re
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -20,6 +21,11 @@ from music_assistant_models.errors import InvalidDataError, LoginFailed
 from music_assistant.helpers.auth import AuthenticationHelper
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.process import AsyncProcess, check_output
+from music_assistant.providers.spotify_connect.soloist import SoloistBinaryManager
+from music_assistant.providers.spotify_connect.soloist.runtime import (
+    WS_ADDR_FILE,
+    WS_PORT_FILE,
+)
 
 from .constants import (
     CALLBACK_REDIRECT_URL,
@@ -292,6 +298,15 @@ async def get_spotify_token(
             return auth_info
 
     raise LoginFailed(f"Failed to refresh {session_name} access token: {err}")
+
+
+async def _log_soloist_pairing_output(pair_proc: AsyncProcess, api_key: str) -> None:
+    """Log the pairing daemon's output (API key redacted) so failures are diagnosable."""
+    async for line in pair_proc.iter_stdout():
+        # the third-party binary's own output may echo argv (which carries the
+        # api key), so redact it before logging
+        text = line.replace(api_key, "<redacted>") if api_key else line
+        LOGGER.debug("[soloist-pair] %s", text)
 
 
 async def _log_pairing_output(librespot_proc: AsyncProcess) -> None:

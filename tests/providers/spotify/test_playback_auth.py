@@ -51,19 +51,21 @@ async def test_stored_credential_is_installed_for_librespot(tmp_path: Path) -> N
     """The stored credential is written to librespot's cache so login5 accepts it."""
     cache_dir = tmp_path / "cache"
     prov = _make_provider(STORED_CREDENTIALS, str(cache_dir))
-    await prov._setup_librespot_auth()
+    await _make_backend(prov, monkeypatch).setup()
     written = json.loads((cache_dir / CREDENTIALS_FILE).read_text(encoding="utf-8"))
     assert written["auth_data"] == "blob"
 
 
-async def test_stale_cached_credential_is_replaced(tmp_path: Path) -> None:
+async def test_stale_cached_credential_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A credential left in the cache from an earlier (now rejected) mint is overwritten."""
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     credentials_file = cache_dir / CREDENTIALS_FILE
     credentials_file.write_text('{"username": "tester", "auth_data": "stale"}', encoding="utf-8")
     prov = _make_provider(STORED_CREDENTIALS, str(cache_dir))
-    await prov._setup_librespot_auth()
+    await _make_backend(prov, monkeypatch).setup()
     written = json.loads(credentials_file.read_text(encoding="utf-8"))
     assert written["auth_data"] == "blob"
 

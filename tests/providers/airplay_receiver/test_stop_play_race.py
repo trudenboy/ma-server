@@ -28,7 +28,7 @@ def provider() -> MagicMock:
 
     def _clear_active_player() -> None:
         mock._active_player_id = None
-        mock._in_use_by_queue = None
+        mock._in_use_by_player = None
         mock._active_session_id = None
 
     mock._clear_active_player.side_effect = _clear_active_player
@@ -79,7 +79,7 @@ async def test_play_waits_for_inflight_stop(provider: MagicMock) -> None:
 
 async def test_play_without_pending_stop_starts_immediately(provider: MagicMock) -> None:
     """A plain session start plays right away."""
-    provider._in_use_by_queue = None
+    provider._in_use_by_player = None
     provider.mass.player_queues.play_media = AsyncMock()
 
     _handle(provider, "playing")

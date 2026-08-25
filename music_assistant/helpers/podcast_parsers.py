@@ -250,7 +250,7 @@ def parse_podcast_episode(
     *,
     episode: dict[str, Any],
     prov_podcast_id: str,
-    episode_cnt: int,
+    position: int,
     podcast_cover: str | None = None,
     podcast_name: str | None = None,
     instance_id: str,
@@ -266,6 +266,8 @@ def parse_podcast_episode(
 
     The function returns None, if the episode enclosure is missing, i.e. there is no stream
     information present.
+
+    :param position: The episode's listing position, oldest to newest.
     """
     episode_duration = episode.get("total_time", 0.0)
     episode_title = episode.get("title", "NO_EPISODE_TITLE")
@@ -275,13 +277,6 @@ def parse_podcast_episode(
     episode_published: int | None = episode.get("published")
     if episode_published == 0:
         episode_published = None
-
-    # prefer the explicit itunes:episode number for ordering (parity with podcast_index);
-    # fall back to the feed enumeration order when the feed omits it
-    episode_number = episode.get("number")
-    episode_position = (
-        episode_number if isinstance(episode_number, int) and episode_number > 0 else episode_cnt
-    )
 
     try:
         stream_url, guid = get_stream_url_and_guid_from_episode(episode=episode)
@@ -298,7 +293,7 @@ def parse_podcast_episode(
         provider=instance_id,
         name=episode_title,
         duration=int(episode_duration),
-        position=episode_position,
+        position=position,
         podcast=ItemMapping(
             item_id=prov_podcast_id,
             provider=instance_id,

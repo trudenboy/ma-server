@@ -45,6 +45,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/70b7288088b42d318f75dbcc41fd0091/Images/Primary?api_key=ACCESS_TOKEN',
@@ -68,6 +69,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'Infest',
     'position': None,
@@ -144,6 +147,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4/Images/Primary?api_key=ACCESS_TOKEN',
@@ -166,6 +170,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'Nu-Clear Sounds',
     'position': None,
@@ -243,6 +249,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/32ed6a0091733dcff57eae67010f3d4b/Images/Primary?api_key=ACCESS_TOKEN',
@@ -266,6 +273,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'This Is Christmas',
     'position': None,
@@ -335,6 +344,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
       ]),
       'label': None,
@@ -351,6 +361,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'Yesterday, When I Was Mad [Disc 2]',
     'position': None,
@@ -406,6 +418,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/dd954bbf54398e247d803186d3585b79/Images/Backdrop/0?api_key=ACCESS_TOKEN',
@@ -443,6 +456,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'Ash',
     'position': None,
@@ -530,6 +545,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/da9c458e425584680765ddc3a89cbc0c/Images/Primary?api_key=ACCESS_TOKEN',
@@ -553,6 +569,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'Do I Wanna Know?',
     'position': 1,
@@ -641,6 +659,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
       ]),
       'label': None,
@@ -657,6 +676,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': '11 Thrown Away',
     'position': 0,
@@ -730,6 +751,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/54918f75ee8f6c8b8dc5efd680644f29/Images/Primary?api_key=ACCESS_TOKEN',
@@ -753,6 +775,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'Where the Bands Are',
     'position': 1,
@@ -861,6 +885,7 @@
       'explicit': None,
       'genres': None,
       'grouping': None,
+      'has_transcript': None,
       'images': list([
         dict({
           'path': 'http://localhost:1234/Items/fb12a77f49616a9fc56a6fab2b94174c/Images/Primary?api_key=ACCESS_TOKEN',
@@ -884,6 +909,8 @@
       'release_date': None,
       'review': None,
       'style': None,
+      'transcript': None,
+      'transcript_cues': None,
     }),
     'name': 'Zombie Christmas',
     'position': 8,

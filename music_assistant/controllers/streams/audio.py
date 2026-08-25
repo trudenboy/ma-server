@@ -14,7 +14,7 @@ import os
 import re
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from contextlib import aclosing, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
@@ -77,6 +77,8 @@ from music_assistant.controllers.streams.constants import (
     CACHE_CATEGORY_RESOLVED_RADIO_URL,
     CACHE_PROVIDER,
     CONF_ALLOW_CROSSFADE_SAME_ALBUM,
+    DEFAULT_VOLUME_NORMALIZATION_MODE,
+    OUTCOME_ONLY_NORMALIZATION_MODES,
     STREAM_SLOT_MATCH_TIMEOUT,
     STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT,
     STREAM_SLOT_WAIT_TIMEOUT,
@@ -91,6 +93,7 @@ from music_assistant.helpers.aiohttp_client import encoded_request_url
 from music_assistant.helpers.audio import (
     HTTP_HEADERS,
     HTTP_HEADERS_ICY,
+    arriving_audio_format,
     build_concat_filelist,
     calculate_content_length,
     get_bit_rate,
@@ -556,6 +559,7 @@ class StreamsAudio:
             self._get_volume_normalization_preference(streamdetails),
             volume_normalization_enabled,
             streamdetails,
+            self.mass.streams.source_normalizes_audio(streamdetails),
         )
 
         self.logger.debug(
@@ -1725,6 +1729,7 @@ class StreamsAudio:
                 if (
                     not next_buffer_triggered
                     and streamdetails.duration
+                    and not streamdetails.is_realtime
                     and (queue := self.mass.player_queues.get_active_queue(queue_item.queue_id))
                     and queue.next_item
                     and (bytes_received / pcm_format.pcm_sample_size + seek_position)

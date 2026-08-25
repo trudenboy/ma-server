@@ -324,11 +324,12 @@ class ITunesPodcastsProvider(MusicProvider):
         podcast = await self._cache_get_podcast(prov_podcast_id)
         podcast_cover = podcast.get("cover_url")
         episodes = podcast.get("episodes", [])
-        for cnt, episode in enumerate(episodes):
+        positions = get_episode_positions(episodes)
+        for position, episode in zip(positions, episodes, strict=True):
             if mass_episode := parse_podcast_episode(
                 episode=episode,
                 prov_podcast_id=prov_podcast_id,
-                episode_cnt=cnt,
+                position=position,
                 podcast_cover=podcast_cover,
                 podcast_name=podcast.get("title"),
                 domain=self.domain,
@@ -341,11 +342,13 @@ class ITunesPodcastsProvider(MusicProvider):
         podcast_id, guid_or_stream_url = prov_episode_id.split(" ")
         podcast = await self._cache_get_podcast(podcast_id)
         podcast_cover = podcast.get("cover_url")
-        for cnt, episode in enumerate(podcast.get("episodes", [])):
+        episodes = podcast.get("episodes", [])
+        positions = get_episode_positions(episodes)
+        for position, episode in zip(positions, episodes, strict=True):
             mass_episode = parse_podcast_episode(
                 episode=episode,
                 prov_podcast_id=podcast_id,
-                episode_cnt=cnt,
+                position=position,
                 podcast_cover=podcast_cover,
                 podcast_name=podcast.get("title"),
                 domain=self.domain,
