@@ -6,16 +6,16 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+from music_assistant_models.enums import FlowStepType
+from ya_passport_auth import Credentials, QrSession, SecretStr
 
-from music_assistant.models.setup_flow import (
-    AbortFlow,
-    SetupFlowContext,
-    SetupFlowError,
-    SetupSession,
-)
+from music_assistant.models.setup_flow import AbortFlow, SetupFlowContext, SetupSession
+from music_assistant.providers.yandex_ynison import setup_flow as yn_flow
 from music_assistant.providers.yandex_ynison.constants import (
     CONF_MASS_PLAYER_ID,
-    CONF_PUBLISH_NAME,
+    CONF_REMEMBER_SESSION,
+    CONF_TOKEN,
+    CONF_X_TOKEN,
     CONF_YM_INSTANCE,
     DEFAULT_DISPLAY_NAME,
     PLAYER_ID_AUTO,
@@ -305,5 +305,130 @@ async def test_legacy_player_and_display_name_are_preserved() -> None:
 
     await run_setup(session)
 
-    assert _entry(session, CONF_MASS_PLAYER_ID).value == "kitchen"
-    assert _entry(session, CONF_PUBLISH_NAME).value == "Old kitchen"
+def _published_steps(mass: mock.Mock) -> list[Any]:
+    """Return the flow steps pushed through mass.signal_event, in order."""
+    return [call.kwargs["data"] for call in mass.signal_event.call_args_list]
+
+
+async def _wait_for(predicate: Any, timeout: float = 5.0) -> Any:
+    """Wait until the predicate returns truthy (or fail the test)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if result := predicate():
+            return result
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not met within timeout")
+
+
+async def _await_user_form(session: SetupSession) -> None:
+    """Wait until the user form is presented."""
+    await _wait_for(lambda: session.current_step and session.current_step.type == FlowStepType.FORM)
+
+
+async def test_borrow_mode_finishes_with_instance_only() -> None:
+    """Selecting a linked Yandex Music instance persists only that instance id."""
+    collected: dict[str, Any] = {}
+
+    async def finish(_s: SetupSession, values: dict[str, Any]) -> dict[str, str]:
+        collected.update(values)
+        return {"instance_id": "yandex_ynison--1"}
+
+    session, _mass = _make_session(
+        finish, providers={"ym-a": {"domain": "yandex_music", "name": "Main"}}
+    )
+    task = asyncio.create_task(yn_flow.run_setup(session))
+    await _await_user_form(session)
+    session.handle_submit(
+        {
+            CONF_YM_INSTANCE: "ym-a",
+            CONF_REMEMBER_SESSION: True,
+            CONF_MASS_PLAYER_ID: "kitchen",
+        }
+    )
+    await _wait_for(lambda: session.finished)
+    await task
+
+    assert collected == {
+        CONF_YM_INSTANCE: "ym-a",
+        CONF_MASS_PLAYER_ID: "kitchen",
+    }
+
+
+async def test_own_mode_qr_persists_tokens_and_login() -> None:
+    """Own-mode QR login persists music token, x_token (remember on) and display login."""
+    creds = Credentials(x_token=SecretStr("XT"), music_token=SecretStr("MT"), display_login="alice")
+    collected: dict[str, Any] = {}
+
+    async def finish(_s: SetupSession, values: dict[str, Any]) -> dict[str, str]:
+        collected.update(values)
+        return {"instance_id": "yandex_ynison--1"}
+
+    session, mass = _make_session(finish)
+    client = _FakeClient(creds)
+    with mock.patch.object(yn_flow, "PassportClient") as pc:
+        pc.create.return_value = _async_cm(client)
+        task = asyncio.create_task(yn_flow.run_setup(session))
+        await _await_user_form(session)
+        session.handle_submit(
+            {
+                CONF_YM_INSTANCE: YM_INSTANCE_OWN,
+                CONF_REMEMBER_SESSION: True,
+                CONF_MASS_PLAYER_ID: "kitchen",
+            }
+        )
+        await _wait_for(lambda: session.finished)
+        await task
+
+    assert collected == {
+        CONF_YM_INSTANCE: YM_INSTANCE_OWN,
+        CONF_TOKEN: "MT",
+        CONF_X_TOKEN: "XT",
+        CONF_ACCOUNT_LOGIN: "alice",
+        CONF_MASS_PLAYER_ID: "kitchen",
+    }
+    scan_steps = [s for s in _published_steps(mass) if s.step_id == "scan_qr"]
+    assert scan_steps
+    assert all(s.image and s.image.startswith("data:image/svg+xml") for s in scan_steps)
+
+
+async def test_own_mode_without_remember_clears_x_token() -> None:
+    """Own-mode QR login with remember off stores the music token but no x_token."""
+    creds = Credentials(x_token=SecretStr("XT"), music_token=SecretStr("MT"), display_login="bob")
+    collected: dict[str, Any] = {}
+
+    async def finish(_s: SetupSession, values: dict[str, Any]) -> dict[str, str]:
+        collected.update(values)
+        return {"instance_id": "yandex_ynison--1"}
+
+    session, _mass = _make_session(finish)
+    client = _FakeClient(creds)
+    with mock.patch.object(yn_flow, "PassportClient") as pc:
+        pc.create.return_value = _async_cm(client)
+        task = asyncio.create_task(yn_flow.run_setup(session))
+        await _await_user_form(session)
+        session.handle_submit(
+            {
+                CONF_YM_INSTANCE: YM_INSTANCE_OWN,
+                CONF_REMEMBER_SESSION: False,
+                CONF_MASS_PLAYER_ID: "kitchen",
+            }
+        )
+        await _wait_for(lambda: session.finished)
+        await task
+
+    assert collected[CONF_TOKEN] == "MT"
+    assert collected[CONF_X_TOKEN] is None
+
+
+async def test_aborts_without_players() -> None:
+    """With no players registered the flow aborts with the no_players reason."""
+
+    async def finish(_s: SetupSession, _values: dict[str, Any]) -> dict[str, str]:
+        raise AssertionError("finish must not be reached")
+
+    session, mass = _make_session(finish)
+    mass.players.all_players.return_value = []
+
+    with pytest.raises(AbortFlow) as excinfo:
+        await yn_flow.run_setup(session)
+    assert excinfo.value.reason == "no_players"

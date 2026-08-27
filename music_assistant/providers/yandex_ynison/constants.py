@@ -16,7 +16,6 @@ YNISON_ORIGIN: Final[str] = "https://music.yandex.ru"
 # Configuration keys
 CONF_YM_INSTANCE: Final[str] = "ym_instance"
 CONF_MASS_PLAYER_ID: Final[str] = "mass_player_id"
-CONF_PUBLISH_NAME: Final[str] = "publish_name"
 CONF_ALLOW_PLAYER_SWITCH: Final[str] = "allow_player_switch"
 CONF_DEVICE_ID: Final[str] = "device_id"
 CONF_OUTPUT_SAMPLE_RATE: Final[str] = "output_sample_rate"
@@ -39,10 +38,8 @@ LEGACY_AUTH_KEYS: Final[tuple[str, ...]] = (
     "remember_session",
 )
 
-# Player selection
-PLAYER_ID_AUTO: Final[str] = "__auto__"
-
-# yandex_music provider config keys
+# yandex_music provider config keys (read via provider.config.get_value)
+YANDEX_MUSIC_CONF_QUALITY: Final[str] = "quality"
 YANDEX_MUSIC_CONF_TOKEN: Final[str] = "token"
 YANDEX_MUSIC_CONF_X_TOKEN: Final[str] = "x_token"
 YANDEX_MUSIC_LOSSLESS_QUALITIES: Final[frozenset[str]] = frozenset({"superb", "lossless"})
