@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, Mock, patch
 from music_assistant_models.enums import PlaybackState, PlayerFeature, PlayerType
 from music_assistant_models.player import PlayerMedia
 
-from music_assistant.controllers.players.constants import PlayerLockPurpose
 from music_assistant.providers.msx_bridge.player import MSXPlayer
 
 # --- Initialization and properties ---
@@ -334,7 +333,7 @@ async def test_set_members_ignores_self_and_non_msx(provider: Any, mass_mock: Mo
 
 
 async def test_play_media_propagates_to_group_members(provider: Any, mass_mock: Mock) -> None:
-    """play_media should propagate to group members through the internal handler."""
+    """play_media should propagate to group members when leader (direct member.play_media)."""
     leader = MSXPlayer(provider, "msx_leader", name="Leader TV", output_format="mp3")
     leader.update_state = Mock()  # type: ignore[misc,method-assign]
     leader._attr_group_members = ["msx_leader", "msx_member"]
@@ -355,11 +354,8 @@ async def test_play_media_propagates_to_group_members(provider: Any, mass_mock: 
     with patch.object(leader.provider, "notify_play_started", Mock()):
         await leader.play_media(media)
 
-    mass_mock.players._handle_play_media.assert_awaited_once_with("msx_member", media)
-    member.play_media.assert_not_called()
-    mass_mock.players.get_player_lock.assert_called_once_with(
-        "msx_member", PlayerLockPurpose.PLAYBACK
-    )
+    # We call member.play_media directly (not mass.players.play_media) to avoid redirect
+    member.play_media.assert_called_once_with(media)
 
 
 async def test_play_media_no_propagation_when_empty_group(provider: Any, mass_mock: Mock) -> None:
@@ -396,8 +392,8 @@ async def test_stop_propagates_to_group_members(provider: Any, mass_mock: Mock) 
     with patch.object(leader.provider, "notify_play_stopped", Mock()):
         await leader.stop()
 
-    mass_mock.players._handle_cmd_stop.assert_awaited_once_with("msx_member")
-    member.stop.assert_not_called()
+    # group_members may include leader; we skip self and propagate only to members
+    member.stop.assert_called_once()
 
 
 # --- Grouping: disable and recursion guard ---
@@ -473,11 +469,6 @@ async def test_propagation_recursion_guard(provider: Any, mass_mock: Mock) -> No
             member if pid == "msx_member" else leader if pid == "msx_leader" else None
         )
     )
-
-    async def play_member(player_id: str, propagated_media: PlayerMedia) -> None:
-        await mass_mock.players.get_player(player_id).play_media(propagated_media)
-
-    mass_mock.players._handle_play_media.side_effect = play_member
 
     media = Mock(spec=PlayerMedia)
     media.uri = "library://track/123"
