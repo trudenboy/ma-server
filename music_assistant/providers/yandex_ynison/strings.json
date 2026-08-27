@@ -6,7 +6,7 @@
     },
     "mass_player_id": {
       "label": "[%key:common::config_entries::mass_player_id::label%]",
-      "description": "The Music Assistant player connected to this Ynison plugin. When playback is directed to this device in the Yandex Music app, the audio will play on the selected player."
+      "description": "The Music Assistant player connected to this Ynison plugin. Its current name is advertised in Yandex Music, and playback is always directed to this player unless manual switching is enabled."
     },
     "allow_player_switch": {
       "label": "Allow manual player switching",
@@ -45,21 +45,16 @@
   },
   "setup_flow": {
     "user": {
-      "title": "Yandex Music account",
-      "description": "Choose the Yandex Music account and the target player."
-    },
-    "scan_qr": {
-      "title": "Scan to sign in",
-      "description": "Scan the QR code with the Yandex app and confirm the login. A fresh code is shown automatically if it expires.",
-      "progress_text": "Waiting for you to scan and confirm in the Yandex app..."
+      "title": "Configure Yandex Music Connect",
+      "description": "Choose the linked Yandex Music account and the target Music Assistant player. The player's current name is published to the Yandex Music app."
     },
     "abort": {
-      "no_players": "No players are available yet. Add a player to Music Assistant first, then try again."
+      "no_players": "No players are available yet. Add a player to Music Assistant first, then try again.",
+      "missing_dependency": "Configure and authenticate a Yandex Music provider before adding or reconfiguring Ynison."
     }
   },
   "errors": {
-    "no_music_token": "Login succeeded but Yandex returned no music token. Please try again.",
-    "no_connected_player": "No connected Music Assistant player is configured. Run the setup again to select one."
+    "no_connected_player": "No connected Music Assistant player is configured. Run setup again to select one."
   },
   "manifest": {
     "description": "Makes a Music Assistant player appear as a device in the Yandex Music app via the Ynison protocol."

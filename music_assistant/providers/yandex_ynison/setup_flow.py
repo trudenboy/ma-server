@@ -8,16 +8,14 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType
 
 from music_assistant.helpers.config_entries import create_player_selector
-from music_assistant.models.setup_flow import AbortFlow, SetupFlowError, StepExpiredError
+from music_assistant.models.setup_flow import AbortFlow, SetupFlowError
 
 from .config_helpers import list_yandex_music_instances
 from .constants import (
     CONF_MASS_PLAYER_ID,
-    CONF_REMEMBER_SESSION,
-    CONF_TOKEN,
-    CONF_X_TOKEN,
     CONF_YM_INSTANCE,
-    YM_INSTANCE_OWN,
+    LEGACY_AUTH_KEYS,
+    LEGACY_YM_INSTANCE_OWN,
 )
 
 if TYPE_CHECKING:
@@ -28,67 +26,53 @@ if TYPE_CHECKING:
 
 async def run_setup(session: SetupSession) -> None:
     """
-    Run the Ynison setup flow: pick the account source, then borrow or QR-log in.
+    Collect the linked Yandex Music instance and concrete target player.
 
-    :param session: The setup session driving the flow.
+    :param session: Setup session that presents and persists the provider form.
     """
     if not session.mass.players.all_players(False, False):
         raise AbortFlow("no_players")
+
     ym_instances = list_yandex_music_instances(session.mass)
-    valid_sources = {inst_id for inst_id, _ in ym_instances}
-    setup_data = dict(session.context.setup_data)
-    prefill: dict[str, ConfigValueType] = {**session.context.values, **setup_data}
-    default_source = str(prefill.get(CONF_YM_INSTANCE) or YM_INSTANCE_OWN)
-    if default_source != YM_INSTANCE_OWN and default_source not in valid_sources:
-        default_source = YM_INSTANCE_OWN
-    default_player = prefill.get(CONF_MASS_PLAYER_ID)
+    if not ym_instances:
+        raise AbortFlow("missing_dependency")
+
+    setup_data: dict[str, ConfigValueType] = dict(session.context.setup_data)
+    original_values = session.context.values
+    prefill: dict[str, ConfigValueType] = {**original_values, **setup_data}
+    valid_sources = {instance_id for instance_id, _name in ym_instances}
+    existing_source = prefill.get(CONF_YM_INSTANCE)
+    selected_source = (
+        existing_source
+        if isinstance(existing_source, str) and existing_source in valid_sources
+        else ym_instances[0][0]
+        if len(ym_instances) == 1
+        else None
+    )
+    selected_player = prefill.get(CONF_MASS_PLAYER_ID) or prefill.get("player")
+    legacy_present = existing_source == LEGACY_YM_INSTANCE_OWN or any(
+        key in setup_data or key in original_values for key in LEGACY_AUTH_KEYS
+    )
 
     errors: dict[str, str] | None = None
     while True:
         submitted = await session.form(
             [
                 _source_entry(selected_source, ym_instances),
-                create_player_selector(
-                    session.mass,
-                    CONF_MASS_PLAYER_ID,
-                    default_player,
-                ),
+                create_player_selector(session.mass, CONF_MASS_PLAYER_ID, selected_player),
             ],
             step_id="user",
             errors=errors,
             last_step=True,
         )
-        source = str(values[CONF_YM_INSTANCE])
-        remember = bool(values[CONF_REMEMBER_SESSION])
-        default_player = values[CONF_MASS_PLAYER_ID]
-        identity: dict[str, ConfigValueType] = {
-            CONF_MASS_PLAYER_ID: default_player,
-        }
-        if source != YM_INSTANCE_OWN:
-            # borrow mode: the linked Yandex Music instance owns authentication
-            try:
-                await session.finish({CONF_YM_INSTANCE: source, **identity})
-                return
-            except SetupFlowError as err:
-                errors = {"base": err.translation_key or str(err)}
-                default_source = source
-                continue
-        # own credentials: QR login
-        try:
-            creds = await _qr_login(session)
-        except YaPassportError as err:
-            errors = {"base": str(err)}
-            continue
-        if creds.music_token is None:
-            errors = {"base": "no_music_token"}
-            continue
+        selected_source = str(submitted[CONF_YM_INSTANCE])
+        selected_player = str(submitted[CONF_MASS_PLAYER_ID])
         collected: dict[str, ConfigValueType] = {
-            CONF_YM_INSTANCE: YM_INSTANCE_OWN,
-            CONF_TOKEN: creds.music_token.get_secret(),
-            CONF_X_TOKEN: creds.x_token.get_secret() if remember else None,
-            CONF_ACCOUNT_LOGIN: creds.display_login,
-            **identity,
+            CONF_YM_INSTANCE: selected_source,
+            CONF_MASS_PLAYER_ID: selected_player,
         }
+        if legacy_present:
+            collected.update(dict.fromkeys(LEGACY_AUTH_KEYS))
         try:
             await session.finish(collected)
             return

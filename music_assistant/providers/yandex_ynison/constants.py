@@ -31,6 +31,7 @@ STREAM_MODE_MAX_QUALITY: Final[str] = "max_quality_dynamic"
 
 # Legacy sentinel and auth keys retained only to reject/clear old own-mode setup data.
 LEGACY_YM_INSTANCE_OWN: Final[str] = "__own__"
+LEGACY_AUTOMATIC_PLAYER: Final[str] = "__auto__"
 LEGACY_AUTH_KEYS: Final[tuple[str, ...]] = (
     "token",
     "x_token",
@@ -38,8 +39,7 @@ LEGACY_AUTH_KEYS: Final[tuple[str, ...]] = (
     "remember_session",
 )
 
-# yandex_music provider config keys (read via provider.config.get_value)
-YANDEX_MUSIC_CONF_QUALITY: Final[str] = "quality"
+# yandex_music provider config keys
 YANDEX_MUSIC_CONF_TOKEN: Final[str] = "token"
 YANDEX_MUSIC_CONF_X_TOKEN: Final[str] = "x_token"
 YANDEX_MUSIC_LOSSLESS_QUALITIES: Final[frozenset[str]] = frozenset({"superb", "lossless"})
