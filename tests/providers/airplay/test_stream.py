@@ -18,6 +18,7 @@ from music_assistant_models.errors import PlayerCommandFailed
 from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.helpers.named_pipe import WRITE_POLL_INTERVAL_MS, AsyncNamedPipeWriter
+from music_assistant.helpers.process import AsyncProcess
 from music_assistant.providers.airplay.constants import (
     AIRPLAY_ARTWORK_SIZE,
     AIRPLAY_JOIN_START_ACK_TIMEOUT_MS,
@@ -26,7 +27,6 @@ from music_assistant.providers.airplay.constants import (
     CONF_BUFFER_DEPTH,
     CONF_ENCRYPTION,
     CONF_PASSWORD,
-    CONF_STREAMING_MODE,
     STREAMING_MODE_AP2_COMPAT,
     STREAMING_MODE_AP2_NTP,
     STREAMING_MODE_AP2_PTP,
@@ -82,6 +82,9 @@ def _make_player() -> MagicMock:
     ]
     player.synced_to = None
     player.group_members = []
+    # A real None: a stream only speaks for the player while it is the published
+    # one, and a bare MagicMock reads as some other stream having taken over.
+    player.stream = None
 
     airplay_info = MagicMock()
     airplay_info.port = 7000
@@ -2008,83 +2011,171 @@ async def test_cli_args_streaming_mode_lanes() -> None:
     assert "--timing" not in args
 
 
-@pytest.mark.asyncio
-async def test_clock_stall_switches_solo_auto_player_to_ntp() -> None:
+def test_clock_stall_warns_without_touching_config() -> None:
     """
-    A measured PTP stall on a solo Automatic player self-heals onto NTP.
+    A measured PTP stall is reported; the streaming mode stays the user's.
 
-    The visible streaming-mode setting is written (so the user can see and
-    revert the decision) and a playback restart is scheduled; a synced member
-    or a pinned mode only gets the warning.
+    Even a solo Automatic player is only warned: an automatic switch would
+    persist past whatever caused the stall.
     """
     player = _make_player()
     stream = AirPlayStream(player)
+    player.stream = stream
     stream._handle_status_line(
         "[STATUS] clock_ready mode=ptp state=stalled streak_ms=0 exchanges=0 "
         "ready_in_ms=0 ready_at_unix_ms=0"
     )
-    mass = player.provider.mass
-    mass.config.set_raw_player_config_value.assert_called_once_with(
-        player.player_id, CONF_STREAMING_MODE, STREAMING_MODE_AP2_NTP
-    )
-    assert mass.create_task.called
+    assert stream._clock_stall_warned is True
+    player.provider.mass.config.set_raw_player_config_value.assert_not_called()
+    player.provider.mass.create_task.assert_not_called()
 
-    # A grouped member is reported, never moved: restarting one member of a
-    # live sync group would desync it.
-    grouped_player = _make_player()
-    grouped_player.synced_to = "apleader"
-    grouped = AirPlayStream(grouped_player)
-    grouped._handle_status_line(
+    # A superseded stream's stalled clock is the newer session resetting it on
+    # the receiver, not a verdict about the device: it does not report a
+    # speaker that is playing fine as silent.
+    superseded_player = _make_player()
+    superseded = AirPlayStream(superseded_player)
+    superseded_player.stream = AirPlayStream(superseded_player)
+    superseded._handle_status_line(
         "[STATUS] clock_ready mode=ptp state=stalled streak_ms=0 exchanges=0 "
         "ready_in_ms=0 ready_at_unix_ms=0"
     )
-    grouped_player.provider.mass.config.set_raw_player_config_value.assert_not_called()
+    assert superseded._clock_stall_warned is False
 
-    # An explicitly pinned mode is the user's choice: warn only.
+
+def test_native_control_failure_warns_once_and_never_touches_config(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A terminal native control failure warns the user once and changes no settings.
+
+    The usual cause is the device dropping off the network, so a persisted
+    streaming-mode switch would outlive the dropout; the user stays in control
+    of the setting.
+    """
+    player = _make_player()
+    stream = AirPlayStream(player)
+    player.stream = stream
+
+    with caplog.at_level(logging.WARNING):
+        stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
+        stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
+
+    assert caplog.text.count("stopped answering native AirPlay 2 control keepalives") == 1
+    player.provider.mass.config.set_raw_player_config_value.assert_not_called()
+    player.provider.mass.create_task.assert_not_called()
+
+    # a pinned native route gets the same warning, and equally no config write
     pinned_player = _make_player()
     pinned_player.streaming_mode = STREAMING_MODE_AP2_PTP
     pinned = AirPlayStream(pinned_player)
-    pinned._handle_status_line(
-        "[STATUS] clock_ready mode=ptp state=stalled streak_ms=0 exchanges=0 "
-        "ready_in_ms=0 ready_at_unix_ms=0"
-    )
+    pinned_player.stream = pinned
+    with caplog.at_level(logging.WARNING):
+        pinned._handle_status_line("[ERROR] AirPlay 2 control channel failed")
+    assert pinned._native_control_failure_warned is True
     pinned_player.provider.mass.config.set_raw_player_config_value.assert_not_called()
 
 
-def test_native_control_failure_switches_automatic_player_to_compatibility() -> None:
-    """A terminal native control failure persists the compatibility route once."""
+def test_native_control_failure_on_a_superseded_stream_stays_silent() -> None:
+    """
+    A superseded stream's lost control channel is not reported.
+
+    A second session on the same receiver resets the first one's control
+    channel, so the verdict describes the collision, not the device.
+    """
     player = _make_player()
     stream = AirPlayStream(player)
-
-    stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
-    stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
-
-    player.provider.mass.config.set_raw_player_config_value.assert_called_once_with(
-        player.player_id, CONF_STREAMING_MODE, STREAMING_MODE_AP2_COMPAT
-    )
-    player.provider.mass.create_task.assert_not_called()
-
-
-def test_native_control_failure_does_not_override_pinned_mode() -> None:
-    """A terminal native control failure leaves an explicit streaming mode unchanged."""
-    player = _make_player()
-    player.streaming_mode = STREAMING_MODE_AP2_PTP
-    stream = AirPlayStream(player)
+    player.stream = AirPlayStream(player)
 
     stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
 
+    assert stream._native_control_failure_warned is False
     player.provider.mass.config.set_raw_player_config_value.assert_not_called()
-    player.provider.mass.create_task.assert_not_called()
 
 
-def test_unrelated_cli_error_does_not_switch_to_compatibility() -> None:
+@pytest.mark.parametrize("teardown_flag", ["superseded", "_stopping"])
+def test_clock_stall_on_a_stream_being_torn_down_stays_silent(teardown_flag: str) -> None:
+    """
+    A stream being torn down does not report its stalled clock.
+
+    It stays published until the teardown has its process off the receiver, so a
+    clock that stops answering there describes the session going away, not the
+    device. Reporting it would send the user after a speaker that is fine.
+
+    :param teardown_flag: How the stream is on its way out - handed to the
+        bridge's teardown, or already inside its own stop().
+    """
+    player = _make_player()
+    stream = AirPlayStream(player)
+    player.stream = stream
+    setattr(stream, teardown_flag, True)
+
+    stream._handle_status_line(
+        "[STATUS] clock_ready mode=ptp state=stalled streak_ms=0 exchanges=0 "
+        "ready_in_ms=0 ready_at_unix_ms=0"
+    )
+
+    # the one-shot is still there for a stall that does describe the device
+    assert stream._clock_stall_warned is False
+
+
+@pytest.mark.parametrize("teardown_flag", ["superseded", "_stopping"])
+def test_native_control_failure_on_a_stream_being_torn_down_stays_silent(
+    teardown_flag: str,
+) -> None:
+    """
+    A stream being torn down does not report its lost control channel.
+
+    It stays published until the teardown has its process off the receiver, so
+    owning the player no longer means the failure describes the device: the
+    channel is going away because the session is.
+
+    :param teardown_flag: How the stream is on its way out - handed to the
+        bridge's teardown, or already inside its own stop().
+    """
+    player = _make_player()
+    stream = AirPlayStream(player)
+    player.stream = stream
+    setattr(stream, teardown_flag, True)
+
+    stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
+
+    # the one-shot is still there for a failure that does describe the device
+    assert stream._native_control_failure_warned is False
+
+
+def test_native_control_failure_before_publication_stays_reportable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A failure reported before the stream owns the player does not spend the one-shot.
+
+    A bridge stream is published only once its process has connected, so a
+    verdict dropped during that window must not stop the same failure from
+    being reported afterwards.
+    """
+    player = _make_player()
+    stream = AirPlayStream(player)
+
+    with caplog.at_level(logging.WARNING):
+        stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
+        assert "stopped answering native AirPlay 2 control keepalives" not in caplog.text
+
+        player.stream = stream
+        stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
+
+    assert "stopped answering native AirPlay 2 control keepalives" in caplog.text
+    player.provider.mass.config.set_raw_player_config_value.assert_not_called()
+
+
+def test_unrelated_cli_error_is_not_a_control_channel_verdict() -> None:
     """A different runtime failure does not diagnose the native control route."""
     player = _make_player()
     stream = AirPlayStream(player)
+    player.stream = stream
 
     stream._handle_status_line("[ERROR] AirPlay 2 audio send failed")
 
-    player.provider.mass.config.set_raw_player_config_value.assert_not_called()
+    assert stream._native_control_failure_warned is False
 
 
 @pytest.mark.asyncio
@@ -2155,15 +2246,15 @@ async def test_wait_clock_ready_times_out_for_a_binary_that_never_reports() -> N
 @pytest.mark.asyncio
 async def test_clock_ready_stalled_state_warns_once(caplog: pytest.LogCaptureFixture) -> None:
     """
-    A stalled receiver that cannot be self-healed is reported loudly, once.
+    A stalled receiver is reported loudly, once per stream session.
 
-    A grouped member is never auto-switched (moving one member of a live sync
-    group would desync it), so it takes the warn-only path; the solo Automatic
-    self-heal has its own test.
+    The warning names the player and the PTP ports to check; repeats of the
+    same verdict within the session stay quiet.
     """
     grouped_player = _make_player()
     grouped_player.synced_to = "apleader"
     stream = AirPlayStream(grouped_player)
+    grouped_player.stream = stream
 
     with caplog.at_level(logging.DEBUG):
         ended = stream._handle_status_line(
@@ -2701,9 +2792,18 @@ async def test_process_eof_cleans_up_command_pipe() -> None:
     player.schedule_group_rejoin.assert_not_called()
 
 
-async def _run_unexpected_process_death(player: MagicMock) -> AirPlayStream:
-    """Drive the stderr reader through an unexpected process exit."""
+async def _run_unexpected_process_death(
+    player: MagicMock, *, still_owned: bool = True
+) -> AirPlayStream:
+    """
+    Drive the stderr reader through an unexpected process exit.
+
+    :param still_owned: Whether the dying stream is still the player's current
+        one. False models a stream a newer session already superseded.
+    """
     stream = AirPlayStream(player)
+    if still_owned:
+        player.stream = stream
     process = MagicMock()
     stream._cli_proc = process
 
@@ -2732,6 +2832,15 @@ async def test_unexpected_death_of_synced_child_schedules_rejoin() -> None:
 
     stream = await _run_unexpected_process_death(player)
 
+    # the member is dropped from its native sync leader directly: cmd_ungroup
+    # would resolve a linked protocol player to its visible parent and act at
+    # the group level, removing the member from its (sync)group over one dead
+    # transport
+    players_controller = player.provider.mass.players
+    players_controller.cmd_set_members.assert_called_once_with(
+        "leader", player_ids_to_remove=[player.player_id]
+    )
+    players_controller.cmd_ungroup.assert_not_called()
     player.schedule_group_rejoin.assert_called_once_with(["leader", "sibling"])
     player.set_state_from_stream.assert_called_once_with(
         state=PlaybackState.IDLE, elapsed_time=0, stream=stream
@@ -2793,6 +2902,29 @@ async def test_unexpected_death_of_static_group_member_drops_member_only() -> No
     )
     players_controller.cmd_ungroup.assert_not_called()
     player.schedule_group_rejoin.assert_called_once_with(["leader"])
+
+
+@pytest.mark.asyncio
+async def test_unexpected_death_of_superseded_stream_leaves_the_group_alone() -> None:
+    """
+    A superseded process dying does not ungroup the player or schedule a re-join.
+
+    Its death is the newer session taking the receiver over, so acting on it
+    would tear down the healthy session that replaced it.
+    """
+    player = _make_player()
+    player.synced_to = "leader"
+    player.group_members = []
+    player.stream = AirPlayStream(player)
+
+    stream = await _run_unexpected_process_death(player, still_owned=False)
+
+    players_controller = player.provider.mass.players
+    players_controller.cmd_ungroup.assert_not_called()
+    players_controller.cmd_set_members.assert_not_called()
+    player.schedule_group_rejoin.assert_not_called()
+    player.set_state_from_stream.assert_not_called()
+    assert stream._stopped is True
 
 
 @pytest.mark.asyncio
@@ -3765,3 +3897,28 @@ async def test_password_preflight_skipped_for_raop() -> None:
     player.get_setup_value = MagicMock(return_value=None)
 
     AirPlayStream(player)._check_password_preflight()
+
+
+@pytest.mark.asyncio
+async def test_accepts_audio_ends_with_the_audio_eof() -> None:
+    """
+    A stream that was sent its audio EOF keeps running but takes no more audio.
+
+    The EOF closes the binary's stdin for good while the process itself plays out
+    and exits, so a warm refill has to read this rather than the process state.
+    """
+    player = _make_player()
+    stream = AirPlayStream(player)
+    cli_proc = AsyncProcess(["cat"], stdin=True, stdout=True)
+    await cli_proc.start()
+    stream._cli_proc = cli_proc
+    try:
+        assert stream.running
+        assert stream.accepts_audio
+
+        await stream.write_audio_eof()
+
+        assert stream.running
+        assert not stream.accepts_audio
+    finally:
+        await cli_proc.close()
