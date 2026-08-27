@@ -14,7 +14,7 @@ from music_assistant.providers.airplay_receiver import AirPlayReceiverProvider
 
 @pytest.fixture
 def provider() -> MagicMock:
-    """Create a mock provider with the real play-state handling bound to it."""
+    """Create a mock provider + daemon with the real play-state handling bound to it."""
     mock = MagicMock()
     mock.logger = MagicMock()
     mock._first_volume_event_received = False
@@ -26,10 +26,10 @@ def provider() -> MagicMock:
     mock._audio_source.uri = "airplay://source"
     mock._write_silence_to_unblock_stream = AsyncMock()
 
-    def _clear_active_player() -> None:
-        mock._active_player_id = None
-        mock._in_use_by_player = None
-        mock._active_session_id = None
+    def _clear_active_player(cleared: MagicMock) -> None:
+        cleared.active_player_id = None
+        cleared.in_use_by_player = None
+        cleared.active_session_id = None
 
     mock._clear_active_player.side_effect = _clear_active_player
 
@@ -38,15 +38,15 @@ def provider() -> MagicMock:
 
     mock.mass.create_task.side_effect = _create_task
 
-    def _start_playback(player_id: str) -> Any:
-        return AirPlayReceiverProvider._start_playback(mock, player_id)
+    def _start_playback(target_daemon: MagicMock, player_id: str) -> Any:
+        return AirPlayReceiverProvider._start_playback(mock, target_daemon, player_id)
 
     mock._start_playback.side_effect = _start_playback
     return mock
 
 
 def _handle(mock: MagicMock, play_state: str) -> None:
-    AirPlayReceiverProvider._handle_play_state_change(mock, play_state)
+    AirPlayReceiverProvider._handle_play_state_change(mock, mock.daemon, play_state)
 
 
 async def test_play_waits_for_inflight_stop(provider: MagicMock) -> None:
@@ -74,12 +74,12 @@ async def test_play_waits_for_inflight_stop(provider: MagicMock) -> None:
     stop_release.set()
     await asyncio.sleep(0.01)
     assert events == ["stop_done", "play"]
-    assert provider._pending_stop_task is None
+    assert provider.daemon.pending_stop_task is None
 
 
 async def test_play_without_pending_stop_starts_immediately(provider: MagicMock) -> None:
     """A plain session start plays right away."""
-    provider._in_use_by_player = None
+    provider.daemon.in_use_by_player = None
     provider.mass.player_queues.play_media = AsyncMock()
 
     _handle(provider, "playing")

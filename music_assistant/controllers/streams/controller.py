@@ -776,6 +776,7 @@ class StreamsController(CoreController):
                 player=player,
                 session=session,
                 streamdetails=streamdetails,
+                provider=prov,
             )
             serving = True
             self._active_output_streams += 1
@@ -1220,8 +1221,10 @@ class StreamsController(CoreController):
                 raise AudioError(
                     f"Unknown (or invalid) audio source session: {media.queue_session_id}"
                 )
-            return self._get_audio_source_session_stream(
-                session, pcm_format, player_id or media.source_id
+            return self._count_as_output_stream(
+                self._get_audio_source_session_stream(
+                    session, pcm_format, player_id or media.source_id
+                )
             )
         if media.source_id and media.queue_item_id:
             # Queue stream request - determine flow_mode based on player capabilities
@@ -1282,7 +1285,7 @@ class StreamsController(CoreController):
                     flow_stream = self.audio.get_overlay_mixed_stream(
                         queue, flow_stream, pcm_format
                     )
-                return flow_stream
+                return self._count_as_output_stream(flow_stream)
             # single item stream (e.g. radio or non-flow mode)
             queue_item = self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
             assert queue_item
@@ -1452,30 +1455,26 @@ class StreamsController(CoreController):
                 # release control
                 plugin_source.in_use_by = None
 
-    def _source_fades_an_adjacent_item(self, queue: PlayerQueue, queue_item: QueueItem) -> bool:
+    async def _count_as_output_stream(self, inner: AsyncGenerator[bytes]) -> AsyncGenerator[bytes]:
         """
-        Return whether the same source serves an item next to this one.
+        Forward a queue stream while it counts towards the active-output-stream gauge.
 
-        Stands in for a source that is not serving this queue yet and so cannot answer
-        for the item itself: a source can only fade across a boundary it owns both
-        sides of, which makes this a necessary condition rather than proof of a fade.
-        Both neighbours count, the same way one of our own fades credits both of its
-        sides - the last track of a queue is still the side that was faded into.
+        Direct-PCM consumers (AirPlay, Snapcast, Sendspin, Squeezelite, UGP, ...) call
+        ``get_stream`` instead of going through the HTTP route, so without this they never
+        register as playing and audio analysis keeps its idle CPU budget while they stream.
 
-        :param queue: Queue the item is played from.
-        :param queue_item: Queue item whose neighbours to check.
+        :param inner: The queue (flow or single item) stream to forward.
         """
-        assert queue_item.streamdetails is not None  # guaranteed by the caller
-        controller = self.mass.player_queues
-        queue_id = queue.queue_id
-        neighbours = [controller.get_next_item(queue_id, queue_item.queue_item_id)]
-        index = controller.index_by_id(queue_id, queue_item.queue_item_id)
-        if index is not None and index > 0:
-            neighbours.append(controller.get_item(queue_id, index - 1))
-        return any(
-            self._served_by(neighbour, queue_item.streamdetails.provider)
-            for neighbour in neighbours
-        )
+        self._active_output_streams += 1
+        try:
+            # aclosing guarantees the generator (and thus the ffmpeg process chain behind
+            # it) is torn down when the consumer stops iterating; an async for does not
+            # close its iterator on its own.
+            async with aclosing(inner):
+                async for chunk in inner:
+                    yield chunk
+        finally:
+            self._active_output_streams -= 1
 
     def _served_by(self, queue_item: QueueItem | None, provider_instance: str) -> bool:
         """
@@ -1503,7 +1502,6 @@ class StreamsController(CoreController):
         pcm_format: AudioFormat,
         overlay_enabled: bool,
         session_id: str | None = None,
-        source_crossfade_mode: CrossfadeMode = CrossfadeMode.DISABLED,
     ) -> None:
         """
         Store the shared processing context selected for a queue item.
@@ -1518,7 +1516,6 @@ class StreamsController(CoreController):
         :param pcm_format: Shared PCM format leaving queue processing.
         :param overlay_enabled: Whether an overlay is mixed into this stream.
         :param session_id: Queue session that owns processing-detail updates.
-        :param source_crossfade_mode: Crossfade the item's own source applies, if any.
         """
         if queue_item.streamdetails is None:
             return
@@ -1540,10 +1537,30 @@ class StreamsController(CoreController):
                     "float",
                     queue_item.extra_attributes.get("playback_speed", 1.0),
                 ),
-                crossfade_mode=source_crossfade_mode,
+                crossfade_mode=CrossfadeMode.DISABLED,
                 overlay_active=overlay_enabled,
             ),
             alters_audio=queue_item.streamdetails.fade_in,
+        )
+
+    def _update_audio_source_processing_context(
+        self,
+        session: AudioSourceSession,
+        provider: PluginProvider,
+    ) -> None:
+        """
+        Publish source-owned processing for a live AudioSource.
+
+        :param session: Active source session to publish.
+        :param provider: Plugin delivering the live source.
+        """
+        if session.streamdetails is None:
+            return
+        self.audio_processing.update_source_context(
+            session.player_id,
+            session.playback_session_id,
+            crossfade_enabled=provider.delivers_crossfaded_audio(session.streamdetails),
+            volume_normalization_enabled=provider.delivers_normalized_audio(session.streamdetails),
         )
 
     def _get_announcement_http_profile(self, player_id: str, announce_data: AnnounceData) -> str:

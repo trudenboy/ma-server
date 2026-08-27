@@ -5,28 +5,18 @@ This plugin allows Music Assistant to receive AirPlay audio streams
 and use them as a source for any player. It uses shairport-sync to
 receive the AirPlay streams and outputs them as PCM audio.
 
-The provider has multi-instance support, so multiple AirPlay receivers
-can be configured with different names.
+The provider runs as a single instance that advertises one AirPlay receiver
+(one shairport-sync daemon and one AudioSource) per connected Music
+Assistant player.
 """
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import os
-import time
-from collections.abc import Callable
-from contextlib import suppress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
-from music_assistant_models.enums import (
-    ContentType,
-    ImageType,
-    MediaType,
-    PlaybackState,
-    ProviderFeature,
-    SourceControl,
-    StreamType,
+from music_assistant.providers.airplay_receiver.provider import (
+    AirPlayReceiverProvider,
+    airplay_receiver_ports,
 )
 from music_assistant_models.errors import (
     AudioError,
@@ -51,40 +41,17 @@ from music_assistant.providers.airplay_receiver.helpers import get_shairport_syn
 from music_assistant.providers.airplay_receiver.metadata import MetadataReader
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
+    from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
 
-CONF_MASS_PLAYER_ID = "mass_player_id"
-CONF_AIRPLAY_NAME = "airplay_name"
-DEFAULT_AIRPLAY_NAME = "Music Assistant"
-
-# Special value for auto player selection
-PLAYER_ID_AUTO = "__auto__"
-
-SUPPORTED_FEATURES = {ProviderFeature.AUDIO_SOURCE}
-
-# stable id for the single AudioSource this provider exposes;
-# combined with the provider instance_id this forms the persistent uri
-AUDIO_SOURCE_ID = "main"
-
-# seconds the silence nudge waits for the audio pipe's consumer to reattach
-AUDIO_PIPE_READER_TIMEOUT = 1.0
-
-
-def airplay_receiver_port(instance_id: str) -> int:
-    """
-    Return the AirPlay port used by a receiver instance.
-
-    Deterministically derived from the instance id, so it stays the same across
-    server restarts (Python's built-in ``hash()`` is salted per process).
-
-    :param instance_id: The provider instance id of the AirPlay receiver.
-    """
-    digest = hashlib.md5(instance_id.encode(), usedforsecurity=False).hexdigest()
-    return 7000 + int(digest, 16) % 1000
+__all__ = [
+    "AirPlayReceiverProvider",
+    "airplay_receiver_ports",
+    "setup",
+]
 
 
 async def setup(

@@ -116,6 +116,11 @@ BACKOFF_TIME_UPPER_LIMIT: Final[int] = 300  # Five minutes
 
 FALLBACK_VOLUME: Final[int] = 20
 AIRPLAY_VOLUME_MUTE: Final[float] = -144.0
+# How long a volume we sent ourselves keeps the device's own volume reports from
+# being acted on. A receiver echoes every level it is given back over DACP, and
+# an echo that arrives after the next level was already sent would otherwise be
+# read as the user turning the knob and written straight back to the device.
+AIRPLAY_VOLUME_ECHO_GRACE_S: Final[float] = 2.0
 
 AIRPLAY_PCM_FORMAT = AudioFormat(
     content_type=ContentType.from_bit_depth(16), sample_rate=44100, bit_depth=16

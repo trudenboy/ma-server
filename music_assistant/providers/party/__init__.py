@@ -173,6 +173,7 @@ class PartyPlugin(PluginProvider):
                             self.mass.players.all_players(False, False),
                             key=lambda p: p.display_name.lower(),
                         )
+                        if player.type in PLAYBACK_TARGET_TYPES
                     ],
                 ],
             ),

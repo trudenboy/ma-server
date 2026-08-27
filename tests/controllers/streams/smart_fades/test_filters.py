@@ -10,10 +10,7 @@ from __future__ import annotations
 import logging
 import re
 
-import pytest
-
 from music_assistant.controllers.streams.smart_fades.filters import (
-    CrossfadeFilter,
     FadeOutTrimFilter,
     FrequencySweepFilter,
 )
@@ -196,22 +193,36 @@ def test_fadeout_trim_trims_fadeout_and_passes_fadein_through() -> None:
     assert passthrough.endswith(f"[{fadeout_trim.output_fadein_label}]")
 
 
-def test_crossfade_uses_equal_power_curves() -> None:
-    """The level crossfade must use equal-power curves, not ffmpeg's default tri/tri."""
-    crossfade = CrossfadeFilter(logger=LOGGER, crossfade_duration=12.5)
+def test_streaming_crossfade_blends_the_exact_overlap() -> None:
+    """
+    The blend fades both streams over the sample-exact overlap and sums them.
+
+    afade+amix instead of acrossfade on purpose: acrossfade holds all output
+    back until its second input hits EOF, which would stall a fade whose
+    incoming side is still arriving. Equal-power qsin curves, not ffmpeg's
+    default tri/tri. The final output stays unlabeled: an unconnected named
+    output fails the whole graph.
+    """
+    crossfade = StreamingCrossfadeFilter(logger=LOGGER, crossfade_samples=441000)
     filter_strings = crossfade.apply("[fadein]", "[fadeout]")
-    assert filter_strings == ["[fadeout][fadein]acrossfade=d=12.5:c1=qsin:c2=qsin"]
+    assert filter_strings == [
+        "[fadeout]afade=t=out:start_sample=0:nb_samples=441000:curve=qsin[xfade_out]",
+        "[fadein]afade=t=in:start_sample=0:nb_samples=441000:curve=qsin[xfade_in]",
+        "[xfade_out][xfade_in]amix=inputs=2:normalize=0",
+    ]
 
 
 def test_crossfade_sample_count_uses_ns() -> None:
     """
-    A sample-count crossfade must emit ``acrossfade=ns=`` rather than ``d=``.
+    A positioned blend delays the incoming stream and hard-cuts the outgoing one.
 
-    ffmpeg's ``acrossfade`` silently produces no output when its requested length
-    overruns the buffer it is fed; an integer sample count matches a frame-aligned
-    buffer exactly, where a fractional ``d`` can round just past it.
+    The pre-point places the fade on the outgoing stream, adelay (sample-exact,
+    ``S`` suffix) aligns the incoming stream under it, and the trim at the
+    planned end keeps any time-stretch drift out of the incoming audio.
     """
-    crossfade = CrossfadeFilter(logger=LOGGER, crossfade_samples=441000)
+    crossfade = StreamingCrossfadeFilter(
+        logger=LOGGER, crossfade_samples=441000, pre_crossfade_samples=882000
+    )
     filter_strings = crossfade.apply("[fadein]", "[fadeout]")
     assert filter_strings == ["[fadeout][fadein]acrossfade=ns=441000:c1=qsin:c2=qsin"]
 

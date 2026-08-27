@@ -65,7 +65,6 @@ DEFAULT_SENDSPIN_CLIENT_PORT = 8928
 DEFAULT_SENDSPIN_CLIENT_PATH = "/sendspin"
 VIRTUAL_PLAYER_REGISTER_TIMEOUT = 10.0
 VIRTUAL_PLAYER_CLEANUP_DELAYS = (0.0, 0.5, 2.0)
-VIRTUAL_PLAYER_CLEANUP_TIMEOUT = 2.0
 WEB_PLAYER_CONNECT_TIMEOUT = 10.0
 # Grace period so a network blip keeps the pairing record.
 SESSION_PAIRING_EVICTION_GRACE = 120.0
@@ -332,6 +331,7 @@ class SendspinProvider(PlayerProvider):
                 key=CONF_ALLOW_LEGACY_CLIENTS,
                 type=ConfigEntryType.BOOLEAN,
                 default_value=True,
+                hidden=True,
             ),
             ConfigEntry(
                 key=CONF_MIN_PIN_LENGTH,
@@ -388,7 +388,7 @@ class SendspinProvider(PlayerProvider):
         self.server_api = SendspinServer(
             self.mass.loop,
             identity,
-            "Music Assistant",
+            self.mass.webserver.server_name,
             self.mass.http_session,
             pairing_store=pairing_store,
             allow_unencrypted=allow_legacy_clients,

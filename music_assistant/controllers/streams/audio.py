@@ -15,7 +15,7 @@ import re
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Iterable
-from contextlib import aclosing, asynccontextmanager, nullcontext
+from contextlib import aclosing, asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
@@ -94,6 +94,7 @@ from music_assistant.helpers.audio import (
     HTTP_HEADERS,
     HTTP_HEADERS_ICY,
     arriving_audio_format,
+    audio_source_silence_keepalive,
     build_concat_filelist,
     calculate_content_length,
     get_bit_rate,
@@ -105,6 +106,7 @@ from music_assistant.helpers.audio import (
     resample_pcm_audio,
     resolve_output_player_ids,
 )
+from music_assistant.helpers.compare import compare_item_ids
 from music_assistant.helpers.dsp import ComplexFilter, filter_to_ffmpeg_params
 from music_assistant.helpers.ffmpeg import (
     FFMpeg,
@@ -145,6 +147,119 @@ class CrossfadeData:
 def overlay_active(queue: PlayerQueue) -> bool:
     """Return True if the given queue has an audio overlay enabled and a source selected."""
     return queue.overlay_enabled and queue.overlay_source is not None
+
+
+class _TailHold:
+    """
+    Grow a fade-out holdback out of what a source delivered ahead of playback.
+
+    Withholding a fixed window starves a source that delivers near playback pace
+    (a realtime session, a slow provider, a seek close to the end of a track). The
+    only audio that may be withheld is what the stream received beyond the wall
+    clock plus a safety reserve - audio the player provably does not need to keep
+    rendering in time - and only half of that, so the player's own lead keeps
+    growing too. Once the source is done, the rest is resident and the full window
+    is available.
+    """
+
+    # the player's supply must stay at least this far ahead of the wall clock
+    _LEAD_RESERVE_S = 3.0
+
+    def __init__(self, pcm_format: AudioFormat, queue_item: QueueItem) -> None:
+        """
+        Initialize the tracker for one track's stream.
+
+        :param pcm_format: PCM format of the stream's chunks.
+        :param queue_item: The item being streamed; its source buffer is resolved at
+            hold time, because opening the stream is what creates it - and a capacity
+            reselection can hand the item different details altogether.
+        """
+        self._pcm_format = pcm_format
+        self._queue_item = queue_item
+        self._started: float | None = None
+        self._last_noted = 0.0
+        self._received_bytes = 0
+
+    # an arrival gap this long is a suspension (pause, sink hold), not elapsed
+    # listening; counting it would wrongly erase the banked surplus for good
+    _SUSPEND_FORGIVE_S = 5.0
+
+    def note_bytes(self, count: int) -> None:
+        """
+        Record stream bytes as they arrive (anchors the clock on the first ones).
+
+        :param count: Number of PCM bytes received.
+        """
+        now = asyncio.get_event_loop().time()
+        if self._started is None:
+            self._started = now
+        elif now - self._last_noted > self._SUSPEND_FORGIVE_S:
+            self._started += now - self._last_noted
+        self._last_noted = now
+        self._received_bytes += count
+
+    def hold_target(self, max_bytes: int, frame_size: int) -> int:
+        """
+        Return how many bytes of tail may currently be held back.
+
+        :param max_bytes: The full fade-out window (the cap).
+        :param frame_size: PCM frame size the target is aligned down to.
+        """
+        if self._started is None:
+            return 0
+        streamdetails = self._queue_item.streamdetails
+        audio_buffer = cast("AudioBuffer | None", streamdetails.buffer) if streamdetails else None
+        if audio_buffer is not None:
+            if audio_buffer.has_error:
+                # a failed source is skipped without a fade, so its remaining audio
+                # is better off played out than held back for one
+                return 0
+            if audio_buffer.eof:
+                # the source is done: everything left is resident, hold the full window
+                return max_bytes
+        elapsed = asyncio.get_event_loop().time() - self._started
+        received_seconds = self._received_bytes / self._pcm_format.pcm_sample_size
+        spare_seconds = received_seconds - elapsed - self._LEAD_RESERVE_S
+        surplus_bytes = int(max(0.0, spare_seconds) * self._pcm_format.pcm_sample_size) // 2
+        return min(max_bytes, surplus_bytes // frame_size * frame_size)
+
+
+async def _incoming_overlap_stream(
+    collected: bytes,
+    stream: AsyncGenerator[bytes],
+    target_size: int,
+    overshoot: bytearray,
+    on_pulled: Callable[[int], None],
+) -> AsyncGenerator[bytes]:
+    """
+    Yield exactly the incoming track's overlap: what is in hand, then the live stream.
+
+    :param collected: Overlap bytes already collected when the mix starts.
+    :param stream: The incoming track's stream, read further as needed; bytes read
+        beyond the overlap are not lost (see ``overshoot``) and the stream itself
+        stays open for the track's body.
+    :param target_size: Exact number of overlap bytes to yield.
+    :param overshoot: Receives bytes read beyond the overlap (they open the body).
+    :param on_pulled: Called with the size of every chunk taken off the stream here,
+        as it is taken - these bypass the caller's own read loop.
+    """
+    taken = 0
+    if collected:
+        part = collected[:target_size]
+        overshoot.extend(collected[target_size:])
+        taken = len(part)
+        yield part
+    while taken < target_size:
+        try:
+            next_chunk = await anext(stream)
+        except StopAsyncIteration:
+            return
+        on_pulled(len(next_chunk))
+        remaining = target_size - taken
+        part = next_chunk[:remaining]
+        overshoot.extend(next_chunk[remaining:])
+        taken += len(part)
+        yield part
 
 
 class _IncomingFadePrefetcher:
@@ -209,7 +324,6 @@ class _IncomingFadePrefetcher:
             or next_item.queue_item_id == queue_item.queue_item_id
             or next_item.media_type != MediaType.TRACK
             or (streamdetails := next_item.streamdetails) is None
-            or streamdetails.is_realtime
             # without a duration the read below cannot be kept clear of the track's end
             or not streamdetails.duration
             or (audio_buffer := cast("AudioBuffer | None", streamdetails.buffer)) is None
@@ -274,7 +388,13 @@ class _IncomingFadePrefetcher:
             return None
         # stop collecting: from here the flow stream reads the same generator itself
         self._target = 0
-        await self._task
+        try:
+            # the collector only sees the new target once its next chunk arrives, so a
+            # source that stalled would hold the handover; give up on it instead
+            await asyncio.wait_for(self._task, timeout=PREFETCH_HANDOVER_TIMEOUT)
+        except TimeoutError:
+            await self.close()
+            return None
         if self._failed or (self._streamdetails is not None and self._streamdetails.stream_error):
             await self.close()
             return None
@@ -1860,7 +1980,8 @@ class StreamsAudio:
 
         buffer = b""
         bytes_written = 0
-        # calculate crossfade buffer size
+        # calculate crossfade buffer size; a realtime source's holdback only ever
+        # withholds its banked surplus, so the smart window is a ceiling there
         crossfade_buffer_duration = (
             SMART_CROSSFADE_DURATION
             if crossfade_mode == CrossfadeMode.SMART_CROSSFADE
@@ -1873,7 +1994,7 @@ class StreamsAudio:
             else crossfade_buffer_duration,
         )
         # skip crossfade if buffer would be too small to be meaningful
-        if crossfade_buffer_duration < MIN_CROSSFADE_FALLBACK_DURATION:
+        if crossfade_buffer_duration < MIN_CROSSFADE_DURATION:
             crossfade_buffer_duration = 0
         # Ensure crossfade buffer size is aligned to frame boundaries
         # Frame size = bytes_per_sample * channels
@@ -1926,6 +2047,8 @@ class StreamsAudio:
             playback_speed=cast("float", queue_item.extra_attributes.get("playback_speed", 1.0)),
         ):
             total_chunks_received += 1
+            if tail_hold is not None:
+                tail_hold.note_bytes(len(chunk))
 
             if warmup_bytes < crossfade_buffer_size:
                 # warmup: yield directly, don't buffer
@@ -1975,7 +2098,7 @@ class StreamsAudio:
         fade_in_playback_speed = 1.0
         # a fade needs enough of the outgoing track to overlap with; a holdback that
         # armed late (or not at all) leaves less than that
-        min_fade_out_size = int(pcm_format.pcm_sample_size * MIN_CROSSFADE_FALLBACK_DURATION)
+        min_fade_out_size = int(pcm_format.pcm_sample_size * MIN_CROSSFADE_DURATION)
         if len(buffer) >= min_fade_out_size and next_queue_item and next_queue_item.streamdetails:
             fade_in_playback_speed = cast(
                 "float", next_queue_item.extra_attributes.get("playback_speed", 1.0)
@@ -1995,11 +2118,15 @@ class StreamsAudio:
                 next_sample_rate=next_pcm.sample_rate,
             )
             if crossfade_allowed:
+                # a realtime incoming track has audio to read only once its session
+                # produces; give it a bounded chance to show up
+                await self._await_realtime_fade_source(next_queue_item.streamdetails)
                 transition_mode, fade_in_buffer_duration = self._select_buffered_crossfade(
                     next_queue_item.streamdetails,
                     crossfade_mode,
                     standard_crossfade_duration,
-                    fade_in_playback_speed,
+                    fade_out_seconds=len(buffer) / pcm_format.pcm_sample_size,
+                    playback_speed=fade_in_playback_speed,
                 )
                 crossfade_allowed = transition_mode != CrossfadeMode.DISABLED
         if not crossfade_allowed:
@@ -2625,12 +2752,16 @@ class StreamsAudio:
         if next_item.media_type != MediaType.TRACK:
             self.logger.debug("Skipping crossfade: next item is not a track")
             return False
+        # an item picks up its library album only once it is loaded, so a queue fed straight
+        # from a provider can hold the provider album on the side that is not loaded yet.
+        # Matching on the provider mappings recognises both shapes as the same album; the
+        # uri-based equality of the album objects does not.
         if (
             isinstance(queue_item.media_item, Track)
             and isinstance(next_item.media_item, Track)
             and queue_item.media_item.album
             and next_item.media_item.album
-            and queue_item.media_item.album == next_item.media_item.album
+            and compare_item_ids(queue_item.media_item.album, next_item.media_item.album)
             and not self.mass.config.get_raw_core_config_value(
                 "streams", CONF_ALLOW_CROSSFADE_SAME_ALBUM, False
             )

@@ -107,6 +107,51 @@ async def test_scan_recursive_stops_on_directory_cycle() -> None:
     assert sorted(scanned) == ["", "A", "A/B"]
 
 
+async def test_enumerate_routes_metadata_files_separately_from_media() -> None:
+    """The WebDAV walk collects NFO/images as metadata files, never as media or present files."""
+    provider = _make_provider()
+    provider._sync_tracks = True
+    listing = {
+        "": [
+            FileSystemItem("Artist", "Artist", "", is_dir=True),
+        ],
+        "Artist": [
+            FileSystemItem("track.mp3", "Artist/track.mp3", "", is_dir=False, checksum="1"),
+            FileSystemItem("artist.nfo", "Artist/artist.nfo", "", is_dir=False, checksum="1"),
+            FileSystemItem("folder.jpg", "Artist/folder.jpg", "", is_dir=False, checksum="1"),
+            FileSystemItem("notes.txt", "Artist/notes.txt", "", is_dir=False, checksum="1"),
+        ],
+    }
+
+    async def fake_scandir(path: str) -> list[FileSystemItem]:
+        return listing[path]
+
+    provider._scandir = AsyncMock(side_effect=fake_scandir)  # type: ignore[method-assign]
+    items_to_process: list[tuple[FileSystemItem, str | None]] = []
+    cur_filenames: set[str] = set()
+    metadata_files: list[FileSystemItem] = []
+
+    await provider._enumerate_files_for_sync(
+        file_checksums={},
+        cue_file_checksums={},
+        cur_filenames=cur_filenames,
+        items_to_process=items_to_process,
+        unchanged_cue_items=[],
+        cue_stems=set(),
+        scan_errors=ScanErrors(),
+        metadata_files=metadata_files,
+    )
+
+    assert [item.relative_path for item, _ in items_to_process] == ["Artist/track.mp3"]
+    assert sorted(item.relative_path for item in metadata_files) == [
+        "Artist/artist.nfo",
+        "Artist/folder.jpg",
+    ]
+    # metadata files are never recorded present (unrelated to deletion tracking); notes.txt
+    # is neither media nor a recognized metadata file, so the walk skips it entirely
+    assert cur_filenames == set()
+
+
 @pytest.mark.parametrize("special", ["Live; Unplugged", "Die drei ???", "Rock #1"])
 async def test_scan_recursive_does_not_loop_on_special_chars(special: str) -> None:
     """Folders with reserved characters must be traversed without looping."""

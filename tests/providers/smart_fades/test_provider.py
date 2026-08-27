@@ -5,20 +5,30 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import Callable, Generator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
+from beat_this.inference import Spect2Frames
 from music_assistant_models.enums import ContentType, MediaType
 from music_assistant_models.errors import SetupFailedError
 from music_assistant_models.media_items import AudioFormat
 from torchaudio.transforms import SpectralCentroid
 
 from music_assistant.models.audio_analysis import AudioAnalysisData, AudioAnalysisError
-from music_assistant.providers.smart_fades.provider import ANALYSIS_SAMPLE_RATE, SmartFadesProvider
+from music_assistant.providers.smart_fades.dbn_postprocessor import DBNDownBeatTracker
+from music_assistant.providers.smart_fades.provider import (
+    ANALYSIS_SAMPLE_RATE,
+    BEAT_WINDOW_PACE_RATIO,
+    LoadedModels,
+    SmartFadesProvider,
+)
 from music_assistant.providers.smart_fades.vocal_activity import (
     FIRERED_MEL_BINS,
     infer_firered_chunk,
@@ -90,6 +100,7 @@ def mass_mock() -> Mock:
     mass.streams.audio_analysis = Mock()
     mass.streams.audio_analysis.get_audio_analysis_version = AsyncMock(return_value=None)
     mass.streams.audio_analysis.set_audio_analysis = AsyncMock()
+    mass.streams.audio_analysis.playback_active = Mock(return_value=False)
     mass.config = Mock()
     mass.config.get = Mock(return_value={})
     return mass
@@ -116,19 +127,28 @@ def config_mock() -> Mock:
     return config
 
 
+def _stub_models() -> LoadedModels:
+    """Return a model set with stand-ins for every component; the centroid is the real one."""
+    return LoadedModels(
+        beat_this=Mock(),
+        beat_this_post_processor=Mock(),
+        skey_vqt=Mock(),
+        skey_chromanet=Mock(),
+        skey_crop=Mock(),
+        spectral_centroid=SpectralCentroid(sample_rate=ANALYSIS_SAMPLE_RATE, hop_length=512),
+        firered=Mock(),
+        firered_cmvn_means=np.zeros(FIRERED_MEL_BINS, dtype=np.float64),
+        firered_cmvn_inverse_std=np.ones(FIRERED_MEL_BINS, dtype=np.float64),
+    )
+
+
 @pytest.fixture
 async def provider(mass_mock: Mock, manifest_mock: Mock, config_mock: Mock) -> SmartFadesProvider:
     """Return a SmartFadesProvider without loading external model assets."""
     prov = SmartFadesProvider(mass_mock, manifest_mock, config_mock, set())
     with patch.object(prov, "_load_models", new=AsyncMock()):
         await prov.handle_async_init()
-    prov._spectral_centroid = SpectralCentroid(
-        sample_rate=ANALYSIS_SAMPLE_RATE,
-        hop_length=512,
-    )
-    prov._firered_model = Mock()
-    prov._firered_cmvn_means = np.zeros(FIRERED_MEL_BINS, dtype=np.float64)
-    prov._firered_cmvn_inverse_std = np.ones(FIRERED_MEL_BINS, dtype=np.float64)
+    prov._models = _stub_models()
     return prov
 
 

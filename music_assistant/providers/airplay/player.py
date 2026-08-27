@@ -35,6 +35,7 @@ from .constants import (
     AIRPLAY_HIRES_SAMPLE_RATES,
     AIRPLAY_PCM_FORMAT,
     AIRPLAY_REJOIN_ATTEMPT_DELAYS,
+    AIRPLAY_VOLUME_ECHO_GRACE_S,
     BASE_PLAYER_FEATURES,
     CONF_AIRPLAY_CREDENTIALS,
     CONF_AIRPLAY_PROTOCOL,
@@ -50,6 +51,7 @@ from .constants import (
     CONF_RAOP_CREDENTIALS,
     FALLBACK_VOLUME,
     LEGACY_PAIRING_BIT,
+    PAIRING_PIN_FORMAT,
     PASSWORD_BIT,
     PIN_REQUIRED,
     RAOP_DISCOVERY_TYPE,
@@ -110,6 +112,7 @@ class AirPlayPlayer(Player):
         self.address = address
         self.stream: AirPlayStream | None = None
         self.last_command_sent = 0.0
+        self._volume_reports_ignored_until = 0.0
         self._lock = asyncio.Lock()
         self._transitioning = False  # Set during stream replacement to ignore stale DACP messages
         self._rejoin_task: asyncio.Task[None] | None = None
@@ -726,14 +729,14 @@ class AirPlayPlayer(Player):
         self, announcement: PlayerMedia, volume_level: int | None = None
     ) -> None:
         """
-        Play an announcement natively: mixed over live playback, or as its own session.
+        Play an announcement natively, mixed over the audio the player is rendering.
 
         :param announcement: Details of the announcement that needs to be played.
         :param volume_level: Optional volume level for the announcement.
         """
-        # The lock windows live inside the orchestration: the dispatch decision
-        # and session mutations hold self._lock like play_media does, while the
-        # multi-second clip waits run outside it (see announce.py).
+        # The lock windows live inside the orchestration: the dispatch decision and
+        # the arming hold self._lock like play_media does, while the multi-second
+        # clip waits run outside it (see announce.py).
         await announce.play_announcement(self, announcement, volume_level)
 
     async def volume_set(self, volume_level: int) -> None:
@@ -875,19 +878,36 @@ class AirPlayPlayer(Player):
             # always update the state after modifying group members
             self.update_state()
 
-    def update_volume_from_device(self, volume: int) -> None:
-        """Update volume from device feedback."""
-        ignore_volume_report = (
+    @property
+    def ignore_volume_reports(self) -> bool:
+        """Return True if the device's own volume reports must not be acted on."""
+        if self._volume_reports_ignored_until > time.time():
+            # a level we sent ourselves is still echoing back
+            return True
+        return bool(
             self.config.get_value(CONF_IGNORE_VOLUME)
             or self.device_info.manufacturer.lower() == "apple"
         )
 
-        if ignore_volume_report:
+    def suppress_volume_reports(self, seconds: float = AIRPLAY_VOLUME_ECHO_GRACE_S) -> None:
+        """
+        Ignore the device's own volume reports for the given time.
+
+        :param seconds: How long from now the reports are ignored; a window that is
+            already open is only ever extended.
+        """
+        self._volume_reports_ignored_until = max(
+            self._volume_reports_ignored_until, time.time() + seconds
+        )
+
+    def update_volume_from_device(self, volume: int) -> None:
+        """Update volume from device feedback."""
+        if self.ignore_volume_reports:
             return
 
         cur_volume = self.volume_level or 0
         if abs(cur_volume - volume) > 1 or (time.time() - self.last_command_sent) > 3:
-            self.mass.create_task(self.volume_set(volume))
+            self.mass.create_task(self._adopt_device_volume(volume))
         else:
             self._attr_volume_level = volume
             self.mass.config.set_raw_player_config_value(self.player_id, CONF_STORED_VOLUME, volume)
@@ -1083,6 +1103,21 @@ class AirPlayPlayer(Player):
         progress = int(metadata.corrected_elapsed_time or 0)
         self.mass.create_task(self.stream.send_metadata(progress, metadata))
 
+    async def _adopt_device_volume(self, volume: int) -> None:
+        """
+        Take over a level the device set itself.
+
+        :param volume: The level the device reported.
+        """
+        ignored_until = self._volume_reports_ignored_until
+        await self.volume_set(volume)
+        # Writing the level back is a volume command like any other and opens the echo
+        # window, but this one only hands the device its own level: leaving the window
+        # open would swallow the rest of a volume the user is still turning up. A longer
+        # window opened while this was in flight (an announcement) still stands.
+        if self._volume_reports_ignored_until <= time.time() + AIRPLAY_VOLUME_ECHO_GRACE_S:
+            self._volume_reports_ignored_until = ignored_until
+
     def _control_routes_to_self(self, control: str) -> bool:
         """Return True if the given (resolved) control routes to this player."""
         if control == self.player_id:
@@ -1207,12 +1242,18 @@ class AirPlayPlayer(Player):
         protocol = self.protocol
         cred_key = self._get_credentials_key(protocol)
         if pin_pairing:
-            step_id, field_key, field_type = "pair_pin", CONF_PAIRING_PIN, ConfigEntryType.STRING
+            step_id, field_key, field_type, field_format = (
+                "pair_pin",
+                CONF_PAIRING_PIN,
+                ConfigEntryType.PAIRING_CODE,
+                PAIRING_PIN_FORMAT,
+            )
         else:
-            step_id, field_key, field_type = (
+            step_id, field_key, field_type, field_format = (
                 "pair_password",
                 CONF_PAIRING_PASSWORD,
                 ConfigEntryType.SECURE_STRING,
+                None,
             )
 
         errors: dict[str, str] | None = None
@@ -1229,6 +1270,7 @@ class AirPlayPlayer(Player):
                             type=field_type,
                             required=True,
                             category="protocol_generic",
+                            format=field_format,
                         )
                     ],
                     step_id=step_id,

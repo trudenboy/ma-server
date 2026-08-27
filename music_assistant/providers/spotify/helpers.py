@@ -22,10 +22,6 @@ from music_assistant.helpers.auth import AuthenticationHelper
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.process import AsyncProcess, check_output
 from music_assistant.providers.spotify_connect.soloist import SoloistBinaryManager
-from music_assistant.providers.spotify_connect.soloist.runtime import (
-    WS_ADDR_FILE,
-    WS_PORT_FILE,
-)
 
 from .constants import (
     CALLBACK_REDIRECT_URL,
@@ -369,3 +365,20 @@ def _read_credentials_file(credentials_file: str) -> str:
         msg = "Incomplete librespot credential file"
         raise ValueError(msg)
     return contents
+
+
+def _soloist_session_accounts(data_dir: Path) -> list[str]:
+    """Return the Spotify accounts a soloist data dir holds paired state for (blocking)."""
+    # The per-account state under settings/Users/<username>-user is the only thing
+    # a pairing leaves behind: the prefs stores rewritten before every spawn, the
+    # pid and lock files and the WebSocket endpoint all outlive one, so a data
+    # directory that ever ran a daemon never looks empty again.
+    users_dir = data_dir / "settings" / "Users"
+    try:
+        return [
+            entry.name.removesuffix(SOLOIST_USER_DIR_SUFFIX)
+            for entry in users_dir.iterdir()
+            if entry.is_dir() and entry.name.endswith(SOLOIST_USER_DIR_SUFFIX)
+        ]
+    except OSError:
+        return []

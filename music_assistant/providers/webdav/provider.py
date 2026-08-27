@@ -29,6 +29,7 @@ from music_assistant.providers.filesystem_local.constants import (
     CONF_ENTRY_MISSING_ALBUM_ARTIST,
     CONF_ENTRY_PROPAGATE_GENRES,
     SUPPORTED_EXTENSIONS,
+    WALK_EXTENSIONS,
     content_type_config_entry,
 )
 from music_assistant.providers.filesystem_local.helpers import FileSystemItem, ScanErrors
@@ -182,14 +183,17 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
             is_dir=webdav_item.is_dir,
             checksum=webdav_item.last_modified or "unknown",
             file_size=webdav_item.size,
+            metadata_token=webdav_item.etag,
         )
 
-    async def _scandir(self, path: str) -> list[FileSystemItem]:
+    async def _scandir(self, path: str, use_cache: bool = True) -> list[FileSystemItem]:
         """List WebDAV directory contents with caching."""
         cache_key = f"scandir_{path}"
-        # bypass the cache during sync so edits are picked up immediately;
-        # the fresh result is still written back for subsequent browse/exists calls
-        if not self.sync_running:
+        # bypass the cache during sync (edits must be picked up immediately) or when the
+        # caller explicitly asks not to use it (e.g. an on-demand NFO lookup honoring a manual
+        # "Refresh item"); the fresh result is still written back for subsequent browse/exists
+        # calls
+        if use_cache and not self.sync_running:
             if cached := await self.cache.get(
                 key=cache_key,
                 provider=self.instance_id,
@@ -271,6 +275,7 @@ class WebDAVFileSystemProvider(LocalFileSystemProvider):
                     is_dir=item.is_dir,
                     checksum=item.last_modified or "unknown",
                     file_size=item.size,
+                    metadata_token=item.etag,
                 )
             )
         return result

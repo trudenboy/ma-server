@@ -29,6 +29,8 @@ class _FakeFFMpeg:
     """FFMpeg test double that records the arguments it was constructed with."""
 
     last_instance: _FakeFFMpeg | None = None
+    # exit code the process is reaped with; None while it is still running
+    exit_code: int = 0
 
     def __init__(
         self,
@@ -46,10 +48,14 @@ class _FakeFFMpeg:
         self.input_format = input_format
         self._probed_codec_type = ContentType.FLAC  # arbitrary, distinct from PCM/OGG
         self.parsed_duration: int | None = None
-        self.returncode: int | None = 0
+        # mirrors the real FFMpeg: unset while the process runs, filled in on reap
+        self.returncode: int | None = None
         self.log_history: list[str] = []
         self.proc = MagicMock(pid=1234)
         self.stdin_feeder_exception: Exception | None = None
+        # records which teardown the stream picked: a clean end drains, anything
+        # else kills outright
+        self.torn_down_via: str | None = None
         type(self).last_instance = self
 
     async def start(self) -> None:
@@ -61,10 +67,15 @@ class _FakeFFMpeg:
         yield b"\x00\x01" * 256
 
     async def wait_with_timeout(self, _timeout: float) -> None:
-        return None
+        self.returncode = self.exit_code
 
     async def close(self) -> None:
-        return None
+        self.torn_down_via = "close"
+        self.returncode = self.exit_code
+
+    async def kill(self) -> None:
+        self.torn_down_via = "kill"
+        self.returncode = -9
 
 
 @pytest.fixture
@@ -163,6 +174,12 @@ class _TwoMinuteFFMpeg(_FakeFFMpeg):
             yield b"\x00" * _PCM_SAMPLE_SIZE
 
 
+class _AlreadyExitedFFMpeg(_FakeFFMpeg):
+    """FFMpeg double whose process exited with an error code before teardown."""
+
+    exit_code = 1
+
+
 class _FailingStartFFMpeg(_FakeFFMpeg):
     """FFMpeg double that fails while opening its source."""
 
@@ -184,6 +201,19 @@ class _FeederErrorFFMpeg(_FakeFFMpeg):
         """Yield no PCM after the feeder failure."""
         if _chunk_size < 0:
             yield b""
+
+
+class _SourceConsumingFFMpeg(_FakeFFMpeg):
+    """FFMpeg double that consumes its generator input before ending stdout."""
+
+    async def iter_chunked(self, _chunk_size: int) -> AsyncGenerator[bytes]:
+        """Yield source bytes and record a source failure like the real feeder."""
+        assert isinstance(self.audio_input, AsyncGenerator)
+        try:
+            async for chunk in self.audio_input:
+                yield chunk
+        except Exception as err:
+            self.stdin_feeder_exception = err
 
 
 class _LimitedProvider(MusicProvider):
