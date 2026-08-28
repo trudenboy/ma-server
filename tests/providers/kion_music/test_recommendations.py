@@ -18,6 +18,7 @@ from yandex_music import Track as YandexTrack
 from music_assistant.providers.kion_music import SUPPORTED_FEATURES
 from music_assistant.providers.kion_music.constants import MY_WAVE_PLAYLIST_ID
 from music_assistant.providers.kion_music.provider import KionMusicProvider
+from tests.common import use_real_create_task
 
 from .conftest import DE_JSON_CLIENT
 
@@ -48,11 +49,6 @@ ROW_IDS = [
     "activity_mix",
     "seasonal_mix",
 ]
-
-
-def _use_real_create_task(mass: Mock) -> None:
-    """Schedule cache writes on the running test loop."""
-    mass.create_task = Mock(side_effect=lambda target, **_kwargs: asyncio.create_task(target))
 
 
 def _load_fixture(relpath: str) -> dict[str, Any]:
@@ -112,7 +108,7 @@ def provider() -> KionMusicProvider:
     mass.cache.get = AsyncMock(return_value=None)
     mass.cache.get_with_freshness = AsyncMock(return_value=(None, False, False))
     mass.cache.set = AsyncMock()
-    _use_real_create_task(mass)
+    use_real_create_task(mass)
     manifest = Mock()
     manifest.domain = "kion_music"
     config = Mock()
@@ -189,6 +185,34 @@ async def test_get_recommendation_items_unknown_id_returns_empty(
 
     assert list(result) == []
     assert _awaited_methods(client) == set()
+
+
+@pytest.mark.asyncio
+async def test_recommendation_fetch_is_shared_between_callers(
+    provider: KionMusicProvider,
+) -> None:
+    """Concurrent callers for one recommendation row share its backend fetch."""
+    _install_cache_mocks(provider)
+    client = cast("Mock", provider.client)
+    chart = client.get_chart.return_value
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def _get_chart() -> Any:
+        fetch_started.set()
+        await release_fetch.wait()
+        return chart
+
+    client.get_chart.side_effect = _get_chart
+    tasks = [asyncio.create_task(provider.get_recommendation_items("chart")) for _ in range(3)]
+    await asyncio.wait_for(fetch_started.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    release_fetch.set()
+
+    results = await asyncio.gather(*tasks)
+
+    assert all(result for result in results)
+    assert client.get_chart.await_count == 1
 
 
 def _install_tag_cache(provider: KionMusicProvider, tags_by_category: dict[str, list[str]]) -> None:
