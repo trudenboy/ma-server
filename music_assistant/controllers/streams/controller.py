@@ -739,12 +739,10 @@ class StreamsController(CoreController):
                     source_player_id,
                     stream_session_id,
                 )
-                if (
-                    self.mass.players.get_audio_source_session(source_player_id) is not session
-                    or session.playback_session_id != playback_session_id
+                if not self.mass.players.claim_audio_source_session(
+                    session, playback_session_id, stream_session_id
                 ):
                     raise web.HTTPNotFound(reason="AudioSource session was superseded")
-                session.stream_session_id = stream_session_id
             except RuntimeError as err:
                 # the plugin refuses this player (e.g. it just redirected playback
                 # elsewhere); a 404 makes the renderer drop the connection instead of

@@ -157,8 +157,8 @@ class AirPlayStreamSession:
         Return whether this live session can absorb a new play_media warm.
 
         A warm replacement needs the same member set, the same session PCM
-        format and a connected stream on every member; anything else takes the
-        cold path.
+        format and a connected stream still taking audio on every member;
+        anything else takes the cold path.
         """
         if {p.player_id for p in sync_clients} != {p.player_id for p in self.sync_clients}:
             return False
@@ -167,7 +167,7 @@ class AirPlayStreamSession:
         if pcm_format != self.pcm_format:
             return False
         return all(
-            p.stream is not None and p.stream.running and p.stream.connected
+            p.stream is not None and p.stream.accepts_audio and p.stream.connected
             for p in self.sync_clients
         )
 
@@ -208,6 +208,7 @@ class AirPlayStreamSession:
             # describe the OLD timeline; restart them before the new source pumps.
             self.seconds_streamed = 0
             self._pcm_total_fed = 0
+            self._feed_settled.clear()
             self._pcm_buffer.clear()
             # The shared START below re-establishes start_time, so the per-client
             # late-join skip counters and every member's accumulated starvation
@@ -235,12 +236,12 @@ class AirPlayStreamSession:
 
         The next play_media (resume or seek) replaces the media warm over the
         live connections — the same coordinated flush-refill as seek/next.
-        Returns False when any member lacks a running, connected stream or its
-        standby command cannot be delivered so the caller can fall back to a
-        full stop.
+        Returns False when any member lacks a connected stream that still takes
+        audio, or its standby command cannot be delivered, so the caller can fall
+        back to a full stop.
         """
         if not all(
-            p.stream is not None and p.stream.running and p.stream.connected
+            p.stream is not None and p.stream.accepts_audio and p.stream.connected
             for p in self.sync_clients
         ):
             return False
@@ -270,6 +271,7 @@ class AirPlayStreamSession:
         # a parked session has no live timeline; the resume re-anchors it
         self.seconds_streamed = 0
         self._pcm_total_fed = 0
+        self._feed_settled.clear()
         self._pcm_buffer.clear()
         self._client_skip_bytes.clear()
         self._reset_member_shifts()
@@ -697,7 +699,10 @@ class AirPlayStreamSession:
             return False
         reference = self.sync_clients[0]
         reference_stream = reference.stream
-        if reference_stream is None or not reference_stream.running:
+        # A stream that has been sent its audio EOF keeps running while it plays
+        # out, but it is on its way to exiting and can never be fed again, so a
+        # joiner would land in a session that is ending.
+        if reference_stream is None or not reference_stream.accepts_audio:
             return False
         # A parked (standby) session keeps every member's stream running while
         # its timeline is gone - the anchor is stale and nothing is being fed -
@@ -878,12 +883,14 @@ class AirPlayStreamSession:
         async with self._lock:
             await asyncio.gather(
                 *[
-                    self._write_eof_to_player(x)
+                    self._retire_player_ffmpeg(x, end_of_stream=end_of_stream)
                     for x in self.sync_clients
                     if x.stream and x.stream.running
                 ],
                 return_exceptions=True,
             )
+        if not end_of_stream:
+            await self._end_stream_if_no_replacement_lands()
 
     async def _silence_watchdog(self, pcm_sample_size: int) -> None:
         """Insert silence if audio source is slow to deliver first chunk."""
@@ -1045,7 +1052,16 @@ class AirPlayStreamSession:
         return anchor
 
     async def _wait_members_audio_present(self) -> None:
-        """Wait until every member's binary reports the new audio flowing."""
+        """
+        Wait until every member's binary reports the new audio flowing.
+
+        A binary can only report audio once it has been handed some, and a seek
+        may land seconds ahead of what the source has produced. So the feed is
+        waited out first and the per-member budget below measures the binary
+        alone; giving up on the source here would only restart the session into
+        the very same wait.
+        """
+        await self._wait_feed_settled()
         members = [(p, p.stream) for p in self.sync_clients if p.stream]
         results = await asyncio.gather(*[stream.wait_audio_present() for _, stream in members])
         if all(results):
@@ -1058,6 +1074,27 @@ class AirPlayStreamSession:
             if not present
         ]
         raise PlayerCommandFailed(f"audio feed was not confirmed by {', '.join(silent)}")
+
+    async def _wait_feed_settled(self) -> None:
+        """Wait for the source to hand over its first audio, or to end without any."""
+        task = self._audio_source_task
+        if task is None or self._feed_settled.is_set():
+            return
+        settled = asyncio.create_task(self._feed_settled.wait())
+        try:
+            # The streamer settles the event itself, but watching the task too
+            # means a feed that never even starts cannot hold this open: a task
+            # cancelled before its first step never runs the finally that
+            # settles the event. The timeout is the backstop for a producer that
+            # neither delivers nor gives up: this runs under the player lock,
+            # where every route that could stop the session waits behind it.
+            await asyncio.wait(
+                {settled, task},
+                timeout=AIRPLAY_FEED_START_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            settled.cancel()
 
     async def _wait_members_clock_ready(self) -> int:
         """

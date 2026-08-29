@@ -64,6 +64,7 @@ from .constants import (
 )
 from .helpers import (
     default_buffer_depth,
+    default_hires_enabled,
     get_decoded_property,
     is_apple_device,
     is_macos_device,
@@ -111,6 +112,14 @@ class AirPlayPlayer(Player):
         super().__init__(provider, player_id)
         self.address = address
         self.stream: AirPlayStream | None = None
+        # Serializes the two paths that can put a cliairplay process on this
+        # receiver (the native stream session and the Sendspin bridge), from the
+        # moment either decides to displace what is published until it publishes
+        # its own stream. Two processes on one receiver reset each other's RTSP
+        # channel and both sessions die. Always taken INSIDE self._lock, never
+        # around it: play_media holds self._lock across the whole session start,
+        # which takes this lock for every member.
+        self.stream_spawn_lock = asyncio.Lock()
         self.last_command_sent = 0.0
         self._volume_reports_ignored_until = 0.0
         self._lock = asyncio.Lock()
@@ -196,6 +205,22 @@ class AirPlayPlayer(Player):
                     advanced=True,
                 )
             )
+
+        # 24-bit toggle, shown only when the device advertises 24-bit support
+        # (per-device default: see default_hires_enabled). Hidden rather than
+        # omitted when it does not: the formats are probed async after
+        # registration, and an entry absent from the registration-time config
+        # parse would drop the user's stored value until the next config save.
+        base_entries.append(
+            ConfigEntry(
+                key=CONF_ENABLE_HIRES,
+                type=ConfigEntryType.BOOLEAN,
+                default_value=self._hires_default_enabled,
+                hidden=not self.advertised_audio_formats & AIRPLAY_HIRES_AUDIO_FORMATS,
+                category="protocol_generic",
+                requires_reload=True,
+            )
+        )
 
         # Regular AirPlay config entries
         base_entries += [
@@ -1087,10 +1112,14 @@ class AirPlayPlayer(Player):
     def cancel_group_rejoin(self) -> None:
         """Cancel any pending automatic group re-join attempts for this player."""
         rejoin_task = self._rejoin_task
-        self._rejoin_task = None
         # never self-cancel: the re-join attempt itself flows through the same
-        # session (re)start paths that call this to clear stale schedules
-        if rejoin_task and not rejoin_task.done() and rejoin_task is not asyncio.current_task():
+        # session (re)start paths that call this to clear stale schedules. The
+        # handle also survives such a call, so a later user action can still
+        # cancel the retry loop between attempts.
+        if rejoin_task is None or rejoin_task is asyncio.current_task():
+            return
+        self._rejoin_task = None
+        if not rejoin_task.done():
             rejoin_task.cancel()
 
     def on_player_media_updated(self) -> None:
@@ -1511,7 +1540,13 @@ class AirPlayPlayer(Player):
                 if heal_session is not None:
                     await heal_session.add_client(self)
                 else:
-                    await self.mass.players.cmd_group(self.player_id, target.player_id)
+                    # Join through the target's own set_members: both ends are
+                    # players of this provider, so the join never needs the
+                    # visible-player translations of the controller's grouping
+                    # pipeline - and that pipeline's capability gate reflects
+                    # grouping state that is in flux right after a stream loss,
+                    # so it may silently refuse an internal re-join.
+                    await target.set_members(player_ids_to_add=[self.player_id])
             except Exception as err:
                 self.logger.warning(
                     "Automatic re-join of %s to group of %s failed (attempt %d/%d): %s",
@@ -1522,9 +1557,9 @@ class AirPlayPlayer(Player):
                     err,
                 )
                 continue
-            # A failed late-join is swallowed inside the grouping path (the player
-            # then holds group membership without a live stream), so verify the
-            # session actually carries this player before declaring success.
+            # A late-join can also fail without raising (the player then holds
+            # group membership without a live stream), so verify the session
+            # actually carries this player before declaring success.
             if (
                 self.stream
                 and self.stream.running
@@ -1546,7 +1581,16 @@ class AirPlayPlayer(Player):
             if heal_session is None:
                 # undo the group membership this attempt created so a retry (or
                 # a manual regroup) starts from a clean join
-                await self.mass.players.cmd_ungroup(self.player_id)
+                try:
+                    await target.set_members(player_ids_to_remove=[self.player_id])
+                except Exception as err:
+                    # a failed undo leaves the membership for the next attempt,
+                    # which then heals the session instead of joining anew
+                    self.logger.debug(
+                        "Undo of failed re-join attempt for %s failed: %s",
+                        self.display_name,
+                        err,
+                    )
         self.logger.warning(
             "Giving up on automatic group re-join for %s after %d attempt(s); "
             "the player stays idle",
@@ -1591,6 +1635,13 @@ class AirPlayPlayer(Player):
         # a freshly entered password deserves a clean slate: the reject marker
         # would otherwise keep the player in "needs setup" until the next connect
         self.set_password_invalid(False)
+
+    @property
+    def _hires_default_enabled(self) -> bool:
+        """Return the per-device default for the 24-bit toggle."""
+        return default_hires_enabled(
+            self.device_info.manufacturer or "", self.device_info.model or ""
+        )
 
 
 class GenericAirPlayPlayer(AirPlayPlayer):
