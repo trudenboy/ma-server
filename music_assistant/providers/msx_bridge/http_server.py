@@ -14,11 +14,14 @@ from urllib.parse import quote
 
 import aiohttp
 from aiohttp import WSMsgType, web
-from music_assistant_models.enums import RepeatMode
-from music_assistant_models.errors import (
-    InvalidDataError,
-    MusicAssistantError,
-    ResourceTemporarilyUnavailable,
+from music_assistant_models.enums import ContentType
+from music_assistant_models.errors import InvalidProviderURI
+from music_assistant_models.media_items import AudioFormat, Track
+
+from music_assistant.constants import SENDSPIN_SERVER_PORT
+from music_assistant.controllers.streams.audio_processing import get_media_session_id
+from music_assistant.controllers.streams.constants import (
+    output_pacing_args,
 )
 
 from .audio_stream import AudioPipeline, resolve_served_duration
@@ -76,12 +79,19 @@ STATIC_DIR = Path(__file__).parent / "static"
 _KNOWN_EXTENSIONS = (".mp3", ".json", ".flac", ".aac")
 
 
-def _queue_item_limit(queue: Any) -> int:
-    """Return how many items to read from an in-memory MA queue."""
-    count = getattr(queue, "items", None)
-    if isinstance(count, int) and count > 0:
-        return count
-    return 500
+# The local proxy modes encode audio themselves, so they carry the core streamserver's
+# pacing ceiling rather than handing a track over as fast as ffmpeg can produce it.
+# See the usage policy note in the streams constants.
+_READRATE_ARGS = output_pacing_args("gapless_burst")
+
+
+class PartyInfo(NamedTuple):
+    """Active-party details resolved from the MA Party plugin."""
+
+    join_url: str
+    name: str | None
+    qr_text: str | None
+    qr_version: str
 
 
 def _int_param(query: MultiMapping[str], name: str, default: int, max_val: int = 10000) -> int:
