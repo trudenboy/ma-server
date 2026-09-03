@@ -24,6 +24,7 @@ from music_assistant_models.player import PlayerMedia
 from music_assistant_models.player_queue import PlayerQueue
 from music_assistant_models.queue_item import QueueItem
 
+from music_assistant.controllers.streams.constants import output_pacing_args
 from music_assistant.providers.msx_bridge.audio_stream import _collect_prebuffer
 from music_assistant.providers.msx_bridge.constants import PRE_BUFFER_BYTES
 from music_assistant.providers.msx_bridge.http_server import MSXHTTPServer
@@ -113,6 +114,9 @@ async def test_plugin_html(http_client: TestClient[Any, Any]) -> None:
     assert "handleRequest" in body
     assert "MAHandler.prototype.handleEvent" in body
     assert 'data.event === "video:pause"' in body
+    assert 'data.event === "video:seek"' in body
+    assert "reportTvSeek" in body
+    assert "reportTvSeek(pos) {\n        pausedAtPosition = pos;" in body
     assert 'msg.type === "sendspin"' not in body
     assert "pendingServerSeek" in body
     assert "clearPendingServerSeek" in body
@@ -1981,8 +1985,7 @@ async def test_msx_audio_proxy_paces_output(provider: MSXBridgeProvider, mass_mo
             assert resp.status == 200
 
         extra_args = ffmpeg_mock.call_args.kwargs["extra_input_args"]
-        assert "-readrate" in extra_args
-        assert "-readrate_initial_burst" in extra_args
+        assert extra_args == output_pacing_args("gapless_burst")
     finally:
         await client.close()
 
