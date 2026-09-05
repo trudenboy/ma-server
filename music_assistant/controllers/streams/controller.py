@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from math import ceil
 from typing import TYPE_CHECKING, cast
 
@@ -65,6 +65,7 @@ from music_assistant.controllers.streams.constants import (
     CONF_SMART_FADES_LOG_LEVEL,
     DEFAULT_PORT,
     get_available_buffer_sizes,
+    output_pacing_args,
 )
 from music_assistant.controllers.streams.smart_fades.analyzer import SmartFadesAnalyzer
 from music_assistant.helpers.audio import (
@@ -518,6 +519,22 @@ class StreamsController(CoreController):
             changed = True
         if changed:
             self.mass.player_queues.signal_update(queue_id)
+
+    def close_superseded_item_streams(self, queue_id: str, current_session_id: str | None) -> None:
+        """
+        Abort open per-item responses of sessions the queue has moved past.
+
+        :param queue_id: The queue whose open responses to check.
+        :param current_session_id: The session that owns playback now; every open
+            response of another session is aborted.
+        """
+        for session_id, request in list(self._open_item_streams.get(queue_id) or []):
+            if session_id == current_session_id:
+                continue
+            # aborted rather than closed: a graceful close waits for the very send
+            # buffer the player stopped reading, which is what kept this alive
+            if (transport := request.transport) is not None:
+                transport.abort()
 
     async def serve_queue_item_stream(self, request: web.Request) -> web.StreamResponse:  # noqa: PLR0915
         """Stream single queueitem audio to a player."""
@@ -978,6 +995,11 @@ class StreamsController(CoreController):
                 await resp.write(length_b + metadata)
         finally:
             self._active_output_streams -= 1
+            if entries := self._open_item_streams.get(queue_id):
+                with suppress(ValueError):
+                    entries.remove(stream_entry)
+                if not entries:
+                    del self._open_item_streams[queue_id]
 
         return resp
 
@@ -1696,3 +1718,14 @@ class StreamsController(CoreController):
 def _same_ip_family(ip: str, other_ip: str) -> bool:
     """Return whether two addresses belong to the same IP family."""
     return (":" in ip) == (":" in other_ip)
+
+
+def _root_cause(err: BaseException) -> BaseException:
+    """Return the deepest error in a chain of re-raises that still says something."""
+    # a bare TimeoutError() ends plenty of chains: taking it would report nothing
+    deepest = err
+    while (cause := err.__cause__) is not None:
+        err = cause
+        if str(err):
+            deepest = err
+    return deepest

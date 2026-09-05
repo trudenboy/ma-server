@@ -708,12 +708,9 @@ class PartyPlugin(PluginProvider):
                 raise InvalidDataError("This item is already boosted")
 
             if queue.state == PlaybackState.PLAYING:
-                # Use index_in_buffer to avoid moving already-buffered items
-                current_index = (
-                    queue.index_in_buffer
-                    if queue.index_in_buffer is not None
-                    else (queue.current_index if queue.current_index is not None else 0)
-                )
+                # Use the boundary to avoid moving already-buffered items
+                boundary_index = committed_index(queue)
+                current_index = boundary_index if boundary_index is not None else 0
 
                 if item_index <= current_index:
                     raise InvalidDataError(
@@ -814,11 +811,8 @@ class PartyPlugin(PluginProvider):
             # Use index_in_buffer when playing to avoid inserting before an already-buffered
             # track, which would cause the newly added song to be skipped
             if queue and queue.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
-                current_index = (
-                    queue.index_in_buffer
-                    if queue.index_in_buffer is not None
-                    else (queue.current_index if queue.current_index is not None else 0)
-                )
+                boundary_index = committed_index(queue)
+                current_index = boundary_index if boundary_index is not None else 0
             else:
                 current_index = queue.current_index or 0 if queue else 0
 

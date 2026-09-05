@@ -288,14 +288,14 @@ class SpotifyProvider(MusicProvider):
         """
         Return how many source streams Music Assistant may run against this provider.
 
-        Two on either playback backend: a Spotify account tolerates two
-        concurrent librespot fetches (main + playback), and on the Soloist
-        backend the item that is ending and the item that continues from the
-        same session are two streams reading it in turn.
+        Three for librespot (two playing queues plus a prebuffer); one for
+        Soloist, whose engine serves a single run at a time.
         """
-        # not answered per backend: MusicProvider sizes the stream semaphore from
-        # this in __init__, long before the configured backend is created
-        return 2
+        # read from the stored setup choice: MusicProvider sizes the stream
+        # semaphore from this in __init__, before the backend object exists
+        if self.get_setup_value(CONF_PLAYBACK_BACKEND) == BACKEND_SOLOIST:
+            return 1
+        return 3
 
     @property
     def audiobooks_supported(self) -> bool:
@@ -1467,6 +1467,9 @@ class SpotifyProvider(MusicProvider):
             if not result or key not in result or not result[key]:
                 break
             for item in result[key]:
+                # Spotify returns a null entry for items the account can no longer resolve
+                if item is None:
+                    continue
                 yield item
             if len(result[key]) < limit:
                 break

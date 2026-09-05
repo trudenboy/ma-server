@@ -63,6 +63,8 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.auth")
 
+PREF_SIDEBAR_SHORTCUTS = "sidebar.shortcuts"
+
 # Database schema version
 DB_SCHEMA_VERSION = 5
 
@@ -142,7 +144,7 @@ class AuthenticationManager:
         # repair filters that were left pointing at removed providers/players
         await self._prune_stale_user_filters()
 
-        self._schedule_join_code_cleanup()
+        self._schedule_periodic_cleanup()
 
         self.logger.info(
             "Authentication manager initialized (providers=%d)", len(self.login_providers)
@@ -771,7 +773,7 @@ class AuthenticationManager:
         actual token usage by up to an hour.
 
         :param user_id: Optional user ID to get tokens for (admin only).
-        :return: List of auth tokens.
+        :return: The user's newest tokens first, capped at TOKEN_LIST_LIMIT.
         """
         current_user = get_current_user()
         if not current_user:
@@ -789,7 +791,10 @@ class AuthenticationManager:
             target_user = current_user
 
         token_rows = await self.database.get_rows(
-            "auth_tokens", {"user_id": target_user.user_id}, limit=100
+            "auth_tokens",
+            {"user_id": target_user.user_id},
+            order_by="created_at DESC",
+            limit=TOKEN_LIST_LIMIT,
         )
         return [AuthToken.from_dict(dict(row)) for row in token_rows]
 
@@ -1275,6 +1280,55 @@ class AuthenticationManager:
             else None,
             keep_player=(lambda x: x not in player_ids) if player_ids else None,
         )
+
+    async def cleanup_user_shortcuts(
+        self,
+        rewrite: Callable[[str], Awaitable[str | None]],
+    ) -> None:
+        """
+        Rewrite or remove sidebar shortcuts from all users' preferences.
+
+        :param rewrite: Called for each shortcut URI. Return the URI to keep it,
+            a different URI to rewrite it, or None to drop it.
+        """
+        async with self._user_filter_lock:
+            for row in await self.database.get_rows("users", limit=0):
+                prefs: dict[str, Any] = json_loads(row["preferences"]) if row["preferences"] else {}
+                shortcuts: list[str] = prefs.get(PREF_SIDEBAR_SHORTCUTS, [])
+                if not shortcuts:
+                    continue
+                remaining: list[str] = []
+                dropped: list[str] = []
+                rewritten: list[str] = []
+                for uri in shortcuts:
+                    new_uri = await rewrite(uri)
+                    if new_uri is None:
+                        dropped.append(uri)
+                    elif new_uri != uri:
+                        remaining.append(new_uri)
+                        rewritten.append(f"{uri} -> {new_uri}")
+                    else:
+                        remaining.append(uri)
+                if remaining == shortcuts:
+                    continue
+                prefs[PREF_SIDEBAR_SHORTCUTS] = remaining
+                await self.database.update(
+                    "users",
+                    {"user_id": row["user_id"]},
+                    {"preferences": json_dumps(prefs)},
+                )
+                if dropped:
+                    LOGGER.info(
+                        "Removed shortcuts from user '%s': %s",
+                        row["username"],
+                        ", ".join(dropped),
+                    )
+                if rewritten:
+                    LOGGER.info(
+                        "Rewrote shortcuts for user '%s': %s",
+                        row["username"],
+                        ", ".join(rewritten),
+                    )
 
     async def replace_player_in_user_filters(
         self,
@@ -2224,10 +2278,34 @@ class AuthenticationManager:
         if count > 0:
             self.logger.debug("Cleaned up %d expired/exhausted join code(s)", count)
 
-    def _schedule_join_code_cleanup(self) -> None:
-        """Schedule periodic cleanup of expired join codes."""
+    async def _cleanup_expired_tokens(self) -> None:
+        """Delete short-lived auth tokens that expired or outlived their absolute cap."""
+        now = utc()
+        # Both conditions mirror a deletion authenticate_with_token already performs when the
+        # token is used: the sliding expiry, and the absolute cap, which a token renewed late
+        # in its life outlives. Long-lived tokens are left to the user to revoke: they are few
+        # and deliberately created, so they are not what grows this table.
+        cursor = await self.database.execute(
+            """
+            DELETE FROM auth_tokens
+            WHERE is_long_lived = 0
+              AND (expires_at < :now OR created_at < :max_lifetime)
+            """,
+            {
+                "now": now.isoformat(),
+                "max_lifetime": (now - timedelta(days=TOKEN_ABSOLUTE_MAX_EXPIRATION)).isoformat(),
+            },
+        )
+        await self.database.commit()
+        count = int(cursor.rowcount)
+        if count > 0:
+            self.logger.debug("Cleaned up %d expired auth token(s)", count)
+
+    def _schedule_periodic_cleanup(self) -> None:
+        """Schedule periodic cleanup of expired join codes and auth tokens."""
         self.mass.create_task(self._cleanup_expired_join_codes())
-        self.mass.call_later(86400, self._schedule_join_code_cleanup)
+        self.mass.create_task(self._cleanup_expired_tokens())
+        self.mass.call_later(86400, self._schedule_periodic_cleanup)
 
     async def _refresh_token_expiration(
         self, token_row: Mapping[str, Any], user: User, is_long_lived: bool
