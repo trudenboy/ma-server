@@ -132,7 +132,7 @@ def _make_mock_mass() -> MagicMock:
 
     mass.create_task = MagicMock(side_effect=_create_task)
     mass.subscribe = MagicMock(return_value=MagicMock())
-    mass.get_providers = MagicMock(return_value=[])
+    mass.providers = []
     mass.config.set_raw_provider_config_value = MagicMock()
     mass.config.decrypt_string = MagicMock(side_effect=lambda value: value)
 
@@ -724,7 +724,7 @@ class TestProviderMatching:
         mock_ym.instance_id = "ym-inst"
         mock_ym.domain = "yandex_music"
         mock_ym.type = ProviderType.MUSIC
-        provider.mass.get_providers.return_value = [mock_ym]  # type: ignore[attr-defined]
+        provider.mass.providers = [mock_ym]  # type: ignore[attr-defined]
 
         await provider._check_yandex_provider_match()
 
@@ -738,7 +738,7 @@ class TestProviderMatching:
         """No linked provider disables playback control."""
         provider = _make_provider()
 
-        provider.mass.get_providers.return_value = []  # type: ignore[attr-defined]
+        provider.mass.providers = []  # type: ignore[attr-defined]
         await provider._check_yandex_provider_match()
 
         assert provider._yandex_provider is None
@@ -2280,7 +2280,7 @@ class TestYandexProviderMatch:
         provider = _make_provider()
         provider._ym_instance_id = "wanted"
         other = _make_ym_provider_stub(instance_id="other")
-        _stub_attr(provider.mass, "get_providers", MagicMock(return_value=[other]))
+        _stub_attr(provider.mass, "providers", [other])
 
         await provider._check_yandex_provider_match()
 
@@ -2292,11 +2292,57 @@ class TestYandexProviderMatch:
         provider._ym_instance_id = "wanted"
         wanted = _make_ym_provider_stub(instance_id="wanted")
         other = _make_ym_provider_stub(instance_id="other")
-        _stub_attr(provider.mass, "get_providers", MagicMock(return_value=[other, wanted]))
+        _stub_attr(provider.mass, "providers", [other, wanted])
 
         await provider._check_yandex_provider_match()
 
         assert provider._yandex_provider is wanted
+
+    async def test_own_mode_accepts_any_ym(self) -> None:
+        """In own mode, the first available yandex_music provider is used."""
+        provider = _make_provider()
+        provider._ym_instance_id = None
+        ym = _make_ym_provider_stub(instance_id="any")
+        _stub_attr(provider.mass, "providers", [ym])
+
+        await provider._check_yandex_provider_match()
+
+        assert provider._yandex_provider is ym
+
+
+# ------------------------------------------------------------------
+# Advertised device name
+# ------------------------------------------------------------------
+
+
+class TestDisplayName:
+    """Tests for the _display_name property."""
+
+    def test_returns_connected_player_name(self) -> None:
+        """The advertised name follows the connected player's display name."""
+        provider = _make_provider()
+        player = MagicMock()
+        player.display_name = "Living Room"
+        provider.mass.players.get_player.return_value = player
+        assert provider._display_name == "Living Room"
+
+    def test_falls_back_to_stored_name_when_player_unregistered(self) -> None:
+        """On a cold boot the stored player config name applies until registration."""
+        provider = _make_provider()
+        provider.mass.players.get_player.return_value = None
+        provider.mass.config.get_raw_player_config_value = MagicMock(
+            side_effect=lambda _player_id, key, default=None: (
+                "Living Room" if key == "name" else default
+            )
+        )
+        assert provider._display_name == "Living Room"
+
+    def test_falls_back_to_default_without_a_stored_name(self) -> None:
+        """The default name applies when neither the player nor a stored name exists."""
+        provider = _make_provider()
+        provider.mass.players.get_player.return_value = None
+        provider.mass.config.get_raw_player_config_value = MagicMock(return_value=None)
+        assert provider._display_name == DEFAULT_DISPLAY_NAME
 
 
 # ------------------------------------------------------------------
