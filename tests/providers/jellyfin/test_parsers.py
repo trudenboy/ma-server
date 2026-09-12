@@ -109,9 +109,9 @@ def test_audio_format_empty_mediastreams() -> None:
     assert hasattr(result, "content_type")
 
 
-def test_audio_format_missing_channels() -> None:
-    """Test audio_format applies default when Channels field is missing."""
-    # Track with MediaStreams but missing Channels
+@pytest.mark.parametrize("channels", [{}, {ITEM_KEY_MEDIA_CHANNELS: 0}])
+def test_audio_format_missing_channels(channels: dict[str, int]) -> None:
+    """Test audio_format applies default when Channels is missing or reported as zero."""
     track: dict[str, Any] = {
         ITEM_KEY_MEDIA_SOURCES: [{ITEM_KEY_CONTAINER: "mp3"}],
         ITEM_KEY_MEDIA_STREAMS: [
@@ -121,6 +121,7 @@ def test_audio_format_missing_channels() -> None:
                 "SampleRate": 48000,
                 "BitDepth": 16,
                 "BitRate": 320000,
+                **channels,
             }
         ],
     }

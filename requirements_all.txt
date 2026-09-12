@@ -21,7 +21,7 @@ aiovban==1.1.0
 alexapy==1.30.0
 async-upnp-client==0.48.0
 audible==0.10.0
-auntie-sounds==2.0.4
+auntie-sounds==2.0.9
 av==16.1.0
 awesomeversion>=24.6.0
 bandcamp-async-api==0.2.2
@@ -31,7 +31,7 @@ certifi==2025.11.12
 chardet==7.6.0
 colorlog==6.12.0
 cryptography==50.0.0
-deezer-python-gql==0.17.1
+deezer-python-gql==0.17.2
 defusedxml==0.7.1
 deno==2.9.5
 duration-parser==1.0.1
@@ -108,7 +108,7 @@ xmltodict==1.0.4
 ya-dialogs-api==2.4.0
 ya-passport-auth[ma]==1.8.0
 yandex-music==3.0.0
-yappi==1.7.6
+yappi @ git+https://github.com/sumerc/yappi@d6593ea0bce0a13c65bd44511c3cee858b5985e8
 ytmusicapi==1.12.2
 zeroconf==0.149.16
 zvuk-music[async]==0.6.1

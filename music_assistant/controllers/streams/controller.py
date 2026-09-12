@@ -1627,6 +1627,21 @@ class StreamsController(CoreController):
         # Without this the player is left waiting on a stream that already ended.
         resp.force_close()
 
+    def _raise_if_stale_item_request(
+        self, player: Player, queue_id: str, queue_item: QueueItem
+    ) -> None:
+        """Refuse (404) the request if the item fell out of the queue's playhead window."""
+        if not player.strict_queue_item_requests:
+            return
+        if self.mass.player_queues.is_current_window_item(queue_id, queue_item.queue_item_id):
+            return
+        self.logger.debug(
+            "Denying stream request from %s for %s: the queue has moved on",
+            player.display_name,
+            queue_item.name,
+        )
+        raise web.HTTPNotFound(reason=f"Queue item is not up next: {queue_item.queue_item_id}")
+
     def _log_request(self, request: web.Request) -> None:
         """Log request."""
         if self.logger.isEnabledFor(VERBOSE_LOG_LEVEL):

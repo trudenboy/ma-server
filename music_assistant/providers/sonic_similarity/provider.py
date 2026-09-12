@@ -1761,7 +1761,7 @@ class SonicSimilarityPlugin(PluginProvider):
                     continue
                 try:
                     raw = json.loads(row["analysis_data"])
-                except json.JSONDecodeError, TypeError:
+                except ValueError, TypeError:
                     continue
                 emb = _parse_clap_embedding(
                     (raw.get("extra_data") or {}).get(EXTRA_DATA_CLAP_EMBEDDING)
