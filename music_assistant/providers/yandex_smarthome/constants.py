@@ -20,13 +20,12 @@ CONF_SKILL_TOKEN = "skill_token"
 CONF_EXPOSED_PLAYERS = "exposed_players"
 CONF_EXPOSED_PLAYLISTS = "exposed_playlists"
 
-# Auto-create-skill state — a JSON-serialised SkillCreationArtifacts blob carried in
-# the setup flow (and persisted to setup_data) so a reconfigure can resume a partially
-# provisioned skill from the last completed step.
+# Auto-create-skill state persisted by the setup flow.
 CONF_AUTO_CREATE_ARTIFACTS = "auto_create_artifacts"
-# Cached Yandex Passport x_token from the setup flow's Device Flow login. Reused on a
-# reconfigure so the user does not have to confirm the device code every time.
-# Long-lived (months); automatically refreshed on use.
+# Cached Yandex Passport x_token from the first successful Device Flow.
+# Reused on subsequent auto-create runs so the user does not have to confirm
+# the device code every time. Long-lived (months); automatically refreshed
+# on use. Cleared if Yandex returns 401 on refresh.
 CONF_AUTH_X_TOKEN = "auth_x_token"
 
 # Yandex account source: instance_id of a linked yandex_music provider to
