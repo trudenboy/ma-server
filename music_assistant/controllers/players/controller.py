@@ -100,7 +100,6 @@ from music_assistant.constants import (
 )
 from music_assistant.controllers.webserver.helpers.auth_middleware import (
     get_current_user,
-    get_sendspin_player_id,
     has_scope,
 )
 from music_assistant.helpers.api import api_command
@@ -120,7 +119,7 @@ from music_assistant.models.plugin import PluginProvider, SourceControlValue
 from .announcements import AnnouncementsMixin
 from .audio_sources import AudioSourceMixin, AudioSourceSession
 from .constants import PlayerLockPurpose
-from .helpers import handle_player_command, wait_for_power_on
+from .helpers import handle_player_command, is_own_client_player, wait_for_power_on
 from .protocol_linking import ProtocolLinkingMixin
 
 if TYPE_CHECKING:
@@ -369,7 +368,6 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
             if current_user and not has_scope(current_user, Scope.ALL)
             else None
         )
-        current_sendspin_player = get_sendspin_player_id()
         return [
             player
             for player in self.iter_players(
@@ -378,9 +376,7 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
                 provider_filter=provider_filter,
                 return_protocol_players=return_protocol_players,
             )
-            if not user_filter
-            or player.player_id in user_filter
-            or player.player_id == current_sendspin_player
+            if not user_filter or player.player_id in user_filter or is_own_client_player(player)
         ]
 
     @api_command("players/all", required_scope=Scope.PLAYERS_READ)
@@ -456,12 +452,11 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
             if current_user and not has_scope(current_user, Scope.ALL)
             else None
         )
-        current_sendspin_player = get_sendspin_player_id()
         if (
             current_user
             and user_filter
             and player_id not in user_filter
-            and player_id != current_sendspin_player
+            and not is_own_client_player(self.get_player(player_id))
         ):
             msg = f"{current_user.username} does not have access to player {player_id}"
             raise InsufficientPermissions(msg)
@@ -518,13 +513,12 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
             if current_user and not has_scope(current_user, Scope.ALL)
             else None
         )
-        current_sendspin_player = get_sendspin_player_id()
         if player := self.get_player_by_name(name):
             if (
                 current_user
                 and user_filter
                 and player.player_id not in user_filter
-                and player.player_id != current_sendspin_player
+                and not is_own_client_player(player)
             ):
                 msg = f"{current_user.username} does not have access to player {player.player_id}"
                 raise InsufficientPermissions(msg)
@@ -3364,6 +3358,8 @@ class PlayerController(AnnouncementsMixin, AudioSourceMixin, ProtocolLinkingMixi
                 player.extra_data[ATTR_LAST_POLL] = self.mass.loop.time()
                 try:
                     await player.poll()
+                except PlayerUnavailableError:
+                    self.logger.debug("Player %s is unavailable", player.state.name)
                 except Exception as err:
                     self.logger.warning(
                         "Error while requesting latest state from player %s: %s",

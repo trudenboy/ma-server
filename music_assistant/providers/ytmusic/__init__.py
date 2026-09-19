@@ -202,10 +202,13 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
             self.get_setup_value(CONF_PO_TOKEN_SERVER_URL) or DEFAULT_PO_TOKEN_SERVER_URL
         )
         if not await self._verify_po_token_url():
-            raise LoginFailed(
+            # Unreachable server isn't a credentials problem, so raise a retryable setup failure.
+            raise SetupFailedError(
                 "PO Token server URL is not reachable. "
                 "Make sure you have installed the YT Music PO Token Generator "
-                "and that it is running."
+                "and that it is running.",
+                translation_key="po_token_server_unreachable",
+                translation_owner=self.translation_owner,
             )
         yt_username = str(self.get_setup_value(CONF_USERNAME))
         self._yt_user = yt_username if is_brand_account(yt_username) else None
@@ -695,6 +698,8 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
             can_seek=True,
             allow_seek=True,
             expiration=expiration,
+            # YouTube throttles delivery to ~playback rate, so treat it as a live-paced source.
+            is_realtime=True,
         )
         if (audio_channels := stream_format.get("audio_channels")) and str(
             audio_channels
