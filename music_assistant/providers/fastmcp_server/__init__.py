@@ -13,9 +13,7 @@ no extra port, no changes to MA core.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, cast
-
-from music_assistant.helpers.util import import_module_in_thread
+from typing import TYPE_CHECKING
 
 from ._init_helpers import (
     _detect_external_base_url,
@@ -50,5 +48,6 @@ async def setup(
     config: ProviderConfig,
 ) -> ProviderInstanceType:
     """Initialize provider instance with given configuration."""
-    module = await import_module_in_thread(".provider", "music_assistant.providers.fastmcp_server")
-    return cast("ProviderInstanceType", module.MCPServerProvider(mass, manifest, config))
+    from .provider import MCPServerProvider  # noqa: PLC0415
+
+    return MCPServerProvider(mass, manifest, config)
