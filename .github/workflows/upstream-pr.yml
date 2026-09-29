@@ -300,6 +300,7 @@ jobs:
           # lose contributor credit that lives in the provider repo's commits
           # (observed on music-assistant/server#4833). Collect Co-authored-by
           # trailers from the synced commit range, drop AI-agent / bot trailers
+          # and unconfigured placeholder identities (RFC 2606 example domains)
           # (per AI_POLICY those stay in the provider repo), normalize the
           # trailer key casing, and dedupe preserving first-seen order.
           HUMAN_COAUTHORS=""
@@ -309,7 +310,7 @@ jobs:
               2>/dev/null \
               | tr -d '\r' \
               | sed -E 's/^[Cc]o-[Aa]uthored-[Bb]y:[[:space:]]*/Co-authored-by: /' \
-              | grep -Eiv '@anthropic\.com|@cursor\.com|@openai\.com|\[bot\]|github-actions|copilot|claude|opencode|aider|devin' \
+              | grep -Eiv '@anthropic\.com|@cursor\.com|@openai\.com|\[bot\]|github-actions|copilot|claude|opencode|aider|devin|@example\.(com|org|net)>' \
               | awk '!seen[$0]++' \
               || true)
           fi
