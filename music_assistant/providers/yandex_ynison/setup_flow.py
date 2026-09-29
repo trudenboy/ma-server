@@ -54,7 +54,7 @@ async def run_setup(session: SetupSession) -> None:
         key in setup_data or key in original_values for key in LEGACY_AUTH_KEYS
     )
 
-    errors: dict[str, str] | None = None
+    errors: dict[str, str | SetupFlowError] | None = None
     while True:
         submitted = await session.form(
             [
@@ -65,8 +65,30 @@ async def run_setup(session: SetupSession) -> None:
             errors=errors,
             last_step=True,
         )
-        selected_source = str(submitted[CONF_YM_INSTANCE])
-        selected_player = str(submitted[CONF_MASS_PLAYER_ID])
+        source = str(values[CONF_YM_INSTANCE])
+        remember = bool(values[CONF_REMEMBER_SESSION])
+        default_player = values[CONF_MASS_PLAYER_ID]
+        identity: dict[str, ConfigValueType] = {
+            CONF_MASS_PLAYER_ID: default_player,
+        }
+        if source != YM_INSTANCE_OWN:
+            # borrow mode: the linked Yandex Music instance owns authentication
+            try:
+                await session.finish({CONF_YM_INSTANCE: source, **identity})
+                return
+            except SetupFlowError as err:
+                errors = {"base": err}
+                default_source = source
+                continue
+        # own credentials: QR login
+        try:
+            creds = await _qr_login(session)
+        except YaPassportError as err:
+            errors = {"base": str(err)}
+            continue
+        if creds.music_token is None:
+            errors = {"base": "no_music_token"}
+            continue
         collected: dict[str, ConfigValueType] = {
             CONF_YM_INSTANCE: selected_source,
             CONF_MASS_PLAYER_ID: selected_player,
@@ -77,8 +99,7 @@ async def run_setup(session: SetupSession) -> None:
             await session.finish(collected)
             return
         except SetupFlowError as err:
-            errors = {"base": err.translation_key or str(err)}
-            setup_data = collected
+            errors = {"base": err}
 
 
 def _source_entry(

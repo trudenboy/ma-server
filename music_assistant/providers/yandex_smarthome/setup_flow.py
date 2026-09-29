@@ -131,14 +131,14 @@ async def _run_cloud(session: SetupSession, collected: dict[str, ConfigValueType
     collected[CONF_CLOUD_INSTANCE_ID] = data["id"]
     collected[CONF_CLOUD_INSTANCE_PASSWORD] = data["password"]
     collected[CONF_CLOUD_CONNECTION_TOKEN] = data["connection_token"]
-    errors: dict[str, str] | None = None
+    errors: dict[str, str | SetupFlowError] | None = None
     while True:
         await _show_linking_code(session, collected, errors=errors)
         try:
             await session.finish(collected)
             return
         except SetupFlowError as err:
-            errors = {"base": err.translation_key or str(err)}
+            errors = {"base": err}
 
 
 async def _run_cloud_plus(
@@ -200,7 +200,7 @@ async def _run_cloud_plus(
         )
         collected[CONF_SKILL_ID] = str(skill_values[CONF_SKILL_ID])
 
-    errors: dict[str, str] | None = None
+    errors: dict[str, str | SetupFlowError] | None = None
     while True:
         errors = await _collect_skill_token(session, collected, errors)
         if errors is not None:
@@ -210,7 +210,8 @@ async def _run_cloud_plus(
             await session.finish(collected)
             return
         except SetupFlowError as err:
-            errors = {"base": err.translation_key or str(err)}
+            # a finish failure here is most likely a rejected skill token; re-prompt it
+            errors = {"base": err}
 
 
 async def _run_direct(
@@ -229,7 +230,7 @@ async def _run_direct(
         skill_name=instance_name,
         ym_instance=ym_instance,
     )
-    errors: dict[str, str] | None = None
+    errors: dict[str, str | SetupFlowError] | None = None
     while True:
         errors = await _collect_skill_token(session, collected, errors)
         if errors is not None:
@@ -238,7 +239,7 @@ async def _run_direct(
             await session.finish(collected)
             return
         except SetupFlowError as err:
-            errors = {"base": err.translation_key or str(err)}
+            errors = {"base": err}
 
 
 async def _provision_skill(
@@ -328,15 +329,55 @@ async def _device_login(session: SetupSession) -> str:
             )
         except InvalidCredentialsError as err:
             raise AbortFlow("device_login_denied") from err
-    return str(credentials.x_token.get_secret())
+    return credentials.x_token.get_secret()
+
+
+async def _show_linking_code(
+    session: SetupSession,
+    collected: dict[str, ConfigValueType],
+    *,
+    errors: dict[str, str | SetupFlowError] | None,
+) -> None:
+    """Fetch + show the relay one-time linking code and wait for the user to confirm."""
+    code = await session.progress_until(
+        get_cloud_otp(
+            session.mass.http_session,
+            str(collected[CONF_CLOUD_INSTANCE_ID]),
+            SecretStr(str(collected[CONF_CLOUD_CONNECTION_TOKEN])),
+        ),
+        step_id="fetching_otp",
+        text="fetching_otp",
+        expires_in=_CLOUD_CALL_TIMEOUT,
+    )
+    # the code is shown as an image (dynamic value, i18n-safe) and also passed as a
+    # translation param on the confirm form's label so it stays visible while the user
+    # acts on it in the Yandex app (the static wording lives in the owner's strings.json)
+    session.progress(step_id="cloud_otp", text="enter_otp_in_yandex_app", image=_code_image(code))
+    await session.form(
+        [
+            ConfigEntry(
+                key="label_otp_confirm",
+                type=ConfigEntryType.LABEL,
+                translation_params=[code],
+            )
+        ],
+        step_id="cloud_confirm",
+        errors=errors,
+        last_step=True,
+    )
 
 
 async def _collect_skill_token(
     session: SetupSession,
     collected: dict[str, ConfigValueType],
-    errors: dict[str, str] | None,
-) -> dict[str, str] | None:
-    """Collect a skill OAuth token or return errors for a missing value."""
+    errors: dict[str, str | SetupFlowError] | None,
+) -> dict[str, str | SetupFlowError] | None:
+    """
+    Show the skill-OAuth-token form and store a pasted token in ``collected``.
+
+    Returns None when a usable token is present (pasted now or kept from a prior run),
+    or a form-errors dict to re-render when the field was left empty with nothing stored.
+    """
     existing = collected.get(CONF_SKILL_TOKEN)
     values = await session.form(
         [
