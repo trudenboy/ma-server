@@ -68,6 +68,7 @@ from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.music import MusicController
 from music_assistant.controllers.player_queues import PlayerQueuesController
 from music_assistant.controllers.players import PlayerController
+from music_assistant.controllers.storage import StorageController
 from music_assistant.controllers.streams import StreamsController
 from music_assistant.controllers.tasks import TasksController
 from music_assistant.controllers.translations import TranslationController
@@ -228,6 +229,7 @@ class MusicAssistant:
     translations: TranslationController
     diagnostics: DiagnosticsController
     dashboard: DashboardController
+    storage: StorageController
 
     def __init__(self, storage_path: str, cache_path: str, safe_mode: bool = False) -> None:
         """Initialize the MusicAssistant Server."""
@@ -309,6 +311,7 @@ class MusicAssistant:
             tg.create_task(setup_controller(self.player_queues))
             tg.create_task(setup_controller(self.diagnostics))
             tg.create_task(setup_controller(self.dashboard))
+            tg.create_task(setup_controller(self.storage))
 
         for controller_name in (
             "cache",
@@ -392,6 +395,7 @@ class MusicAssistant:
             "translations",
             "diagnostics",
             "dashboard",
+            "storage",
             "config",
             "cache",
         ):
@@ -713,7 +717,7 @@ class MusicAssistant:
             if is_coro:
                 if TYPE_CHECKING:
                     cb_func = cast("Callable[[MassEvent], Coroutine[Any, Any, None]]", cb_func)
-                self.create_task(cb_func, event_obj)
+                self.create_task(cb_func(event_obj))
             else:
                 if TYPE_CHECKING:
                     cb_func = cast("Callable[[MassEvent], None]", cb_func)
@@ -763,7 +767,11 @@ class MusicAssistant:
 
         Tasks created by this helper will be properly cancelled on stop.
 
-        :param target: Coroutine function or awaitable to run as a task.
+        :param target: The coroutine to run as a task. Build it at the call site
+            (``create_task(self._work(a, b))``) rather than passing the function and its
+            arguments on: the arguments are then checked against the function's signature,
+            and they cannot collide with the options below. A coroutine function plus args
+            and kwargs still works, for a caller that forwards arguments it never sees.
         :param args: Arguments to pass to the coroutine function.
         :param task_id: Optional ID to track and deduplicate tasks.
         :param task_name: Optional name identifying the task in log messages. Task ids are
@@ -777,10 +785,8 @@ class MusicAssistant:
                                its failures itself; the task then logs at debug level
                                instead of warning.
         :param kwargs: Keyword arguments to pass to the coroutine function. The options
-            above take these names for themselves, so a coroutine function with a parameter
-            of its own called task_id, task_name, abort_existing, eager_start or
-            log_exceptions has to be passed as a functools.partial, or called with that
-            argument positionally.
+            above take these names for themselves, which is the collision building the
+            coroutine at the call site avoids.
         """
         if task_id and (existing := self._tracked_tasks.get(task_id)) and not existing.done():
             # prevent duplicate tasks if task_id is given and already present
@@ -1234,6 +1240,7 @@ class MusicAssistant:
             self.streams.audio_analysis,
             self.diagnostics,
             self.dashboard,
+            self.storage,
         ):
             for attr_name in dir(cls):
                 if attr_name.startswith("__"):
@@ -1270,6 +1277,7 @@ class MusicAssistant:
         self.translations = TranslationController(self)
         self.diagnostics = DiagnosticsController(self)
         self.dashboard = DashboardController(self)
+        self.storage = StorageController(self)
         # add manifests for core controllers
         for controller_name in CONFIGURABLE_CORE_CONTROLLERS:
             controller: CoreController = getattr(self, controller_name)
