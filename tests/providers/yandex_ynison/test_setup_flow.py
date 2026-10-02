@@ -22,6 +22,8 @@ from music_assistant.providers.yandex_ynison.constants import (
 from music_assistant.providers.yandex_ynison.setup_flow import run_setup
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from music_assistant_models.config_entries import ConfigEntry, ConfigValueType
 
 
@@ -62,14 +64,14 @@ class _SetupSession(SetupSession):
         self._submitted = submitted
         self.entries: list[ConfigEntry] = []
         self.form_kwargs: dict[str, Any] = {}
-        self.shown_errors: list[dict[str, str] | None] = []
+        self.shown_errors: list[Mapping[str, str | SetupFlowError] | None] = []
         self.finished_values: dict[str, ConfigValueType] | None = None
 
     async def form(
         self,
         entries: list[ConfigEntry],
         step_id: str = "user",
-        errors: dict[str, str] | None = None,
+        errors: Mapping[str, str | SetupFlowError] | None = None,
         last_step: bool | None = None,
         expires_in: float | None = None,
         translation_params: list[str] | None = None,
@@ -209,6 +211,40 @@ async def test_reconfigure_clears_legacy_auth_and_drops_legacy_identity() -> Non
     }
 
 
+async def test_finish_retry_preserves_translated_error_metadata() -> None:
+    """The retry form receives the provider's full translated setup error."""
+    error = SetupFlowError(
+        "provider rejected setup",
+        translation_key="invalid_auth",
+        translation_args=["Living room"],
+        translation_owner="music_assistant.providers.yandex_ynison.yandex_ynison",
+    )
+
+    class RetrySession(_SetupSession):
+        attempts = 0
+
+        async def finish(self, values: dict[str, ConfigValueType]) -> dict[str, str]:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise error
+            return await super().finish(values)
+
+    session = RetrySession(
+        {"ym-main": {"domain": "yandex_music", "name": "Primary"}},
+        {CONF_YM_INSTANCE: "ym-main", CONF_MASS_PLAYER_ID: "living-room"},
+    )
+
+    await run_setup(session)
+
+    retry_errors = session.shown_errors[1]
+    assert retry_errors is not None
+    assert retry_errors["base"] is error
+    assert session.finished_values == {
+        CONF_YM_INSTANCE: "ym-main",
+        CONF_MASS_PLAYER_ID: "living-room",
+    }
+
+
 async def test_new_setup_does_not_persist_legacy_auth_keys() -> None:
     """New instances must persist only the linked account and concrete player."""
     session = _SetupSession(
@@ -269,6 +305,11 @@ async def test_finish_error_reopens_form_with_preserved_values() -> None:
     await run_setup(session)
 
     assert session.attempts == 2
-    assert session.shown_errors == [None, {"base": "invalid_auth"}]
+    assert session.shown_errors[0] is None
+    retry_errors = session.shown_errors[1]
+    assert retry_errors is not None
+    retry_error = retry_errors["base"]
+    assert isinstance(retry_error, SetupFlowError)
+    assert retry_error.translation_key == "invalid_auth"
     assert _entry(session, CONF_YM_INSTANCE).value == "ym-main"
     assert _entry(session, CONF_MASS_PLAYER_ID).value == "living-room"

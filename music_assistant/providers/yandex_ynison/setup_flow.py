@@ -65,30 +65,8 @@ async def run_setup(session: SetupSession) -> None:
             errors=errors,
             last_step=True,
         )
-        source = str(values[CONF_YM_INSTANCE])
-        remember = bool(values[CONF_REMEMBER_SESSION])
-        default_player = values[CONF_MASS_PLAYER_ID]
-        identity: dict[str, ConfigValueType] = {
-            CONF_MASS_PLAYER_ID: default_player,
-        }
-        if source != YM_INSTANCE_OWN:
-            # borrow mode: the linked Yandex Music instance owns authentication
-            try:
-                await session.finish({CONF_YM_INSTANCE: source, **identity})
-                return
-            except SetupFlowError as err:
-                errors = {"base": err}
-                default_source = source
-                continue
-        # own credentials: QR login
-        try:
-            creds = await _qr_login(session)
-        except YaPassportError as err:
-            errors = {"base": str(err)}
-            continue
-        if creds.music_token is None:
-            errors = {"base": "no_music_token"}
-            continue
+        selected_source = str(submitted[CONF_YM_INSTANCE])
+        selected_player = str(submitted[CONF_MASS_PLAYER_ID])
         collected: dict[str, ConfigValueType] = {
             CONF_YM_INSTANCE: selected_source,
             CONF_MASS_PLAYER_ID: selected_player,
@@ -100,6 +78,7 @@ async def run_setup(session: SetupSession) -> None:
             return
         except SetupFlowError as err:
             errors = {"base": err}
+            setup_data = collected
 
 
 def _source_entry(

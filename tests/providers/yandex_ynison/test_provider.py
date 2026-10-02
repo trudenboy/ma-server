@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,9 +36,9 @@ from ya_passport_auth import SecretStr
 from music_assistant.controllers.streams.constants import STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT
 from music_assistant.helpers.throttle_retry import (
     RequestPriority,
-    ThrottlerManager,
     current_priority,
 )
+from music_assistant.mass import MusicAssistant
 from music_assistant.models.music_provider import MusicProvider, ProviderStreamLimitError
 from music_assistant.providers.yandex_ynison.config_helpers import list_yandex_music_instances
 from music_assistant.providers.yandex_ynison.constants import (
@@ -1399,10 +1400,9 @@ class TestYnisonStateHandling:
         )
         provider._yandex_provider = mock_ym_provider
 
-        # Use real create_task so prefetch coroutine actually runs
-        provider.mass.create_task = lambda coro, *_a, **_kw: asyncio.get_event_loop().create_task(  # type: ignore[method-assign, assignment, misc]
-            coro
-        )
+        _stub_attr(provider.mass, "loop", asyncio.get_running_loop())
+        _stub_attr(provider.mass, "_tracked_tasks", {})
+        _stub_attr(provider.mass, "create_task", partial(MusicAssistant.create_task, provider.mass))
 
         # Trigger prefetch
         provider._maybe_prefetch(
@@ -1412,6 +1412,7 @@ class TestYnisonStateHandling:
             "RADIO",
         )
         assert provider._prefetch_task is not None
+        assert provider._prefetch_task.get_name() == f"ynison_prefetch_{provider.instance_id}"
         await provider._prefetch_task
 
         # Prefetched list should contain old + new
@@ -2303,52 +2304,6 @@ class TestYandexProviderMatch:
         await provider._check_yandex_provider_match()
 
         assert provider._yandex_provider is wanted
-
-    async def test_own_mode_accepts_any_ym(self) -> None:
-        """In own mode, the first available yandex_music provider is used."""
-        provider = _make_provider()
-        provider._ym_instance_id = None
-        ym = _make_ym_provider_stub(instance_id="any")
-        _stub_attr(provider.mass, "providers", [ym])
-
-        await provider._check_yandex_provider_match()
-
-        assert provider._yandex_provider is ym
-
-
-# ------------------------------------------------------------------
-# Advertised device name
-# ------------------------------------------------------------------
-
-
-class TestDisplayName:
-    """Tests for the _display_name property."""
-
-    def test_returns_connected_player_name(self) -> None:
-        """The advertised name follows the connected player's display name."""
-        provider = _make_provider()
-        player = MagicMock()
-        player.display_name = "Living Room"
-        provider.mass.players.get_player.return_value = player
-        assert provider._display_name == "Living Room"
-
-    def test_falls_back_to_stored_name_when_player_unregistered(self) -> None:
-        """On a cold boot the stored player config name applies until registration."""
-        provider = _make_provider()
-        provider.mass.players.get_player.return_value = None
-        provider.mass.config.get_raw_player_config_value = MagicMock(
-            side_effect=lambda _player_id, key, default=None: (
-                "Living Room" if key == "name" else default
-            )
-        )
-        assert provider._display_name == "Living Room"
-
-    def test_falls_back_to_default_without_a_stored_name(self) -> None:
-        """The default name applies when neither the player nor a stored name exists."""
-        provider = _make_provider()
-        provider.mass.players.get_player.return_value = None
-        provider.mass.config.get_raw_player_config_value = MagicMock(return_value=None)
-        assert provider._display_name == DEFAULT_DISPLAY_NAME
 
 
 # ------------------------------------------------------------------

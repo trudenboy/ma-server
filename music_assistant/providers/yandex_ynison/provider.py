@@ -886,16 +886,14 @@ class YandexYnisonProvider(PluginProvider):
             )
             self._stream_stop_event.set()
             return
-        # In-flight stream fetch outranks unrelated 429 cooldowns:
-        # dropping a stream the user is actively trying to play is
-        # worse than risking another captcha. Prefetch deliberately
-        # stays throttled (see `_prefetch_format_for_track`).
+        # Playback receives the highest priority while still counting toward
+        # the request budget. Prefetch retains its caller's priority.
         try:
             with request_priority(RequestPriority.HIGH):
                 stream_details = await self._get_stream_details_with_retry(
                     track_id, provider=provider
                 )
-        except Exception:
+        except MusicAssistantError:
             self.logger.exception("Failed to get stream details for track %s", track_id)
             self._stream_stop_event.set()
             return
