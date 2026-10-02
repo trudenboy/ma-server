@@ -28,7 +28,7 @@ from yandex_music.exceptions import BadRequestError, NetworkError, UnauthorizedE
 from yandex_music.utils.sign_request import DEFAULT_SIGN_KEY
 
 from music_assistant.helpers.datetime import utc
-from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER, Throttler
+from music_assistant.helpers.throttle_retry import Throttler
 
 if TYPE_CHECKING:
     from yandex_music import DownloadInfo
@@ -99,6 +99,97 @@ class KionMusicClient:
         """Disconnect the client."""
         self._client = None
         self._user_id = None
+
+    async def _ensure_connected(self) -> ClientAsync:
+        """Ensure the client is connected, attempting reconnect if needed."""
+        if self._client is not None:
+            return self._client
+        async with self._reconnect_lock:
+            # Re-check after acquiring lock — another task may have connected already
+            if self._client is not None:
+                return self._client  # type: ignore[unreachable]
+            LOGGER.info("Client disconnected, attempting to reconnect...")
+            try:
+                await self.connect()
+            except LoginFailed:
+                raise
+            except Exception as err:
+                raise ProviderUnavailableError("Client not connected and reconnect failed") from err
+        return cast("ClientAsync", self._client)
+
+    def _is_connection_error(self, err: Exception) -> bool:
+        """Return True if the exception indicates a connection or server drop."""
+        if isinstance(err, NetworkError) and not self._is_rate_limit_error(err):
+            return True
+        msg = str(err).lower()
+        return "disconnect" in msg or "connection" in msg or "timeout" in msg
+
+    def _is_rate_limit_error(self, err: Exception) -> bool:
+        """Return True if the exception indicates a rate-limit response from Kion."""
+        if not isinstance(err, NetworkError):
+            return False
+        msg = str(err).lower()
+        return "429" in msg or "too many requests" in msg or "rate limit" in msg
+
+    async def _reconnect(self) -> None:
+        """
+        Disconnect and connect again to recover from Server disconnected / connection errors.
+
+        Enforces a 30-second cooldown between reconnect attempts to avoid hammering Kion
+        and triggering rate limiting. A lock ensures concurrent callers don't bypass the cooldown.
+        """
+        async with self._reconnect_lock:
+            now = time.monotonic()
+            if now - self._last_reconnect_at < 30.0:
+                raise ProviderUnavailableError("Reconnect cooldown active, skipping")
+            self._last_reconnect_at = now
+            await self.disconnect()
+            await self.connect()
+
+    async def _call_with_retry(self, func: Callable[[ClientAsync], Awaitable[_T]]) -> _T:
+        """
+        Execute an async API call with throttling and one reconnect attempt on connection error.
+
+        :param func: Async callable that takes a ClientAsync and returns a result.
+        :return: The result of the API call.
+        """
+        await self._throttler.acquire()
+        client = await self._ensure_connected()
+        try:
+            return await func(client)
+        except Exception as err:
+            if self._is_rate_limit_error(err):
+                raise RateLimited("KION Music rate limit", backoff_time=60) from err
+            if not self._is_connection_error(err):
+                raise
+            LOGGER.warning("Connection error, reconnecting and retrying: %s", err)
+            try:
+                await self._reconnect()
+            except Exception as recon_err:
+                raise ProviderUnavailableError("Reconnect failed") from recon_err
+            client = cast("ClientAsync", self._client)
+            # the retry is a request of its own, so it takes a slot of its own
+            await self._throttler.acquire()
+            return await func(client)
+
+    async def _call_no_retry(self, func: Callable[[ClientAsync], Awaitable[_T]]) -> _T:
+        """
+        Execute an async API call without reconnect retry on call failure.
+
+        Used for fire-and-forget calls (e.g. rotor feedback) where a failed request
+        should be silently dropped rather than triggering a reconnect cycle that
+        could cause rate limiting. Note: _ensure_connected() is still called to
+        establish the initial connection if needed; only the reconnect-on-error
+        path is skipped.
+
+        :param func: Async callable that takes a ClientAsync and returns a result.
+        :return: The result of the API call.
+        """
+        await self._throttler.acquire()
+        client = await self._ensure_connected()
+        return await func(client)
+
+    # Rotor (radio station) methods
 
     async def get_rotor_station_tracks(
         self,
