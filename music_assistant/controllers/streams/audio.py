@@ -64,6 +64,7 @@ from music_assistant.constants import (
     INTERNAL_PCM_FORMAT,
     LOUDNESS_MEASUREMENT_MIN_LUFS,
     MASS_LOGGER_NAME,
+    RADIO_STREAM_READ_TIMEOUT,
     STREAM_STALL_TIMEOUT,
     STREAM_START_TIMEOUT,
     VERBOSE_LOG_LEVEL,
@@ -454,6 +455,11 @@ class StreamsAudio:
         self._audio_buffer_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
             WeakValueDictionary()
         )
+        # serializes streamdetails resolution per queue item, so concurrent callers share
+        # one result instead of each fetching details the others then overwrite
+        self._stream_details_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
+            WeakValueDictionary()
+        )
 
     def setup(self) -> None:
         """Set up the audio sub-controller (called after all core controllers are created)."""
@@ -480,6 +486,7 @@ class StreamsAudio:
 
         This is called just-in-time when a PlayerQueue wants a MediaItem to be played.
         Do not try to request streamdetails too much in advance as this is expiring data.
+        The result is also stored on the queue item.
 
         :param queue_item: Queue item to resolve.
         :param seek_position: Requested playback position in seconds.
@@ -951,16 +958,17 @@ class StreamsAudio:
 
         :param url: URL of the radio stream.
         """
-        timeout = ClientTimeout(total=None, connect=30, sock_read=5 * 60)
+        timeout = ClientTimeout(total=None, connect=30, sock_read=RADIO_STREAM_READ_TIMEOUT)
+        # Consecutive reconnects that delivered no audio; any audio resets it.
         reconnect_count = 0
-        max_reconnects = 1000  # Allow many reconnects for long-running radio
+        max_reconnects = 1000
 
         while reconnect_count <= max_reconnects:
+            chunk_count = 0
             try:
                 async with self._connect_radio_stream(
                     url, allow_redirects=True, headers=HTTP_HEADERS, timeout=timeout
                 ) as resp:
-                    chunk_count = 0
                     async for chunk in resp.content.iter_any():
                         chunk_count += 1
                         yield chunk
@@ -972,7 +980,7 @@ class StreamsAudio:
                         chunk_count,
                         reconnect_count,
                     )
-                    reconnect_count += 1
+                    reconnect_count = 0 if chunk_count else reconnect_count + 1
                     await asyncio.sleep(0.1)  # Brief delay before reconnect
 
             except asyncio.CancelledError:
@@ -985,7 +993,7 @@ class StreamsAudio:
             ) as err:
                 # Transient network errors - retry
                 self.logger.warning("Radio stream error (reconnect #%d): %s", reconnect_count, err)
-                reconnect_count += 1
+                reconnect_count = 0 if chunk_count else reconnect_count + 1
                 if reconnect_count > max_reconnects:
                     raise RetriesExhausted(
                         f"Radio stream failed after {max_reconnects} reconnects: {err}"
@@ -1823,9 +1831,18 @@ class StreamsAudio:
                     and queue.next_item
                     and (bytes_received / pcm_format.pcm_sample_size + seek_position)
                     >= streamdetails.duration - 60
+                    and (
+                        next_item := self.mass.player_queues.get_next_item(
+                            queue_item.queue_id, queue_item.queue_item_id
+                        )
+                    )
+                    and next_item.queue_item_id != queue_item.queue_item_id
+                    and next_item.media_type in (MediaType.TRACK, MediaType.SOUND_EFFECT)
                 ):
                     next_buffer_triggered = True
-                    self.mass.player_queues.prepare_next_audio_buffer(queue_item.queue_id)
+                    self.mass.player_queues.prepare_next_audio_buffer(
+                        queue_item.queue_id, queue_item.queue_item_id
+                    )
                 yield chunk
                 del chunk
             finished = True
@@ -2196,6 +2213,7 @@ class StreamsAudio:
         start_queue_item: QueueItem,
         pcm_format: AudioFormat,
         protocol_player: Player | None = None,
+        consumer_connected: Callable[[], bool] | None = None,
     ) -> AsyncGenerator[bytes]:
         """
         Get a flow stream of all tracks in the queue as raw PCM audio.
@@ -2206,6 +2224,9 @@ class StreamsAudio:
             Must be the same player that was used to select ``pcm_format`` so
             restart decisions are made against the correct supported sample rates
             and flow mode configuration. Falls back to the queue's player when omitted.
+        :param consumer_connected: Reports whether the consumer of this stream is still
+            connected; once it reports False, the stream ends before its next item and
+            does not report the queue completed.
         """
         # ruff: noqa: PLR0915
         assert pcm_format.content_type.is_pcm()
@@ -2231,6 +2252,19 @@ class StreamsAudio:
             )
             return
         queue.flow_mode = True
+
+        def _consumer_left() -> bool:
+            """Return True once the consumer of this stream has disconnected."""
+            if consumer_connected is None or consumer_connected():
+                return False
+            self.logger.debug(
+                "Flow stream for queue %s lost its consumer - exiting", queue.display_name
+            )
+            return True
+
+        # without a consumer, leave the session's play log to the producers still playing it
+        if _consumer_left():
+            return
         # A session can also be handed a second producer, which the session check does not
         # catch: players such as DLNA renderers sometimes open the same flow url twice to
         # probe the audio. Append to the list published here rather than to whatever the
@@ -2292,6 +2326,11 @@ class StreamsAudio:
                         pq_data.session_id,
                     )
                     return
+                # a consumer that left is only noticed when audio is written to it, which never
+                # happens while items produce no audio: end here, without walking the rest of
+                # the queue or reporting it completed
+                if _consumer_left():
+                    return
                 # get (next) queue item to stream
                 if queue_track is None:
                     queue_track = start_queue_item
@@ -2303,6 +2342,9 @@ class StreamsAudio:
                     except QueueEmpty:
                         queue_exhausted = True
                         break
+                    # the consumer may have left while the next item was loading
+                    if _consumer_left():
+                        return
 
                 if self._flow_stream_needs_restart(
                     queue_track,
@@ -2630,6 +2672,9 @@ class StreamsAudio:
                 "Flow stream for queue %s superseded - skipping end-of-queue handling",
                 queue.display_name,
             )
+            return
+        # the queue did not play out on a consumer that left, so it is not reported completed
+        if _consumer_left():
             return
         # end of queue flow: make sure we yield the last_fadeout_part
         if last_fadeout_part:

@@ -297,14 +297,14 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
 
     @api_command("player_queues/shuffle", required_scope=Scope.QUEUES_CONTROL)
     async def set_shuffle(self, queue_id: str, shuffle_enabled: bool) -> None:
-        """Configure shuffle setting on the the queue."""
+        """Configure shuffle setting on the queue."""
         queue = self._queue_data[queue_id].queue
+        if queue.shuffle_enabled == shuffle_enabled:
+            return  # no change; asking for the state it is already in is never a failure
         if queue.is_dynamic:
             # a dynamic queue is an always-on, recency-orchestrated smart mix; manual shuffle
             # (and plain linear order) have no meaning here so the toggle is locked
             raise InvalidCommand("Cannot change shuffle while the queue is in dynamic mode")
-        if queue.shuffle_enabled == shuffle_enabled:
-            return  # no change
         await self._apply_local_shuffle(queue_id, shuffle_enabled)
 
     def is_smart_shuffle_active(self, queue: PlayerQueue) -> bool:
@@ -349,13 +349,13 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
 
     @api_command("player_queues/repeat", required_scope=Scope.QUEUES_CONTROL)
     async def set_repeat(self, queue_id: str, repeat_mode: RepeatMode) -> None:
-        """Configure repeat setting on the the queue."""
+        """Configure repeat setting on the queue."""
         queue = self._queue_data[queue_id].queue
+        if queue.repeat_mode == repeat_mode:
+            return  # no change; asking for the state it is already in is never a failure
         if queue.is_dynamic:
             # a dynamic queue is an always-on flowing mix of its sources; repeat has no meaning here
             raise InvalidCommand("Cannot change repeat while the queue is in dynamic mode")
-        if queue.repeat_mode == repeat_mode:
-            return  # no change
         queue.repeat_mode = repeat_mode
         self.signal_update(queue_id)
         self.update_next_item_on_player(queue_id)
@@ -895,7 +895,13 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
         queue = self._queue_data[queue_id].queue
         queue_items = self._queue_data[queue_id].items
         resume_item = queue.current_item
-        if queue.state == PlaybackState.PLAYING:
+        queue_player = self.mass.players.get_player(queue_id)
+        # Queue can still look PLAYING during announce.
+        # Don't trust the wall clock — use the parked resume_pos instead.
+        announcement_in_progress = bool(
+            queue_player and queue_player.extra_data.get(ATTR_ANNOUNCEMENT_IN_PROGRESS)
+        )
+        if queue.state == PlaybackState.PLAYING and not announcement_in_progress:
             # resume requested while already playing,
             # use current position as resume position
             resume_pos = queue.corrected_elapsed_time
@@ -917,7 +923,6 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
             resume_pos = 0
 
         if resume_item is not None:
-            queue_player = self.mass.players.get_player(queue_id)
             if queue_player is None:
                 raise PlayerUnavailableError(f"Player {queue_id} is not available")
             if (
@@ -988,19 +993,8 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
                 not seek_position
                 and not restarting_ended_queue
                 and (queue_item := self.get_item(queue_id, index))
-                and (resume_position_ms := getattr(queue_item.media_item, "resume_position_ms", 0))
             ):
-                # the client may have fetched the item before its duration was known
-                await self._restore_probed_duration(queue_item)
-                if queue_item.duration or getattr(queue_item.media_item, "duration", 0):
-                    seek_position = max(0, int((resume_position_ms - 500) / 1000))
-                else:
-                    # seeking needs a duration, which is determined while streaming
-                    self.logger.debug(
-                        "Can not resume %s at %ss: its duration is not known (yet)",
-                        queue_item.name,
-                        int(resume_position_ms / 1000),
-                    )
+                seek_position = await self._get_resume_position(queue_item)
 
             # restore the persisted playback speed for a freshly queued audiobook/episode
             # (an in-session item already carries its speed in extra_attributes)
@@ -1372,7 +1366,11 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
                 # we only allow 10 retries to prevent infinite loops
                 raise QueueEmpty("No more (playable) tracks left in the queue.")
             try:
-                await self._load_item(queue_item)
+                # a repeat plays the item over from the start, not from where it was left off
+                seek_position = (
+                    await self._get_resume_position(queue_item) if next_index > cur_index else 0
+                )
+                await self._load_item(queue_item, seek_position=seek_position)
                 # we're all set, this is our next item
                 next_item = queue_item
                 break

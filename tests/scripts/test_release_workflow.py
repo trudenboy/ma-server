@@ -154,6 +154,51 @@ def test_stable_preserves_patch_versioning_across_diverged_branches(
     assert decision.should_release is True
 
 
+def test_stable_auto_release_fails_when_unreleased_rc_exists(
+    repository: tuple[Path, GitRepository],
+) -> None:
+    """An RC ahead of the latest stable tag blocks the automatic patch release."""
+    path, git_repository = repository
+    _git(path, "tag", "2.9.9")
+    _commit(path, "rc work")
+    _git(path, "tag", "2.10.0rc2")
+
+    with pytest.raises(ReleaseWorkflowError, match="Create Release"):
+        determine_auto_release(git_repository, "stable", "HEAD")
+
+
+def test_stable_auto_release_continues_after_rc_base_released(
+    repository: tuple[Path, GitRepository],
+) -> None:
+    """Patch releases resume once the RC's base version has shipped as stable."""
+    path, git_repository = repository
+    _git(path, "tag", "2.10.0rc2")
+    _commit(path, "release work")
+    _git(path, "tag", "2.10.0")
+    _commit(path, "patch work")
+
+    decision = determine_auto_release(git_repository, "stable", "HEAD")
+
+    assert decision.version == "2.10.1"
+    assert decision.previous_tag == "2.10.0"
+
+
+def test_rc_auto_release_ignores_the_stable_only_guard(
+    repository: tuple[Path, GitRepository],
+) -> None:
+    """The RC-window guard only blocks the stable channel, not the RC channel itself."""
+    path, git_repository = repository
+    _git(path, "tag", "2.9.9")
+    _commit(path, "beta work")
+    _git(path, "tag", "2.10.0b1")
+    _commit(path, "rc work")
+    _git(path, "tag", "2.10.0rc1")
+
+    decision = determine_auto_release(git_repository, "rc", "HEAD")
+
+    assert decision.version == "2.10.0rc2"
+
+
 def test_current_release_combines_beta_and_rc_channels(
     repository: tuple[Path, GitRepository],
 ) -> None:
@@ -655,6 +700,31 @@ def test_release_workflow_uses_minimum_preflight_permissions_and_expected_app() 
     assert "idempotency_key" in workflow
     assert "repos/music-assistant/home-assistant-addon" in workflow
     assert "'.default_branch'" in workflow
+
+
+@pytest.mark.parametrize(
+    ("workflow_name", "guarded_job"),
+    [("release.yml", "resolve"), ("auto-release.yml", "resolve-release")],
+)
+def test_release_workflows_require_dispatch_from_dev(workflow_name: str, guarded_job: str) -> None:
+    """Release workflows fail before any other step or job unless they run from dev."""
+    workflow = cast(
+        "dict[str, Any]",
+        yaml.safe_load(
+            (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+        ),
+    )
+    jobs = workflow["jobs"]
+    guard = jobs[guarded_job]["steps"][0]
+
+    assert guard["name"] == "Require dispatch from dev"
+    assert guard["env"] == {"DISPATCH_REF": "${{ github.ref }}"}
+    assert 'if [ "$DISPATCH_REF" != "refs/heads/dev" ]; then' in guard["run"]
+    assert "exit 1" in guard["run"]
+    for job_name, job in jobs.items():
+        if job_name != guarded_job:
+            needs = job["needs"]
+            assert guarded_job in ([needs] if isinstance(needs, str) else needs), job_name
 
 
 def test_release_workflow_dispatch_source_sha_is_optional_for_recovery() -> None:

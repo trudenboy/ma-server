@@ -9,6 +9,7 @@ and has to authorize playback from the provider settings.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Generator
 from pathlib import Path

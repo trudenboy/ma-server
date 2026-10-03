@@ -32,6 +32,8 @@ from music_assistant.controllers.streams.constants import (
     CONF_BUFFER_SIZE,
     CONF_BUFFER_SIZE_DEFAULT,
     RADIO_BUFFER_SIZE,
+    REALTIME_COLD_START_BANK,
+    REALTIME_COLD_START_MAX_REMAINING,
     SEEK_WAIT_THRESHOLD,
     STREAM_SLOT_WAIT_TIMEOUT,
     BufferMode,
@@ -418,6 +420,7 @@ class AudioBuffer:
         wait_ready: bool = False,
         reason: str = "",
         source_wait_timeout: float | None = STREAM_SLOT_WAIT_TIMEOUT,
+        on_complete: Callable[[], None] | None = None,
     ) -> AudioBuffer:
         """
         Get or create an AudioBuffer for the given streamdetails.
@@ -433,6 +436,8 @@ class AudioBuffer:
         :param source_wait_timeout: Maximum seconds the producer may wait for a free
             source-stream slot on the providing music provider, or None to wait
             without a timeout.
+        :param on_complete: Called once the source of a newly created buffer has delivered
+            all of its audio. Not called when an existing buffer is reused.
         :raises AudioError: If the buffer does not become ready, wrapping the typed
             producer error (e.g. ProviderStreamLimitError) when there is one.
         """
@@ -556,17 +561,7 @@ class AudioBuffer:
             source_wait_timeout=source_wait_timeout,
         )
 
-        def _source_complete() -> None:
-            # a realtime source's one stream slot frees the moment this item has
-            # fully arrived: start fetching the next item right away
-            if (
-                streamdetails.is_realtime
-                and streamdetails.media_type == MediaType.TRACK
-                and streamdetails.queue_id
-            ):
-                mass.player_queues.prepare_next_audio_buffer(streamdetails.queue_id)
-
-        audio_buffer.fill(audio_source, source_name=streamdetails.uri, on_complete=_source_complete)
+        audio_buffer.fill(audio_source, source_name=streamdetails.uri, on_complete=on_complete)
 
         if wait_ready:
             await audio_buffer._wait_until_ready(streamdetails, ready_timeout, log_prefix)
@@ -855,6 +850,8 @@ def _new_buffer(
     streamdetails: StreamDetails,
     seek_position_ms: int,
     log_prefix: str,
+    *,
+    session_start: bool = False,
 ) -> tuple[AudioBuffer, int]:
     """
     Create the buffer for the given stream details and attach it to them.
@@ -863,6 +860,8 @@ def _new_buffer(
     :param streamdetails: The stream details the buffer belongs to.
     :param seek_position_ms: Position in milliseconds playback starts from.
     :param log_prefix: Caller context for logging.
+    :param session_start: Whether this buffer starts a playback session rather than
+        preparing the next item of one.
     :return: The buffer and the position (in seconds) its producer should start at.
     """
     # determine buffer size from config
@@ -903,6 +902,17 @@ def _new_buffer(
         # here. Only dynamic normalization, which genuinely needs lookahead, raises
         # this.
         ready_threshold = 2 if dynamic_normalization else 1
+        remaining = (streamdetails.duration or 0) - seek_seconds
+        if (
+            session_start
+            and 0 < remaining < REALTIME_COLD_START_MAX_REMAINING
+            and _has_single_source_slot(mass, streamdetails)
+        ):
+            # the first boundary comes before the player could build up a lead of its
+            # own, so hand it one. A preload at a boundary never banks: with the
+            # source's slot only freed by the item that just ended, it would just
+            # widen the gap the player has to bridge there.
+            ready_threshold = max(ready_threshold, REALTIME_COLD_START_BANK)
     elif crossfade_enabled:
         ready_threshold = 8
     elif dynamic_normalization:
@@ -976,3 +986,10 @@ def _buffer_pcm_format(streamdetails: StreamDetails) -> AudioFormat:
         # the same audio that is played back rather than the untouched surround mix
         channels=min(arriving.channels, 2),
     )
+
+
+def _has_single_source_slot(mass: MusicAssistant, streamdetails: StreamDetails) -> bool:
+    """Return whether the item's source lets only one stream run at a time."""
+    # the exact instance: a lookup by domain may land on a sibling instance's budget
+    provider = mass.get_provider(streamdetails.provider, return_unavailable=True)
+    return isinstance(provider, MusicProvider) and provider.max_concurrent_streams == 1

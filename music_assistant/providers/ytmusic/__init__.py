@@ -259,10 +259,8 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
                 return parsed_results
         results = await search(
             query=search_query,
-            headers=self._headers,
             ytm_filter=ytm_filter,
             limit=limit,
-            user=self._yt_user,
         )
         parsed_results = SearchResults()
         artists: list[Artist | ItemMapping] = []
@@ -1239,8 +1237,10 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
         for img in sorted(thumbnails_obj, key=lambda w: w.get("width", 0), reverse=True):
             url: str = img["url"]
             url_base = url.split("=w", maxsplit=1)[0]
-            width: int = img["width"]
-            height: int = img["height"]
+            width: int = img.get("width") or 0
+            height: int = img.get("height") or 0
+            if not width or not height:
+                continue
             image_ratio: float = width / height
             image_type = (
                 ImageType.LANDSCAPE

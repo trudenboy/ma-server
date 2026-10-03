@@ -21,7 +21,9 @@ frontend-version extraction even if the branch advances during the run.
 Automatic versions come from Git tags, not release records. The workflow validates the
 previous channel tag's relationship to `source_sha` and counts its Git commit range.
 Deleted release records therefore cannot make a tag/version reusable. Stable automatic
-releases continue to increment the patch component only. Nightlies require at least two
+releases continue to increment the patch component only. A stable auto-release fails
+early while an RC newer than the latest stable tag exists; dispatch the next stable
+release manually via the Create Release workflow instead. Nightlies require at least two
 commits after the previous nightly tag.
 
 ## Publishing sequence
@@ -72,6 +74,12 @@ Auto-release calculates the next version and invokes **Create Release** with its
 source SHA. **Create Release** can also be dispatched directly with an explicit version;
 for direct runs it resolves and freezes the current channel branch head itself unless you
 pass `source_sha` to recover an exact draft or published release source.
+
+Always dispatch **Auto Release** and **Create Release** from `dev`, also for stable and
+RC releases. The workflows check out their release tooling (version calculation, release
+notes, add-on updates) from the ref they run on, while the channel picks the branch that
+gets released. A run from `stable` would release stable with stable's copy of the tooling,
+which can lag behind dev, so both workflows fail early when started from any other ref.
 
 Do not create or publish a GitHub release manually. A draft created outside the workflow
 is accepted only when its exact tag name and target SHA match; conflicting tags,

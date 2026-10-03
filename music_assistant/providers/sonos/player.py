@@ -14,6 +14,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlparse
 
 from aiohttp import ClientError
 from aiosonos.api.models import Container, ContainerType, MusicService, SonosCapability
@@ -55,6 +56,7 @@ from music_assistant.providers.sonos.const import (
 
 if TYPE_CHECKING:
     from aiosonos.api.models import DiscoveryInfo as SonosDiscoveryInfo
+    from aiosonos.api.models import PlaybackError
     from aiosonos.group import SonosGroup
     from music_assistant_models.config_entries import ConfigEntry
     from music_assistant_models.queue_item import QueueItem
@@ -117,6 +119,11 @@ class SonosPlayer(Player):
         # failures already logged, so the speaker's resends are not logged again
         self.reported_playback_errors: deque[str] = deque(maxlen=REPORTED_ERROR_HISTORY)
         self._announcement_media: PlayerMedia | None = None
+
+    @property
+    def coordinates_announcement_start(self) -> bool:
+        """Return True: audio clips fired at the members together start close enough together."""
+        return True
 
     @property
     def group_controller(self) -> SonosGroup:
@@ -202,6 +209,9 @@ class SonosPlayer(Player):
                     SonosEventType.PLAYER_UPDATED,
                 ),
             )
+        )
+        self._on_unload_callbacks.append(
+            self.client.subscribe(self._on_playback_error, SonosEventType.PLAYBACK_ERROR)
         )
 
     async def get_config_entries(self) -> list[ConfigEntry]:

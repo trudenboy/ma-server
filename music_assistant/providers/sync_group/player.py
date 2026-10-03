@@ -216,12 +216,19 @@ class SyncGroupPlayer(Player):
             if not player.available or player.type == PlayerType.GROUP:
                 # let's avoid showing group players as options to group with
                 continue
-            if (
-                PlayerFeature.SET_MEMBERS in player.state.supported_features
-                and player.state.can_group_with
-                and not player.state.active_group
-            ):
-                can_group_with.add(player.player_id)
+            if PlayerFeature.SET_MEMBERS not in player.state.supported_features:
+                continue
+            if (active_group := player.state.active_group) and active_group != self.player_id:
+                # captured by another group player. A (possibly stale) claim by this group
+                # itself is fine: a former member keeps reporting it for a few seconds
+                # after the group dissolved.
+                continue
+            # A slaved player reports an empty can_group_with while it is synced, but it is
+            # group-capable all the same and joining it takes it over from its current
+            # leader (see the same exemption in get_config_entries).
+            if not (player.state.can_group_with or player.state.synced_to):
+                continue
+            can_group_with.add(player.player_id)
         return {pid for pid in can_group_with if self._is_member_allowed(pid)}
 
     @property
@@ -408,6 +415,13 @@ class SyncGroupPlayer(Player):
         # handle additions
         final_players_to_add: list[str] = []
         can_group_with = sync_leader.state.can_group_with.copy() if sync_leader else set()
+        # A leader that still reports being slaved has no compatibility list yet (it is
+        # empty while synced), so it can't tell us anything about the other joiners.
+        # Accept them here and let the form drop the incompatible ones again once the
+        # leader has settled and can be asked.
+        leader_settling = bool(
+            sync_leader and not sync_leader.state.can_group_with and sync_leader.state.synced_to
+        )
         for member_id in player_ids_to_add or []:
             if member_id == self.player_id:
                 continue  # can not add self as member
@@ -428,10 +442,14 @@ class SyncGroupPlayer(Player):
                 if member_id not in self._attr_group_members:
                     self._attr_group_members.append(member_id)
                 continue
-            if member_id != sync_leader.player_id and member_id not in can_group_with:
+            if (
+                member_id != sync_leader.player_id
+                and not leader_settling
+                and member_id not in can_group_with
+            ):
                 # incompatible with the current leader's protocols - do NOT register
-                # the member or it will linger in _attr_group_members forever without
-                # ever actually being synced.
+                # the member or it would sit in _attr_group_members, reported as part
+                # of the group, without ever actually being synced.
                 self.logger.debug(
                     f"Cannot add {member.display_name} to group {self.display_name} since it's "
                     f"not compatible with the (current) sync leader"
@@ -497,18 +515,16 @@ class SyncGroupPlayer(Player):
             else:
                 # protocol doesn't support dynamic leader switching or not playing
                 await self._dissolve_and_reform(old_leader_id, resume_playback=was_playing)
-        elif self.sync_leader and (leader_removed or not self._attr_group_members):
+        elif (leader := self.sync_leader) and (leader_removed or not self._attr_group_members):
             # we removed the current sync leader, and we have no members left in the group
             # or we just removed the last member from the group, so we dissolve the syncgroup
             # Use internal handler to stop the sync leader directly,
             # bypassing group redirect that would loop back to this player.
-            async with self.mass.players.wait_for_player_update(
-                self.sync_leader.player_id, timeout=5
-            ):
-                await self.mass.players._handle_cmd_stop(self.sync_leader.player_id)
+            async with self.mass.players.wait_for_player_update(leader.player_id, timeout=5):
+                await self.mass.players._handle_cmd_stop(leader.player_id)
             await self._dissolve_syncgroup()
 
-        elif self.sync_leader:
+        elif leader := self.sync_leader:
             # just a regular member(s) added/removed action,
             # we can simply update the syncgroup members on the sync leader.
             # `active_protocol_domain` is derived from live state, so the
@@ -517,17 +533,44 @@ class SyncGroupPlayer(Player):
             # use _handle_set_members directly to avoid the redirect loop
             # (cmd_set_members redirects sync-leader targets back to this syncgroup)
             async with self.mass.players.get_player_lock(
-                self.sync_leader.player_id, PlayerLockPurpose.PLAYBACK
+                leader.player_id, PlayerLockPurpose.PLAYBACK
             ):
-                await self.mass.players._handle_set_members(
-                    self.sync_leader,
-                    player_ids_to_add=final_players_to_add,
-                    player_ids_to_remove=final_players_to_remove,
-                )
+                current_leader: Player | None = self.sync_leader
+                if current_leader is not leader:
+                    # the group dissolved or picked another leader while we waited for
+                    # this one's lock, so the member change no longer applies to it.
+                    # A (re-)form syncs the recorded member list, which covers the
+                    # additions but not the removal of a member that was grouped to
+                    # the leader outside of MA.
+                    self.logger.debug(
+                        "Sync leader of group %s changed from %s to %s while waiting for its "
+                        "lock; leaving the member change to the (re-)form",
+                        self.display_name,
+                        leader.display_name,
+                        current_leader.display_name if current_leader else None,
+                    )
+                    if (
+                        current_leader is None
+                        and self._reform_task is not None
+                        and self._attr_group_members
+                    ):
+                        # a re-form only runs while the group is leaderless
+                        self._schedule_reform_timer()
+                else:
+                    await self.mass.players._handle_set_members(
+                        leader,
+                        player_ids_to_add=final_players_to_add,
+                        player_ids_to_remove=final_players_to_remove,
+                    )
         elif self._reform_task is not None:
-            # leaderless with a debounced re-form pending: membership just changed,
-            # so re-arm the window — the re-form picks up the final member list.
-            self._schedule_reform_timer()
+            if self._attr_group_members:
+                # leaderless with a debounced re-form pending: membership just changed,
+                # so re-arm the window — the re-form picks up the final member list.
+                self._schedule_reform_timer()
+            else:
+                # nothing left to re-form for: dropping the pending re-form also
+                # ends the group's claim on the session
+                self._cancel_reform_timer()
         # NOTE: If we weren't playing before, we don't need to do anything else,
         # since the syncing will be done once playback starts
         self.mass.players.trigger_player_update(self.player_id)

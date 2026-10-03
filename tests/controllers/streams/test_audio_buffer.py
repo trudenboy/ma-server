@@ -25,6 +25,7 @@ from music_assistant.controllers.streams.audio_buffer import (
 from music_assistant.controllers.streams.constants import (
     BUFFER_SIZE_MAP,
     RADIO_BUFFER_SIZE,
+    REALTIME_COLD_START_BANK,
     SEEK_WAIT_THRESHOLD,
     BufferMode,
     BufferSize,
@@ -520,8 +521,30 @@ async def test_get_buffer_skips_analysis_for_non_analyzed_types(media_type: Medi
 
 
 @pytest.mark.asyncio
-async def test_get_buffer_fill_completion_prepares_the_next_item() -> None:
-    """A realtime track's finished fill frees its slot and starts the next item's fetch."""
+async def test_get_buffer_signals_when_the_fill_completes() -> None:
+    """The completion callback runs once the source has delivered all of its audio."""
+    mass, _start_analysis, scheduled_tasks = _make_mass_for_get_buffer()
+    streamdetails = _make_stream_details(
+        MediaType.TRACK, duration=180, allow_seek=True, queue_id="queue_a"
+    )
+    on_complete = MagicMock()
+
+    buffer = await AudioBuffer.get_buffer(
+        mass, streamdetails, reason="test", on_complete=on_complete
+    )
+    await asyncio.sleep(0.1)
+
+    assert buffer.eof
+    on_complete.assert_called_once_with()
+    # the buffer itself leaves the reaction to the caller
+    mass.player_queues.prepare_next_audio_buffer.assert_not_called()
+    await asyncio.gather(*scheduled_tasks)
+    await buffer.clear()
+
+
+@pytest.mark.asyncio
+async def test_get_buffer_fills_without_a_completion_callback() -> None:
+    """A caller that needs no completion signal gets a fully filled buffer all the same."""
     mass, _start_analysis, scheduled_tasks = _make_mass_for_get_buffer()
     streamdetails = _make_stream_details(
         MediaType.TRACK, duration=180, allow_seek=True, queue_id="queue_a"
@@ -531,23 +554,8 @@ async def test_get_buffer_fill_completion_prepares_the_next_item() -> None:
     buffer = await AudioBuffer.get_buffer(mass, streamdetails, reason="test")
     await asyncio.sleep(0.1)
 
-    mass.player_queues.prepare_next_audio_buffer.assert_called_once_with("queue_a")
-    await asyncio.gather(*scheduled_tasks)
-    await buffer.clear()
-
-
-@pytest.mark.asyncio
-async def test_get_buffer_fill_completion_is_ignored_for_non_realtime_sources() -> None:
-    """A source that delivers faster than playback frees no slot worth chaining on."""
-    mass, _start_analysis, scheduled_tasks = _make_mass_for_get_buffer()
-    streamdetails = _make_stream_details(
-        MediaType.TRACK, duration=180, allow_seek=True, queue_id="queue_a"
-    )
-
-    buffer = await AudioBuffer.get_buffer(mass, streamdetails, reason="test")
-    await asyncio.sleep(0.1)
-
-    mass.player_queues.prepare_next_audio_buffer.assert_not_called()
+    assert buffer.eof
+    assert not buffer.has_error
     await asyncio.gather(*scheduled_tasks)
     await buffer.clear()
 
@@ -564,6 +572,55 @@ async def test_get_buffer_still_starts_analysis_for_track() -> None:
     await asyncio.gather(*scheduled_tasks)
     start_analysis.assert_awaited_once()
     await buffer.clear()
+
+
+@pytest.mark.parametrize(
+    ("reason", "seek_position_ms", "slots", "expected"),
+    [
+        ("prepare", 264_000, 1, REALTIME_COLD_START_BANK),
+        ("prepare", 0, 1, 1),
+        ("prepare_next", 264_000, 1, 1),
+        ("streaming", 264_000, 1, 1),
+        ("prepare", 264_000, 3, 1),
+    ],
+)
+async def test_realtime_session_start_banks_a_lead_for_a_short_first_item(
+    reason: str, seek_position_ms: int, slots: int, expected: int
+) -> None:
+    """
+    Only a session start on a single-slot realtime item with little left to play banks a lead.
+
+    A full first track builds its own lead before the first boundary, a boundary preload
+    never banks because the source's slot is still held by the playing item, and a source
+    with spare slots prewarms its next item so its boundary has no gap to bridge.
+    """
+    mass, _start_analysis, scheduled_tasks = _make_mass_for_get_buffer()
+    provider = MagicMock(spec=MusicProvider)
+    provider.max_concurrent_streams = slots
+    mass.get_provider = MagicMock(return_value=provider)
+    streamdetails = _make_stream_details(MediaType.TRACK, duration=289, allow_seek=True)
+    streamdetails.is_realtime = True
+
+    buffer = await AudioBuffer.get_buffer(mass, streamdetails, seek_position_ms, reason=reason)
+    try:
+        assert buffer._ready_threshold == expected
+        assert buffer._ready_at_chunk == seek_position_ms // 1000 + expected
+    finally:
+        await asyncio.gather(*scheduled_tasks)
+        await buffer.clear()
+
+
+async def test_cold_start_bank_is_realtime_only() -> None:
+    """A source that fills the buffer faster than playback needs no bank at all."""
+    mass, _start_analysis, scheduled_tasks = _make_mass_for_get_buffer()
+    streamdetails = _make_stream_details(MediaType.TRACK, duration=289, allow_seek=True)
+
+    buffer = await AudioBuffer.get_buffer(mass, streamdetails, 264_000, reason="prepare")
+    try:
+        assert buffer._ready_threshold == 2
+    finally:
+        await asyncio.gather(*scheduled_tasks)
+        await buffer.clear()
 
 
 @pytest.mark.asyncio

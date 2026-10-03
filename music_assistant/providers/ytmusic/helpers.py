@@ -58,10 +58,10 @@ async def get_album(
             ytm = ytmusicapi.YTMusic(auth=headers, language=language, user=user)
             album = ytm.get_library_upload_album(browseId=prov_album_id)
         else:
-            ytm = ytmusicapi.YTMusic(language=language)
+            ytm = ytmusicapi.YTMusic(auth=headers, language=language, user=user)
             album = ytm.get_album(browseId=prov_album_id)
 
-        if "audioPlaylistId" in album:
+        if album.get("audioPlaylistId"):
             # Track id's from album tracks do not match with actual album tracks. E.g. a track
             # points to the videoId of the original version, while we want the album version
             try:
@@ -328,10 +328,8 @@ async def get_song_radio_tracks(
 
 async def search(
     query: str,
-    headers: dict[str, str],
     ytm_filter: YTMSearchFilter | None = None,
     limit: int = 20,
-    user: str | None = None,
 ) -> list[dict[str, Any]]:
     """Async wrapper around the ytmusicapi search function."""
 
@@ -342,7 +340,8 @@ async def search(
         # provider expects anyway, as it compares result fields such as the album type
         # against English literals. Revisit once ytmusicapi compares against the
         # translated title.
-        ytm = ytmusicapi.YTMusic(auth=headers, language="en", user=user)
+        # Unauthenticated on purpose: an account search lands in the user's YouTube search history.
+        ytm = ytmusicapi.YTMusic(language="en")
         results = ytm.search(query=query, filter=ytm_filter, limit=limit)
         # Sync result properties with uniformal objects
         for result in results:

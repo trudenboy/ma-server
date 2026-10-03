@@ -99,6 +99,9 @@ async def librespot_credentials_via_pairing(
             "--name",
             device_name,
         ]
+        if zeroconf_interface:
+            # otherwise librespot advertises on every interface, Docker bridges included
+            args += ["--zeroconf-interface", zeroconf_interface]
         # stdout carries decoded audio once the user hits play; discard it so the pairing
         # daemon never blocks on a pipe nobody reads
         async with AsyncProcess(

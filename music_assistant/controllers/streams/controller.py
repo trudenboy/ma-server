@@ -861,7 +861,7 @@ class StreamsController(CoreController):
         if not (player := self.mass.players.get_player(player_id)):
             raise web.HTTPNotFound(reason=f"Unknown Player: {player_id}")
         start_queue_item_id = request.match_info["queue_item_id"]
-        start_queue_item = self.mass.player_queues.get_item(queue_id, start_queue_item_id)
+        start_queue_item = self._get_flow_start_item(queue, start_queue_item_id)
         if not start_queue_item:
             raise web.HTTPNotFound(reason=f"Unknown Queue item: {start_queue_item_id}")
 
@@ -944,6 +944,7 @@ class StreamsController(CoreController):
             pcm_format=flow_pcm_format,
             session_id=session_id,
             protocol_player=player,
+            consumer_connected=lambda: request.transport is not None,
         )
         if overlay_active(queue):
             flow_stream = self.audio.get_overlay_mixed_stream(queue, flow_stream, flow_pcm_format)
@@ -1026,7 +1027,16 @@ class StreamsController(CoreController):
         if queue_data is None or queue_data.session_id != session_id:
             raise web.HTTPNotFound(reason=f"Unknown (or invalid) session: {session_id}")
         command = request.match_info["command"]
-        if command == "next":
+        if queue_data.last_served_item_id is None:
+            # the session rotates when a new item starts loading, so a command fetched before
+            # any of its audio went out follows the superseded stream and would skip a track
+            self.logger.debug(
+                "Ignoring %s command for queue %s: session %s has not streamed yet",
+                command,
+                queue_id,
+                session_id,
+            )
+        elif command == "next":
             self.mass.create_task(self.mass.player_queues.next(queue_id))
         return web.FileResponse(SILENCE_FILE, headers={"icy-name": "Music Assistant"})
 
@@ -1291,9 +1301,7 @@ class StreamsController(CoreController):
             if flow_mode:
                 # flow stream request
                 assert queue
-                start_queue_item = self.mass.player_queues.get_item(
-                    media.source_id, media.queue_item_id
-                )
+                start_queue_item = self._get_flow_start_item(queue, media.queue_item_id)
                 assert start_queue_item
                 flow_stream = self.audio.get_queue_flow_stream(
                     queue=queue,
@@ -1613,6 +1621,20 @@ class StreamsController(CoreController):
         if announce_player is None:
             return "default"
         return announce_player.get_output_config_value(CONF_HTTP_PROFILE, "default")
+
+    def _get_flow_start_item(self, queue: PlayerQueue, queue_item_id: str) -> QueueItem | None:
+        """
+        Return the item a flow stream of the queue's current session starts at.
+
+        :param queue: The queue to stream.
+        :param queue_item_id: The item the session started at.
+        """
+        queue_data = self.mass.player_queues.queue_data(queue.queue_id)
+        if queue_data.flow_mode_stream_log and queue.current_item:
+            # a stream of this session already played, so this is a player that reconnects
+            # or restarts its stream: it continues at the item that plays now
+            queue_item_id = queue.current_item.queue_item_id
+        return self.mass.player_queues.get_item(queue.queue_id, queue_item_id)
 
     async def _finish_flow_stream(
         self, resp: web.StreamResponse, queue_id: str, session_id: str

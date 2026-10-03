@@ -378,7 +378,7 @@ class QueueLoaderMixin(_PlayerQueuesBase):
         # pre-initialize the AudioBuffer so audio is ready
         # when the player requests it. For the current/first track this ensures
         # immediate playback start. For preloaded next tracks we skip this and
-        # initialize the buffer ~30s before the current track ends instead.
+        # initialize the buffer when the stream of the track before it nears its end.
         # AudioSource items are realtime/live and bypass the AudioBuffer.
         if is_start and queue_item.streamdetails.media_type != MediaType.AUDIO_SOURCE:
             await self.mass.streams.audio.get_audio_buffer(
@@ -437,6 +437,22 @@ class QueueLoaderMixin(_PlayerQueuesBase):
         if uri := getattr(queue_item.media_item, "uri", None):
             # store it so listings and later playbacks have it up front
             self.mass.create_task(store_probed_duration(self.mass, uri, duration))
+
+    async def _get_resume_position(self, queue_item: QueueItem) -> int:
+        """Return the position (in seconds) to resume an audiobook/episode from, 0 to start over."""
+        if not (resume_position_ms := getattr(queue_item.media_item, "resume_position_ms", 0)):
+            return 0
+        # the client may have fetched the item before its duration was known
+        await self._restore_probed_duration(queue_item)
+        if queue_item.duration or getattr(queue_item.media_item, "duration", 0):
+            return max(0, int((resume_position_ms - 500) / 1000))
+        # seeking needs a duration, which is determined while streaming
+        self.logger.debug(
+            "Can not resume %s at %ss: its duration is not known (yet)",
+            queue_item.name,
+            int(resume_position_ms / 1000),
+        )
+        return 0
 
     async def _restore_probed_duration(self, queue_item: QueueItem) -> None:
         """

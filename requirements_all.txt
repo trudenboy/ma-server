@@ -14,8 +14,8 @@ aiojellyfin==0.14.1
 aiolibdatachannel @ git+https://github.com/music-assistant/aiolibdatachannel@feat/certpem-testdrive
 aiomusiccast==0.15.0
 aiosendspin[server]==9.1.1
-aioslimproto==3.2.2
-aiosonos==0.1.12
+aioslimproto==3.2.3
+aiosonos==0.1.13
 aiosqlite==0.22.1
 aiovban==1.1.0
 alexapy==1.30.0
@@ -65,7 +65,7 @@ plexapi==4.18.2
 podcastparser==0.6.11
 propcache>=0.2.1
 psutil==7.2.2
-py-opensonic==10.3.0
+py-opensonic==10.4.1
 pyacoustid==1.3.1
 pyamplipi==0.4.12
 pyatv==0.18.0
@@ -103,7 +103,7 @@ transformers==5.14.1
 usearch==2.26.0
 uv>=0.8.0
 websocket-client==1.9.0
-wiim==0.1.7
+wiim==0.1.9
 xmltodict==1.0.4
 ya-dialogs-api==2.4.0
 ya-passport-auth[ma]==1.8.0
