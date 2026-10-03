@@ -27,7 +27,6 @@ from music_assistant_models.media_items import (
     UniqueList,
 )
 
-from music_assistant.constants import DEFAULT_AUDIOBOOK_PODCAST_GENRE
 from music_assistant.helpers.util import parse_title_and_version
 
 from .constants import (
@@ -555,7 +554,7 @@ def parse_podcast(provider: YandexMusicProvider, album_obj: YandexAlbum) -> Podc
     if album_obj.genre:
         podcast.metadata.genres = {album_obj.genre}
     else:
-        podcast.metadata.genres = {DEFAULT_AUDIOBOOK_PODCAST_GENRE}
+        podcast.metadata.genres = {"Spoken Word"}
 
     if album_obj.release_date:
         with suppress(ValueError):
@@ -709,7 +708,7 @@ def parse_audiobook(provider: YandexMusicProvider, album_obj: YandexAlbum) -> Au
     if album_obj.genre:
         audiobook.metadata.genres = {album_obj.genre}
     else:
-        audiobook.metadata.genres = {DEFAULT_AUDIOBOOK_PODCAST_GENRE}
+        audiobook.metadata.genres = {"Spoken Word"}
 
     if album_obj.release_date:
         with suppress(ValueError):
