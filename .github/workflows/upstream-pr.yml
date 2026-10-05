@@ -129,12 +129,13 @@ jobs:
 
           if [ -d "provider-repo/tests" ]; then
             mkdir -p "tests/providers/${DOMAIN}"
-            # --exclude=test_docs.py: provider-private docs test (checks the
-            # provider repo's own CLAUDE/docs files) — keep in lockstep with
-            # the identical exclude in reusable-sync-to-fork.yml; leaking it
-            # upstream fails their pytest on missing repo-local files
-            # (observed on yandex_ynison PR #4827).
-            rsync -av --delete --exclude='test_docs.py' provider-repo/tests/ "tests/providers/${DOMAIN}/"
+            # Standalone-only tests never go upstream: test_docs.py checks the
+            # provider repo's own CLAUDE/docs files (leaking it failed upstream
+            # pytest on yandex_ynison PR #4827), and tests/standalone/ holds
+            # project-metadata/setup-script tests (reviewer objection on
+            # music-assistant/server#5605). Keep in lockstep with
+            # reusable-sync-to-fork.yml (tests/test_test_export_excludes.py).
+            rsync -av --delete --exclude='test_docs.py' --exclude='standalone/' provider-repo/tests/ "tests/providers/${DOMAIN}/"
 
             NEW_PKG="music_assistant.providers.${DOMAIN}"
             # Rewrite every shape of `provider`-as-import the provider repos
