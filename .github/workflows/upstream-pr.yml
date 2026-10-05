@@ -71,23 +71,24 @@ jobs:
           GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           case "${{ inputs.domain }}" in
-            yandex_music) PROVIDER_REPO="trudenboy/ma-provider-yandex-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music" ;;
-            kion_music) PROVIDER_REPO="trudenboy/ma-provider-kion-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="KION Music" ;;
-            zvuk_music) PROVIDER_REPO="trudenboy/ma-provider-zvuk-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Zvuk Music" ;;
-            msx_bridge) PROVIDER_REPO="trudenboy/ma-provider-msx-bridge"; PROVIDER_PATH="provider/"; DISPLAY_NAME="MSX Bridge" ;;
-            web_kiosk) PROVIDER_REPO="trudenboy/ma-provider-web-kiosk"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Web Kiosk" ;;
-            yandex_station) PROVIDER_REPO="trudenboy/ma-provider-yandex-station"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Station" ;;
-            yandex_smarthome) PROVIDER_REPO="trudenboy/ma-provider-yandex-smarthome"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Smart Home" ;;
-            yandex_alice) PROVIDER_REPO="trudenboy/ma-provider-yandex-alice"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Alice" ;;
-            yandex_ynison) PROVIDER_REPO="trudenboy/ma-provider-yandex-ynison"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music Connect (Ynison)" ;;
-            dlna_receiver) PROVIDER_REPO="trudenboy/ma-provider-dlna-receiver"; PROVIDER_PATH="provider/"; DISPLAY_NAME="DLNA Receiver" ;;
-            fastmcp_server) PROVIDER_REPO="trudenboy/ma-provider-mcp"; PROVIDER_PATH="provider/"; DISPLAY_NAME="FastMCP Server" ;;
-            filesystem_yandex_disk) PROVIDER_REPO="trudenboy/ma-provider-yandex-disk"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Disk" ;;
+            yandex_music) PROVIDER_REPO="trudenboy/ma-provider-yandex-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music"; UPSTREAM_SHIP_VERSION="true" ;;
+            kion_music) PROVIDER_REPO="trudenboy/ma-provider-kion-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="KION Music"; UPSTREAM_SHIP_VERSION="true" ;;
+            zvuk_music) PROVIDER_REPO="trudenboy/ma-provider-zvuk-music"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Zvuk Music"; UPSTREAM_SHIP_VERSION="true" ;;
+            msx_bridge) PROVIDER_REPO="trudenboy/ma-provider-msx-bridge"; PROVIDER_PATH="provider/"; DISPLAY_NAME="MSX Bridge"; UPSTREAM_SHIP_VERSION="true" ;;
+            web_kiosk) PROVIDER_REPO="trudenboy/ma-provider-web-kiosk"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Web Kiosk"; UPSTREAM_SHIP_VERSION="true" ;;
+            yandex_station) PROVIDER_REPO="trudenboy/ma-provider-yandex-station"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Station"; UPSTREAM_SHIP_VERSION="true" ;;
+            yandex_smarthome) PROVIDER_REPO="trudenboy/ma-provider-yandex-smarthome"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Smart Home"; UPSTREAM_SHIP_VERSION="true" ;;
+            yandex_alice) PROVIDER_REPO="trudenboy/ma-provider-yandex-alice"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Alice"; UPSTREAM_SHIP_VERSION="true" ;;
+            yandex_ynison) PROVIDER_REPO="trudenboy/ma-provider-yandex-ynison"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Music Connect (Ynison)"; UPSTREAM_SHIP_VERSION="true" ;;
+            dlna_receiver) PROVIDER_REPO="trudenboy/ma-provider-dlna-receiver"; PROVIDER_PATH="provider/"; DISPLAY_NAME="DLNA Receiver"; UPSTREAM_SHIP_VERSION="true" ;;
+            fastmcp_server) PROVIDER_REPO="trudenboy/ma-provider-mcp"; PROVIDER_PATH="provider/"; DISPLAY_NAME="FastMCP Server"; UPSTREAM_SHIP_VERSION="true" ;;
+            filesystem_yandex_disk) PROVIDER_REPO="trudenboy/ma-provider-yandex-disk"; PROVIDER_PATH="provider/"; DISPLAY_NAME="Yandex Disk"; UPSTREAM_SHIP_VERSION="false" ;;
             *) echo "Unknown domain: ${{ inputs.domain }}"; exit 1 ;;
           esac
           echo "PROVIDER_REPO=$PROVIDER_REPO" >> $GITHUB_ENV
           echo "PROVIDER_PATH=$PROVIDER_PATH" >> $GITHUB_ENV
           echo "DISPLAY_NAME=$DISPLAY_NAME" >> $GITHUB_ENV
+          echo "UPSTREAM_SHIP_VERSION=$UPSTREAM_SHIP_VERSION" >> $GITHUB_ENV
 
           gh repo clone "$PROVIDER_REPO" provider-repo -- \
             --depth 1 --branch "v${{ inputs.version }}"
@@ -190,9 +191,11 @@ jobs:
 
           # Copy VERSION file alongside manifest so the badge cron can read it
           # from this branch / from the upstream tree after the PR merges.
-          # Built-in MA providers don't ship one; if an upstream reviewer
-          # objects, add --exclude=VERSION to the rsync above (escape hatch).
-          if [ -f provider-repo/VERSION ]; then
+          # Built-in MA providers don't ship one; a provider whose upstream
+          # reviewers object sets `upstream_exclude_version: true` in
+          # providers.yml. The rsync --delete above already dropped any copy
+          # an earlier submission shipped.
+          if [ "${UPSTREAM_SHIP_VERSION:-true}" = "true" ] && [ -f provider-repo/VERSION ]; then
             cp provider-repo/VERSION "music_assistant/providers/${DOMAIN}/VERSION"
           fi
 
