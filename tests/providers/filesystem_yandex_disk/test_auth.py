@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import aiohttp
@@ -211,6 +212,33 @@ async def test_auth_refresh_caches_access_token_and_persists_rotation() -> None:
     assert await helper.async_get_access_token() == "access-token"
     assert persisted == ["rotated"]
     assert len(session.posts) == 1
+
+
+class _SlowResponse(_FakeResponse):
+    """Response whose body arrives after a scheduler round-trip."""
+
+    async def json(self, *, content_type: None = None) -> object:
+        await asyncio.sleep(0)
+        return await super().json(content_type=content_type)
+
+
+@pytest.mark.asyncio
+async def test_auth_concurrent_callers_share_one_refresh() -> None:
+    """Callers racing on an expired token trigger a single refresh-token exchange."""
+    session = _FakeSession(
+        _SlowResponse(200, _token_payload(refresh_token="rotated")),
+        _SlowResponse(200, _token_payload(refresh_token="rotated-again")),
+    )
+    persisted: list[str] = []
+    helper = MAYandexDiskAuth(
+        _mass(session), "client-id", "secret", "initial-refresh", persisted.append
+    )
+
+    tokens = await asyncio.gather(*(helper.async_get_access_token() for _ in range(3)))
+
+    assert tokens == ["access-token"] * 3
+    assert len(session.posts) == 1
+    assert persisted == ["rotated"]
 
 
 @pytest.mark.asyncio

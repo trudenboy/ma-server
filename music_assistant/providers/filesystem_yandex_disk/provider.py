@@ -21,6 +21,18 @@ from music_assistant.providers.filesystem_cloud.base import (
     CloudFileSystemProvider,
     read_setup_value,
 )
+from music_assistant.providers.filesystem_local.constants import (
+    CONF_CONTENT_TYPE,
+    CONF_ENTRY_CONTENT_TYPE,
+    CONF_ENTRY_IGNORE_ALBUM_PLAYLISTS,
+    CONF_ENTRY_LIBRARY_SYNC_AUDIOBOOKS,
+    CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS,
+    CONF_ENTRY_LIBRARY_SYNC_PODCASTS,
+    CONF_ENTRY_LIBRARY_SYNC_TRACKS,
+    CONF_ENTRY_MISSING_ALBUM_ARTIST,
+    CONF_ENTRY_PROPAGATE_GENRES,
+    content_type_config_entry,
+)
 
 from .api_client import YandexDiskApi
 from .auth import MAYandexDiskAuth
@@ -28,7 +40,7 @@ from .constants import DISK_ROOT
 
 if TYPE_CHECKING:
     import aiohttp
-    from music_assistant_models.config_entries import ProviderConfig
+    from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant import MusicAssistant
@@ -72,6 +84,28 @@ class YandexDiskFileSystemProvider(CloudFileSystemProvider):
             ),
         )
         self.api = YandexDiskApi(mass, auth)
+
+    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
+        """
+        Return the options entries for this provider instance.
+
+        Credentials, the content type and the root folder are collected by the setup
+        flow; only the sync options are configurable here.
+        """
+        # surfaced read-only so the sync options' depends_on chains still resolve
+        content_type = str(
+            self.get_setup_value(CONF_CONTENT_TYPE, CONF_ENTRY_CONTENT_TYPE.default_value)
+        )
+        return (
+            content_type_config_entry(content_type),
+            CONF_ENTRY_MISSING_ALBUM_ARTIST,
+            CONF_ENTRY_IGNORE_ALBUM_PLAYLISTS,
+            CONF_ENTRY_LIBRARY_SYNC_TRACKS,
+            CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS,
+            CONF_ENTRY_LIBRARY_SYNC_PODCASTS,
+            CONF_ENTRY_LIBRARY_SYNC_AUDIOBOOKS,
+            CONF_ENTRY_PROPAGATE_GENRES,
+        )
 
     async def handle_async_init(self) -> None:
         """Validate credentials and the configured root, then register routes."""

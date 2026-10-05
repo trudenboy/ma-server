@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import string
 import time
@@ -241,14 +242,25 @@ class MAYandexDiskAuth:
         self._persist_refresh_token = persist_refresh_token
         self._access_token: str | None = None
         self._expires_at = 0.0
+        self._refresh_lock = asyncio.Lock()
 
     async def async_get_access_token(self) -> str:
         """Return a currently valid access token."""
         if not self._refresh_token:
             raise LoginFailed("Yandex Disk is not authorized")
+        if token := self._fresh_token():
+            return token
+        async with self._refresh_lock:
+            # a caller that waited on the lock reuses the token the holder fetched
+            if token := self._fresh_token():
+                return token
+            return await self._refresh()
+
+    def _fresh_token(self) -> str | None:
+        """Return the cached access token if it stays valid for at least a minute."""
         if self._access_token and time.time() < self._expires_at - 60:
             return self._access_token
-        return await self._refresh()
+        return None
 
     async def _refresh(self) -> str:
         """Refresh and cache the access token."""

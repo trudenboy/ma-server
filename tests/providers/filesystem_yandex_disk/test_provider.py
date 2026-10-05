@@ -7,10 +7,9 @@ from typing import Any, cast
 from unittest import mock
 
 import pytest
-from music_assistant_models.enums import ConfigEntryType
 
+import music_assistant.providers.filesystem_yandex_disk as provider_package
 from music_assistant.providers.filesystem_cloud.base import CloudFileSystemProvider
-from music_assistant.providers.filesystem_yandex_disk import get_config_entries
 from music_assistant.providers.filesystem_yandex_disk.constants import DISK_ROOT
 from music_assistant.providers.filesystem_yandex_disk.provider import YandexDiskFileSystemProvider
 
@@ -160,14 +159,20 @@ def test_rotated_refresh_token_updates_setup_data_immediately() -> None:
 
 @pytest.mark.asyncio
 async def test_config_entries_only_expose_runtime_sync_options() -> None:
-    """Credentials and root stay in setup_data; config contains only runtime options."""
-    mass = mock.Mock()
-    mass.get_provider.return_value = None
+    """The instance options page shows sync options; credentials stay in setup_data."""
+    provider, _auth_cls, config = _construct_provider()
+    config.setup_data["content_type"] = "audiobooks"
 
-    entries = await get_config_entries(mass)
+    entries = await provider.get_config_entries()
     keys = {entry.key for entry in entries}
 
     assert {"client_id", "client_secret", "refresh_token", "folder_id"}.isdisjoint(keys)
     assert {"library_sync_tracks", "library_sync_playlists"} <= keys
     content_type = next(entry for entry in entries if entry.key == "content_type")
-    assert content_type.type is ConfigEntryType.LABEL
+    assert content_type.read_only is True
+    assert content_type.default_value == "audiobooks"
+
+
+def test_package_has_no_module_level_config_entries() -> None:
+    """Options come from the provider instance; a module-level function is never called."""
+    assert not hasattr(provider_package, "get_config_entries")
