@@ -14,7 +14,7 @@ if not (PROJECT_ROOT / "pyproject.toml").is_file():
 
 EXPECTED_RUNTIME_REQUIREMENTS = {
     "segno==1.6.6",
-    "ya-passport-auth[ma]==2.0.1",
+    "ya-passport-auth[ma]==2.1.0",
 }
 
 
