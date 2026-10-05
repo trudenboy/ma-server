@@ -23,9 +23,11 @@ class _FakeApi:
     def __init__(self) -> None:
         self.listed: str | None = None
 
-    async def list_children(self, folder: str) -> list[tuple[str, str, bool, str, int | None]]:
+    async def list_children(
+        self, folder: str
+    ) -> list[tuple[str, str, bool, str, int | None, str | None]]:
         self.listed = folder
-        return [("disk:/M/a.flac", "a.flac", False, "h", 1)]
+        return [("disk:/M/a.flac", "a.flac", False, "h", 1, "2026-10-05T18:00:00Z")]
 
     async def download_bytes(self, path: str) -> bytes:
         return b"data-" + path.encode()
@@ -49,7 +51,7 @@ async def test_api_list_children_delegates() -> None:
     prov, fake = _provider_with_fake_api()
     out = await prov._api_list_children("disk:/M")
     assert fake.listed == "disk:/M"
-    assert out == [("disk:/M/a.flac", "a.flac", False, "h", 1)]
+    assert out == [("disk:/M/a.flac", "a.flac", False, "h", 1, "2026-10-05T18:00:00Z")]
 
 
 @pytest.mark.asyncio

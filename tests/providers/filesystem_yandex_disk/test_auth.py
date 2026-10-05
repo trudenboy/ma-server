@@ -224,6 +224,27 @@ async def test_auth_refresh_invalid_grant_is_login_failed() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["invalid_client", "unauthorized_client"])
+async def test_auth_refresh_rejected_application_is_login_failed(error: str) -> None:
+    """Rejected application credentials require reconfiguration, not retries."""
+    session = _FakeSession(_FakeResponse(400, {"error": error}))
+    helper = MAYandexDiskAuth(_mass(session), "client-id", "secret", "refresh")
+
+    with pytest.raises(LoginFailed):
+        await helper.async_get_access_token()
+
+
+@pytest.mark.asyncio
+async def test_auth_refresh_non_string_error_is_provider_unavailable() -> None:
+    """A malformed error field is a provider error, never a TypeError."""
+    session = _FakeSession(_FakeResponse(400, {"error": []}))
+    helper = MAYandexDiskAuth(_mass(session), "client-id", "secret", "refresh")
+
+    with pytest.raises(ProviderUnavailableError):
+        await helper.async_get_access_token()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "response",
     [

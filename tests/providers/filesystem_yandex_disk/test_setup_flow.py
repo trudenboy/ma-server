@@ -13,7 +13,12 @@ from music_assistant_models.config_entries import ProviderConfig
 from music_assistant_models.enums import FlowStepType, ProviderStage, ProviderType
 from music_assistant_models.provider import ProviderManifest
 
-from music_assistant.models.setup_flow import AbortFlow, SetupFlowContext, SetupSession
+from music_assistant.models.setup_flow import (
+    AbortFlow,
+    SetupFlowContext,
+    SetupSession,
+    StepExpiredError,
+)
 from music_assistant.providers.filesystem_cloud.base import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -36,14 +41,14 @@ from music_assistant.providers.filesystem_yandex_disk.provider import YandexDisk
 provider_module = sys.modules[YandexDiskFileSystemProvider.__module__]
 
 
-def _grant(code: str = "CODE-1234") -> DeviceCodeGrant:
-    """Return a device grant suitable for setup tests."""
+def _grant(code: str = "CODE-1234", interval: int = 0) -> DeviceCodeGrant:
+    """Return a device grant suitable for setup tests (no poll delay by default)."""
     return DeviceCodeGrant(
         device_code=f"device-{code}",
         user_code=code,
         verification_url="https://yandex.ru/activate",
         expires_in=300,
-        interval=5,
+        interval=interval,
     )
 
 
@@ -253,6 +258,55 @@ async def test_expired_device_code_is_replaced() -> None:
     assert request.await_count == 2
 
 
+async def test_device_code_renewal_stops_after_overall_deadline() -> None:
+    """An abandoned login stops renewing device codes once the overall budget is spent."""
+
+    async def finish(_session: SetupSession, _values: dict[str, Any]) -> dict[str, str]:
+        raise AssertionError("finish must not be called")
+
+    session, _mass = _make_session(finish)
+    request = mock.AsyncMock(return_value=_grant())
+    poll = mock.AsyncMock(side_effect=DeviceCodeExpired("expired"))
+    with (
+        mock.patch.object(setup_flow, "request_device_code", request),
+        mock.patch.object(setup_flow, "poll_device_token", poll),
+        mock.patch.object(setup_flow, "AUTHORIZATION_TIMEOUT", 0.0),
+        pytest.raises(StepExpiredError),
+    ):
+        await setup_flow._authorize(session, "client-id", "client-secret")
+
+    request.assert_not_awaited()
+
+
+async def test_overall_deadline_interrupts_pending_device_login() -> None:
+    """A still-valid device code cannot keep the login open past the overall budget."""
+
+    async def finish(_session: SetupSession, _values: dict[str, Any]) -> dict[str, str]:
+        raise AssertionError("finish must not be called")
+
+    session, _mass = _make_session(finish)
+    request = mock.AsyncMock(return_value=_grant())
+    poll = mock.AsyncMock(return_value=DevicePollState.PENDING)
+    started = time.monotonic()
+    started_wall = time.time()
+    with (
+        mock.patch.object(setup_flow, "request_device_code", request),
+        mock.patch.object(setup_flow, "poll_device_token", poll),
+        mock.patch.object(setup_flow, "AUTHORIZATION_TIMEOUT", 0.2),
+        pytest.raises(StepExpiredError),
+    ):
+        # a regression would wait out the 300 s device code; fail fast instead
+        async with asyncio.timeout(5):
+            await setup_flow._authorize(session, "client-id", "client-secret")
+
+    assert time.monotonic() - started < 2
+    assert request.await_count == 1
+    assert session.current_step is not None
+    # the published countdown is capped by the budget, not the 300 s device code
+    assert session.current_step.expires_at is not None
+    assert session.current_step.expires_at <= started_wall + 1
+
+
 async def test_poll_slow_down_increases_interval() -> None:
     """Yandex slow_down increases subsequent polling intervals by five seconds."""
     session = mock.Mock()
@@ -274,11 +328,11 @@ async def test_poll_slow_down_increases_interval() -> None:
         mock.patch.object(asyncio, "sleep", record_sleep),
     ):
         tokens = await setup_flow._poll_until_confirmed(
-            session, _grant(), "client-id", "client-secret"
+            session, _grant(interval=5), "client-id", "client-secret"
         )
 
     assert tokens.refresh_token == "refresh"
-    assert sleeps == [10, 10]
+    assert sleeps == [5, 10, 10]
 
 
 async def test_denied_device_login_aborts_flow() -> None:
@@ -325,7 +379,8 @@ async def test_oauth_error_returns_to_form_with_base_error(
         await _wait_for(lambda: mass.signal_event.call_count >= 2)
         assert session.current_step is not None
         assert session.current_step.type == FlowStepType.FORM
-        assert session.current_step.errors == {"base": translation_key}
+        assert set(session.current_step.errors) == {"base"}
+        assert session.current_step.error_translations["base"].key == translation_key
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

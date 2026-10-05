@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from music_assistant import MusicAssistant
 
 _DEVICE_ID_ALPHABET = string.ascii_letters + string.digits
+# app credentials Yandex will never accept again; retrying cannot recover
+_REJECTED_CLIENT_ERRORS = frozenset({"invalid_client", "unauthorized_client"})
 
 
 class OAuthProtocolError(Exception):
@@ -197,9 +199,14 @@ async def refresh_oauth_tokens(
     except OAuthTransportError as err:
         raise ProviderUnavailableError("Yandex OAuth is temporarily unavailable") from err
 
-    if payload.get("error") == "invalid_grant":
+    error = payload.get("error")
+    if error is not None and not isinstance(error, str):
+        raise ProviderUnavailableError("Yandex OAuth returned an invalid response")
+    if error == "invalid_grant":
         raise LoginFailed("Yandex Disk authorization was revoked or expired")
-    if isinstance(payload.get("error"), str):
+    if error in _REJECTED_CLIENT_ERRORS:
+        raise LoginFailed(f"Yandex rejected the OAuth application credentials ({error})")
+    if error is not None:
         raise ProviderUnavailableError("Yandex OAuth returned a temporary error")
     try:
         return _parse_tokens(payload)

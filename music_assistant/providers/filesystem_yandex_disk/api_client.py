@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 
 # fields requested per resource to keep listings slim
 _FIELDS = ("name", "path", "type", "size", "md5", "modified")
+# streams last as long as playback, so only connect and idle-read are bounded
+_STREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=60)
 
 
 class _SharedAIOHTTPSession(AIOHTTPSession):
@@ -66,9 +68,11 @@ def _to_raw_item(resource: object) -> RawItem:
         the disk path.
     """
     is_dir = getattr(resource, "type", None) == "dir"
-    checksum = "" if is_dir else str(getattr(resource, "md5", None) or "unknown")
-    size = None if is_dir else getattr(resource, "size", None)
     metadata_token = str(getattr(resource, "modified", None) or "") or None
+    # the scanner detects changed audio by checksum alone, so a file without md5
+    # must fall back to its modification time rather than a constant sentinel
+    checksum = "" if is_dir else str(getattr(resource, "md5", None) or metadata_token or "")
+    size = None if is_dir else getattr(resource, "size", None)
     return (
         str(getattr(resource, "path", "")),
         str(getattr(resource, "name", "")),
@@ -162,7 +166,7 @@ class YandexDiskApi:
         link = await self._download_link(file_path)
         try:
             # pre-signed downloader href: no Authorization header needed
-            return await self.mass.http_session.get(link, headers=headers)
+            return await self.mass.http_session.get(link, headers=headers, timeout=_STREAM_TIMEOUT)
         except aiohttp.ClientError as err:
             raise ProviderUnavailableError(f"Yandex Disk stream failed: {err}") from err
 
