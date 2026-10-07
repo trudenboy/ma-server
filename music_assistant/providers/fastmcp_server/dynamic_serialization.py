@@ -17,7 +17,7 @@ from uuid import UUID
 
 from fastmcp.exceptions import ToolError
 
-type JSONValue = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
+type JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 
 COMMAND_ENVELOPE_SCHEMA: dict[str, Any] = {
     "type": "object",
