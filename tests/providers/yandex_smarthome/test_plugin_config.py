@@ -70,7 +70,7 @@ async def test_init_reads_credentials_from_setup_and_options_from_config() -> No
         CONF_DIRECT_CLIENT_SECRET: "client-secret",
     }
     with mock.patch.object(
-        plugin, "_get_setup_value", side_effect=lambda key: setup_values.get(key)
+        plugin, "get_setup_value", side_effect=lambda key, *_: setup_values.get(key)
     ) as get_setup_value:
         await plugin.handle_async_init()
 
@@ -91,7 +91,7 @@ def test_setup_value_keeps_legacy_config_fallback() -> None:
         "get_value",
         side_effect=lambda key, *_: {CONF_CONNECTION_TYPE: CONNECTION_TYPE_DIRECT}.get(key),
     ):
-        assert plugin._get_setup_value(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_DIRECT
+        assert plugin.get_setup_value(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_DIRECT
 
 
 async def test_direct_token_rotation_updates_setup_data_immediately() -> None:
@@ -105,7 +105,7 @@ async def test_direct_token_rotation_updates_setup_data_immediately() -> None:
     plugin._skill_id = ""
     plugin._skill_token = None
     with (
-        mock.patch.object(plugin, "_persist_setup_value") as persist_setup_value,
+        mock.patch.object(plugin, "_update_setup_data") as update_setup_data,
         mock.patch(
             "music_assistant.providers.yandex_smarthome.plugin.DirectConnectionHandler"
         ) as handler_cls,
@@ -113,4 +113,4 @@ async def test_direct_token_rotation_updates_setup_data_immediately() -> None:
         await plugin._start_direct_mode()
         handler_cls.call_args.kwargs["on_token_created"]("new-token")
 
-    persist_setup_value.assert_called_once_with(CONF_DIRECT_ACCESS_TOKEN, "new-token")
+    update_setup_data.assert_called_once_with(CONF_DIRECT_ACCESS_TOKEN, "new-token", immediate=True)
