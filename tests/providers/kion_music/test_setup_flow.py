@@ -41,21 +41,26 @@ async def test_setup_flow_collects_token(session: Mock) -> None:
 
 
 async def test_setup_flow_retries_with_translated_error(session: Mock) -> None:
-    """A failed login re-renders the token form with a translated error key."""
+    """A failed login preserves the complete localized error on the retry form."""
     session.form.side_effect = [
         {CONF_TOKEN: "expired-token"},
         {CONF_TOKEN: "fresh-token"},
     ]
-    session.finish.side_effect = [
-        SetupFlowError("invalid credentials", translation_key="login_failed"),
-        None,
-    ]
+    error = SetupFlowError(
+        "invalid credentials",
+        translation_key="login_failed",
+        translation_args=["KION Music"],
+        translation_owner="kion_music",
+    )
+    session.finish.side_effect = [error, None]
 
     await run_setup(session)
 
     assert session.form.await_count == 2
     retry_call = session.form.await_args_list[1]
-    assert retry_call.kwargs["errors"] == {"base": "login_failed"}
+    assert retry_call.kwargs["errors"]["base"] is error
+    assert error.translation_args == ["KION Music"]
+    assert error.translation_owner == "kion_music"
     assert retry_call.args[0][0].value == "expired-token"
     assert session.finish.await_args_list[-1].args[0] == {CONF_TOKEN: "fresh-token"}
     assert "expired-token" not in str(retry_call.kwargs["errors"])
