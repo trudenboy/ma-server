@@ -29,32 +29,15 @@ from .test_provider_cascade import _make_provider, _updates
 _MOD = "music_assistant.providers.yandex_station.provider"
 
 
-class _YandexMusicOwner:
-    """
-    Linked Yandex Music instance following MA's ``get_setup_value`` contract.
-
-    Setup data wins when the key is present (including an explicit None);
-    otherwise the legacy config value is returned.
-    """
-
-    domain = "yandex_music"
-    type = ProviderType.MUSIC
-
-    def __init__(
-        self,
-        *,
-        setup_data: dict[str, str | None] | None = None,
-        config: dict[str, str | None] | None = None,
-    ) -> None:
-        self.setup_data = setup_data or {}
-        self._config = config or {}
-        self.reads: list[str] = []
-
-    def get_setup_value(self, key: str, default: object = None) -> object:
-        self.reads.append(key)
-        if key in self.setup_data:
-            return self.setup_data[key]
-        return self._config.get(key, default)
+def _ym_owner(token: str | None, x_token: str | None) -> mock.MagicMock:
+    owner = mock.MagicMock()
+    owner.domain = "yandex_music"
+    owner.type = ProviderType.MUSIC
+    owner.config.get_value = lambda key: {"token": token, "x_token": x_token}.get(key)
+    owner.get_setup_value = lambda key, default=None: {"token": token, "x_token": x_token}.get(
+        key, default
+    )
+    return owner
 
 
 def _ym_owner(token: str | None, x_token: str | None) -> _YandexMusicOwner:

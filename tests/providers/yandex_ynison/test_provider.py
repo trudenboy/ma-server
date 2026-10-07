@@ -2033,7 +2033,10 @@ def _make_ym_provider_stub(
     ym.domain = "yandex_music"
     ym.type = ProviderType.MUSIC
     ym.config = ym_config
-    ym.get_setup_value.side_effect = values.get
+    # MA contract: no setup data stored, so the config value is returned.
+    ym.get_setup_value.side_effect = lambda key, default=None: (
+        default if values.get(key) is None else values[key]
+    )
     return ym
 
 
