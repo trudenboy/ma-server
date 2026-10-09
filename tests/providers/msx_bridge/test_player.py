@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from music_assistant_models.enums import PlaybackState, PlayerFeature, PlayerType
+from music_assistant_models.errors import PlayerUnavailableError
 from music_assistant_models.player import PlayerMedia
 from music_assistant_models.player_queue import PlayerQueue
 
@@ -51,12 +52,12 @@ def test_init_custom_params(provider: Any) -> None:
     assert p.output_format == "flac"
 
 
-async def test_http_profile_defaults_to_forced_content_length(player: MSXPlayer) -> None:
-    """Redirected MA streams must expose a finite length for MSX progress."""
+async def test_http_profile_defaults_to_chunked(player: MSXPlayer) -> None:
+    """Redirected streams must receive EOF without an estimated body length."""
     entries = await player.get_config_entries()
 
     http_profile = next(entry for entry in entries if entry.key == CONF_HTTP_PROFILE)
-    assert http_profile.default_value == "forced_content_length"
+    assert http_profile.default_value == "chunked"
 
 
 def test_needs_poll_always_true(player: MSXPlayer) -> None:
@@ -730,3 +731,15 @@ async def test_pause_skips_ws_when_skip_notify(player: MSXPlayer) -> None:
 
     assert player._attr_playback_state == PlaybackState.PAUSED
     mock_notify.assert_not_called()
+
+
+async def test_disabled_player_rejects_direct_media_and_resume(
+    player: MSXPlayer, player_config_mock: Mock
+) -> None:
+    """Native and delayed core commands cannot start a disabled player."""
+    player_config_mock.enabled = False
+    with pytest.raises(PlayerUnavailableError):
+        await player.play_media(PlayerMedia(uri="http://ma/track"))
+    with pytest.raises(PlayerUnavailableError):
+        await player.play()
+    assert player.current_media is None
