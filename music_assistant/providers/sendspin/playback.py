@@ -31,6 +31,10 @@ from music_assistant.providers.sendspin.bridge_role import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from music_assistant_models.streamdetails import StreamDetails
+
     from music_assistant.helpers.dsp import ComplexFilter
 
     from .player import SendspinPlayer
@@ -449,6 +453,7 @@ class SendspinPlaybackSession:
             # role requirements and prepared audio stay on the same channel.
             self._preassigned_channels.setdefault(player_id, uuid4())
         try:
+            await self._follow_session_sample_rate([player_id])
             await self._start_join_catchup(player_id)
         except Exception:
             async with self._state_lock:
@@ -730,9 +735,14 @@ class SendspinPlaybackSession:
         await import_module_in_thread("av")
         push_stream: PushStream | None = None
         try:
+            # let automatic Sendspin formats follow the first item's sample rate, then
             # refresh the session PCM format from the leader's preferred output before
             # building any pipelines; member ffmpeg pipelines and pre-computed filter
             # params depend on this rate so the cache must also be cleared
+            self._start_streamdetails = self._get_start_streamdetails(media)
+            await self._follow_session_sample_rate(
+                [client.client_id for client in self.player.api.group.clients]
+            )
             self._pcm_format, self._sendspin_pcm_format = self._select_session_pcm_formats()
             self._queue_id = media.source_id
             self._queue_session_id = get_media_session_id(media)
@@ -768,7 +778,7 @@ class SendspinPlaybackSession:
         # Shadow deque mirroring pending_chunks for join-catchup backlog peeking.
         pending_backlog: deque[_PendingChunk] = deque()
         pending_duration_us = 0
-        last_elapsed_update_s = 0.0
+        last_elapsed_update_s: float | None = None
 
         async def _produce_pending_chunks() -> None:
             nonlocal pending_duration_us
@@ -893,7 +903,10 @@ class SendspinPlaybackSession:
                 await self._fanout_history_chunk_to_join_processors(committed_history_chunk)
                 if self._timeline_start_us is not None:
                     elapsed_real_s = max(0.0, (commit_now_us - self._timeline_start_us) / 1_000_000)
-                    if elapsed_real_s - last_elapsed_update_s >= 1.0:
+                    if (
+                        last_elapsed_update_s is None
+                        or elapsed_real_s - last_elapsed_update_s >= 1.0
+                    ):
                         last_elapsed_update_s = elapsed_real_s
                         self.player._attr_elapsed_time = elapsed_real_s
                         self.player._attr_elapsed_time_last_updated = time.time()
@@ -1435,6 +1448,7 @@ class SendspinPlaybackSession:
             self._first_commit_monotonic_us = None
             self._produced_audio_us = 0
             self._history.clear()
+            self._start_streamdetails = None
             # Drop cached DSP decisions so next playback reflects latest config.
             self._pipeline_config_cache.clear()
 

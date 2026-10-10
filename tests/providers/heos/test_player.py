@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from music_assistant_models.enums import MediaType
+from music_assistant_models.enums import MediaType, PlaybackState
 from pyheos import PlayState as HeosPlayState
 from pyheos import const as heos_const
 

@@ -3,12 +3,15 @@
 import pathlib
 import shutil
 import subprocess
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import mutagen
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from music_assistant_models.errors import InvalidDataError
 from mutagen.id3 import ID3, UFID
+from PIL import Image
 
 # mutagen 1.47 does not re-export UFID explicitly (fixed in 1.48, which dev pins)
 from mutagen.id3 import ID3, UFID  # type: ignore[attr-defined]
@@ -50,12 +53,17 @@ def test_parse_tags_reports_actionable_ffprobe_error(
     )
     check_output = MagicMock(side_effect=process_error)
     monkeypatch.setattr(subprocess, "check_output", check_output)
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "secret")
+    monkeypatch.setenv("HASSIO_TOKEN", "secret")
 
     with pytest.raises(InvalidDataError) as err:
         tags.parse_tags("broken.ogg")
 
     assert str(err.value) == f"Unable to retrieve info for broken.ogg ({expected_detail})"
-    assert check_output.call_args.kwargs == {"stderr": subprocess.PIPE}
+    kwargs = check_output.call_args.kwargs
+    assert kwargs["stderr"] == subprocess.PIPE
+    assert "SUPERVISOR_TOKEN" not in kwargs["env"]
+    assert "HASSIO_TOKEN" not in kwargs["env"]
     args = check_output.call_args.args[0]
     assert args[args.index("-loglevel") + 1] == "error"
 

@@ -67,6 +67,7 @@ class WebsocketClientHandler:
         self._sendspin_player_id: str | None = None  # Set if client is a sendspin web player
         self._locale: str | None = None  # UI locale declared by the client (auth arg / set_locale)
         self._is_ingress = is_request_from_ingress(request)
+        self._is_ingress_proxy = is_request_from_ingress_proxy(request)
         self._events_unsub_callback: Any = None  # Will be set after authentication
         # Track WebRTC session ID if this is a WebRTC gateway connection
         self._webrtc_session_id: str | None = request.query.get("webrtc_session_id")
@@ -115,7 +116,7 @@ class WebsocketClientHandler:
 
         # For Ingress connections, auto-create/link user and subscribe to events immediately
         # For regular connections, events will be subscribed after successful authentication
-        if self._is_ingress:
+        if self._is_ingress_proxy:
             await self._handle_ingress_auth()
             self._subscribe_to_events()
 
@@ -476,19 +477,27 @@ class WebsocketClientHandler:
                 AuthProviderType.HOME_ASSISTANT, ingress_user_id
             )
 
+            # HA is the source of truth for the user details
+            ha_username, ha_display_name, avatar_url = await get_ha_user_details(
+                self.mass, ingress_user_id
+            )
             if not user:
-                # Check if a user with this username already exists
-                user = await self.webserver.auth.get_user_by_username(ingress_username)
+                # an account not linked yet may only be matched or created under a username
+                # HA confirms, never under the one the headers carry
+                if ha_username is None:
+                    self._logger.warning(
+                        "Refused Home Assistant Ingress sign-in for %s: "
+                        "Home Assistant could not confirm the user",
+                        ingress_username,
+                    )
+                    return
+                user = await self.webserver.auth.get_user_by_username(ha_username)
 
                 if not user:
-                    # New user - fetch details from HA
-                    ha_username, ha_display_name, avatar_url = await get_ha_user_details(
-                        self.mass, ingress_user_id
-                    )
                     # Auto-create user for Ingress (they're already authenticated by HA)
                     role = await get_ha_user_role(self.mass, ingress_user_id)
                     user = await self.webserver.auth.create_user(
-                        username=ha_username or ingress_username,
+                        username=ha_username,
                         role=role,
                         display_name=ha_display_name or ingress_display_name,
                         avatar_url=avatar_url,
@@ -501,7 +510,6 @@ class WebsocketClientHandler:
 
             # Update user with HA details if available (HA is source of truth)
             # Fall back to ingress headers if API lookup doesn't return values
-            _, ha_display_name, avatar_url = await get_ha_user_details(self.mass, ingress_user_id)
             final_display_name = ha_display_name or ingress_display_name
             if final_display_name or avatar_url:
                 user = await self.webserver.auth.update_user(

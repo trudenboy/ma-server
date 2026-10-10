@@ -117,14 +117,41 @@ class ThrottlerManager:
         self.retry_attempts = retry_attempts
         self.initial_backoff = initial_backoff
         self.throttler = Throttler(rate_limit, period)
+        self._cooldown_until: float = 0.0
+
+    @property
+    def cooldown_remaining(self) -> float:
+        """Seconds a server-imposed rate limit still holds every caller back, 0 when clear."""
+        return max(0.0, self._cooldown_until - time.monotonic())
 
     @asynccontextmanager
-    async def acquire(self) -> AsyncGenerator[float]:
-        """Acquire a free slot from the Throttler, returns the throttled time."""
+    async def acquire(self, honored_until: float = 0.0) -> AsyncGenerator[float]:
+        """
+        Acquire a free slot from the Throttler, returns the throttled time.
+
+        :param honored_until: Monotonic deadline the caller already waited out, so a
+            cooldown no later than it does not hold the caller back a second time.
+        :raises RateLimited: When a server-imposed cooldown holds for longer than MAX_WAIT_TIME.
+        """
         if BYPASS_THROTTLER.get():
             yield 0
-        else:
-            yield await self.throttler.acquire()
+            return
+        delay = 0.0
+        honored = honored_until
+        while True:
+            # each deadline is waited out once, however often it is extended meanwhile
+            while (target := self._cooldown_until) > honored:
+                if (remaining := self.cooldown_remaining) > MAX_WAIT_TIME:
+                    msg = f"Rate limited for another {remaining:.0f} seconds"
+                    raise RateLimited(msg, backoff_time=round(remaining))
+                delay += await self._wait_until(target)
+                honored = target
+            delay += await self.throttler.acquire()
+            # a cooldown can be armed while we wait for a free slot, so only leave
+            # the gate once it is still clear with the slot in hand
+            if self._cooldown_until <= honored:
+                break
+        yield delay
 
     @asynccontextmanager
     async def bypass(self) -> AsyncGenerator[None]:
@@ -134,6 +161,32 @@ class ThrottlerManager:
             yield None
         finally:
             BYPASS_THROTTLER.reset(token)
+
+    def set_cooldown(self, seconds: float) -> None:
+        """
+        Hold back every caller of this throttler for the given number of seconds.
+
+        :param seconds: How long the server-imposed rate limit still applies.
+        """
+        self._cooldown_until = max(self._cooldown_until, time.monotonic() + seconds)
+
+    def set_rate_limit(self, rate_limit: int, period: float = 1) -> None:
+        """
+        Change the rate limit of this throttler, an active cooldown stays in place.
+
+        :param rate_limit: Number of requests allowed per period.
+        :param period: Length of the period in seconds.
+        """
+        self.throttler.rate_limit = rate_limit
+        self.throttler.period = period
+
+    async def _wait_until(self, deadline: float) -> float:
+        """Sleep until the given monotonic deadline, return the time waited."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        await asyncio.sleep(remaining)
+        return remaining
 
 
 class _Throttleable(Protocol):
@@ -183,3 +236,18 @@ def throttle_with_retries[ProviderT: _Throttleable, **P, R](
                 raise RetriesExhausted(msg)
 
     return wrapper
+
+
+def _give_up(err: ResourceTemporarilyUnavailable, wait: float) -> RetriesExhausted:
+    """
+    Return the error of a call that does not sit out the wait asked of it.
+
+    :param err: The error that asked for the wait, its localization is carried over.
+    :param wait: The wait that was asked for, in seconds.
+    """
+    return RetriesExhausted(
+        f"Not retrying, asked to wait {wait:.0f} seconds",
+        translation_key=err.translation_key,
+        translation_args=err.translation_args,
+        translation_owner=err.translation_owner,
+    )

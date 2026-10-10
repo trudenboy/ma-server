@@ -15,6 +15,7 @@ from music_assistant_models.errors import (
 )
 from yarl import URL
 
+from music_assistant.helpers.throttle_retry import ThrottlerManager
 from music_assistant.providers.apple_music.api_client import (
     _LIBRARY_PAGE_SIZE,
     _PAGE_TRUNCATION_RETRIES,
