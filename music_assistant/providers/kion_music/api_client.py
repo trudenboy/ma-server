@@ -294,9 +294,7 @@ class KionMusicClient:
             LOGGER.error("Error fetching liked albums: %s", err)
             raise ResourceTemporarilyUnavailable("Failed to fetch liked albums") from err
 
-        if not result:
-            return []
-        album_ids: list[str | int] = [
+        album_ids = [
             str(like.album.id) for like in result if like.album is not None and like.album.id
         ]
         if not album_ids:
@@ -328,8 +326,6 @@ class KionMusicClient:
         """
         try:
             result = await self._call_with_retry(lambda c: c.users_likes_artists())
-            if not result:
-                return []
             return [like.artist for like in result if like.artist is not None]
         except BadRequestError as err:
             LOGGER.error("Error fetching liked artists: %s", err)
@@ -346,8 +342,6 @@ class KionMusicClient:
         """
         try:
             result = await self._call_with_retry(lambda c: c.users_playlists_list())
-            if not result:
-                return []
             return list(result)
         except BadRequestError as err:
             LOGGER.error("Error fetching playlists: %s", err)
@@ -364,8 +358,6 @@ class KionMusicClient:
         """
         try:
             result = await self._call_with_retry(lambda c: c.users_likes_playlists())
-            if not result:
-                return []
             playlists = []
             for like in result:
                 if like.playlist is not None:
@@ -775,7 +767,7 @@ class KionMusicClient:
 
         async def _do_request(c: ClientAsync) -> dict[str, Any] | None:
             url, params = _build_signed_params(c)
-            result = await c._request.get(url, params=params)
+            result = await c.request.get(url, params=params)
             return result if isinstance(result, dict) else None
 
         try:
@@ -974,37 +966,6 @@ class KionMusicClient:
         :return: List of wave category dicts, or None on error.
         """
         return await self._get_landing_waves("waves")
-
-    async def _get_landing_waves(self, block: str) -> list[dict[str, Any]] | None:
-        """
-        Fetch wave categories from a /landing-blocks/<block> endpoint.
-
-        Note: Response keys are auto-converted from camelCase to snake_case
-        by the kion-music library's JSON parser.
-
-        :param block: Block name, e.g. 'waves' or 'mixes-waves'.
-        :return: List of wave category dicts, or None on error.
-        """
-
-        async def _get(c: ClientAsync) -> dict[str, Any]:
-            url = f"{c.base_url}/landing-blocks/{block}"
-            result = await c._request.get(url)
-            return result if isinstance(result, dict) else {}
-
-        try:
-            result = await self._call_with_retry(_get)
-            if result and isinstance(result, dict):
-                waves = result.get("waves", [])
-                LOGGER.debug(
-                    "landing-blocks/%s returned %d categories",
-                    block,
-                    len(waves) if isinstance(waves, list) else -1,
-                )
-                return waves if isinstance(waves, list) else []
-            return None
-        except (BadRequestError, NetworkError, ProviderUnavailableError) as err:
-            LOGGER.debug("Error fetching landing-blocks/%s: %s", block, err)
-            return None
 
     async def get_wave_stations(
         self, language: str | None = None
