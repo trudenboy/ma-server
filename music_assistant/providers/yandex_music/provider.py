@@ -689,7 +689,9 @@ class YandexMusicProvider(MusicProvider):
             name=name,
         )
 
-    async def browse(self, path: str) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
+    async def browse(  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self, path: str
+    ) -> Sequence[MediaItemType | ItemMapping | BrowseFolder]:
         """
         Browse provider items with locale-based folder names and My Wave.
 
