@@ -18,6 +18,7 @@ from music_assistant_models.errors import InvalidDataError, UnsupportedFeaturedE
 from music_assistant_models.player import PlayerMedia
 
 import music_assistant.providers.web_kiosk.party as party_module
+from music_assistant.controllers.webserver.helpers.auth_providers import AuthFailure
 from music_assistant.helpers.api import APICommandHandler
 from music_assistant.providers.web_kiosk.player import WebKioskPlayer
 from music_assistant.providers.web_kiosk.provider import WebKioskProvider
@@ -524,6 +525,22 @@ async def test_builder_signin_uses_ma_credentials_and_rejects_cross_site(
         "/builder-auth", json={"username": "test-user", "password": "wrong-test-password"}
     )
     assert response.status == 401
+
+
+async def test_builder_signin_rejects_failed_ma_login(
+    http_client: TestClient[Any, Any], mass_mock: Mock
+) -> None:
+    """A failed MA sign-in is reported as unauthorized instead of a server error."""
+    mass_mock.webserver.auth.login = AsyncMock(
+        return_value=AuthFailure("Invalid username or password")
+    )
+    mass_mock.webserver.auth.authenticate_with_token = AsyncMock()
+    response = await http_client.post(
+        "/builder-auth", json={"username": "test-user", "password": "wrong-test-password"}
+    )
+    assert response.status == 401
+    assert "wk_builder_auth" not in response.cookies
+    mass_mock.webserver.auth.authenticate_with_token.assert_not_awaited()
 
 
 async def test_ws_rejects_same_site_browser(http_client: TestClient[Any, Any]) -> None:

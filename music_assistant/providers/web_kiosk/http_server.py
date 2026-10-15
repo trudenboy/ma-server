@@ -528,7 +528,11 @@ small {{ color: #9a9aa6; display: block; margin-top: 4px; }}
             result = await self.provider.mass.webserver.auth.login(
                 username=username, password=password, device_name="Web Kiosk URL Builder"
             )
-            token = result.get("access_token") if result.get("success") else None
+            token = (
+                result.get("access_token")
+                if isinstance(result, dict) and result.get("success")
+                else None
+            )
         if not isinstance(token, str) or not token:
             return web.json_response({"error": "MA sign-in failed"}, status=401)
         user = await self.provider.mass.webserver.auth.authenticate_with_token(token)
