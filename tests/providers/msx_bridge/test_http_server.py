@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock, call, patch
@@ -422,14 +423,6 @@ async def test_msx_search_input_marks_page_compressed(
         ("/msx/albums/album-1/tracks.json", "albums", "tracks", True, True),
         ("/msx/artists/artist-1/albums.json", "artists", "albums", True, True),
         ("/msx/playlists/playlist-1/tracks.json", "playlists", "iter_tracks", False, True),
-        ("/msx/playlist/album/album-1.json", "albums", "tracks", True, False),
-        (
-            "/msx/playlist/playlist/playlist-1.json",
-            "playlists",
-            "iter_tracks",
-            False,
-            False,
-        ),
     ],
 )
 async def test_msx_library_pages_fail_soft_for_expected_errors(
@@ -1198,6 +1191,54 @@ async def test_broadcast_play_path_carries_token(
 
         payload = await ws.receive_json(timeout=5)
         assert payload["path"] == f"/stream/msx_test?token={provider.get_stream_token('msx_test')}"
+        await ws.close()
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("state", "elapsed_age", "expected"),
+    [(PlaybackState.PLAYING, 5.0, 125.0), (PlaybackState.PAUSED, 5.0, 120.0)],
+)
+async def test_state_sync_carries_decoder_position(
+    provider: MSXBridgeProvider,
+    mass_mock: Mock,
+    state: PlaybackState,
+    elapsed_age: float,
+    expected: float,
+) -> None:
+    """A new plugin page must learn the running decoder position, not start at zero."""
+    player = _register_msx_player(mass_mock, provider, "msx_test")
+    player._attr_playback_state = state
+    player._attr_current_media = PlayerMedia(uri="library://track/1", duration=300)
+    player._attr_elapsed_time = 120.0
+    player._attr_elapsed_time_last_updated = time.time() - elapsed_age
+    server = MSXHTTPServer(provider, 0)
+    client = AiohttpTestClient(TestServer(server.app))
+    await client.start_server()
+    try:
+        ws = await client.ws_connect("/ws?device_id=test")
+        payload = await ws.receive_json()
+        assert payload["type"] == "state_sync"
+        assert payload["position"] == pytest.approx(expected, abs=1.0)
+        await ws.close()
+    finally:
+        await client.close()
+
+
+async def test_state_sync_position_is_null_without_playback(
+    provider: MSXBridgeProvider, mass_mock: Mock
+) -> None:
+    """An idle player reports no decoder position."""
+    _register_msx_player(mass_mock, provider, "msx_test")
+    server = MSXHTTPServer(provider, 0)
+    client = AiohttpTestClient(TestServer(server.app))
+    await client.start_server()
+    try:
+        ws = await client.ws_connect("/ws?device_id=test")
+        payload = await ws.receive_json()
+        assert payload["type"] == "state_sync"
+        assert payload["position"] is None
         await ws.close()
     finally:
         await client.close()
@@ -2319,70 +2360,22 @@ def test_audio_params_never_advertise_a_content_length(codec: str) -> None:
 # --- MSX playlist endpoints ---
 
 
-async def test_msx_album_playlist_endpoint(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
-    """GET /msx/playlist/album/{id}.json should return playlist JSON."""
-    track = _make_track()
-    mass_mock.music.albums.tracks.return_value = [track]
-
-    server = MSXHTTPServer(provider, 0)
-    client = AiohttpTestClient(TestServer(server.app))
-    await client.start_server()
-    try:
-        resp = await client.get("/msx/playlist/album/42.json?start=0")
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["type"] == "list"
-        assert data["action"] == "player:play"
-        assert len(data["items"]) == 1
-        item = data["items"][0]
-        assert item["action"].startswith("audio:")
-        assert "/msx/audio/" in item["action"]
-        assert "from_playlist=1" in item["action"]
-    finally:
-        await client.close()
-
-
-async def test_msx_playlist_playlist_endpoint(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
-    """GET /msx/playlist/playlist/{id}.json should return playlist JSON."""
-    track = _make_track()
-
-    async def _mock_playlist_tracks(*_args: object, **_kwargs: object) -> AsyncGenerator[Any]:
-        yield track
-
-    mass_mock.music.playlists.iter_tracks = Mock(
-        side_effect=lambda *_a, **_k: _mock_playlist_tracks()
-    )
-
-    server = MSXHTTPServer(provider, 0)
-    client = AiohttpTestClient(TestServer(server.app))
-    await client.start_server()
-    try:
-        resp = await client.get("/msx/playlist/playlist/5.json?start=1")
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["type"] == "list"
-        assert data["action"] == "player:play"
-        assert len(data["items"]) == 1
-    finally:
-        await client.close()
-
-
-async def test_msx_tracks_playlist_endpoint(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
-    """GET /msx/playlist/tracks.json should return playlist JSON."""
-    track = _make_track()
-    mass_mock.music.tracks.library_items.return_value = [track]
-
-    server = MSXHTTPServer(provider, 0)
-    client = AiohttpTestClient(TestServer(server.app))
-    await client.start_server()
-    try:
-        resp = await client.get("/msx/playlist/tracks.json?start=0")
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["type"] == "list"
-        assert len(data["items"]) == 1
-    finally:
-        await client.close()
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/msx/playlist/album/42.json",
+        "/msx/playlist/playlist/5.json",
+        "/msx/playlist/tracks.json",
+        "/msx/playlist/recently-played.json",
+        "/msx/playlist/search.json?q=test",
+    ],
+)
+async def test_retired_library_playlists_are_not_exposed(
+    http_client: TestClient[Any, Any], path: str
+) -> None:
+    """Only the MA queue may supply a native playback playlist."""
+    response = await http_client.get(path)
+    assert response.status == 404
 
 
 # --- Duration in track formatting ---
