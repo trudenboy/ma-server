@@ -422,6 +422,14 @@ async def test_msx_search_input_marks_page_compressed(
         ("/msx/albums/album-1/tracks.json", "albums", "tracks", True, True),
         ("/msx/artists/artist-1/albums.json", "artists", "albums", True, True),
         ("/msx/playlists/playlist-1/tracks.json", "playlists", "iter_tracks", False, True),
+        ("/msx/playlist/album/album-1.json", "albums", "tracks", True, False),
+        (
+            "/msx/playlist/playlist/playlist-1.json",
+            "playlists",
+            "iter_tracks",
+            False,
+            False,
+        ),
     ],
 )
 async def test_msx_library_pages_fail_soft_for_expected_errors(
@@ -2311,22 +2319,70 @@ def test_audio_params_never_advertise_a_content_length(codec: str) -> None:
 # --- MSX playlist endpoints ---
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/msx/playlist/album/42.json",
-        "/msx/playlist/playlist/5.json",
-        "/msx/playlist/tracks.json",
-        "/msx/playlist/recently-played.json",
-        "/msx/playlist/search.json?q=test",
-    ],
-)
-async def test_retired_library_playlists_are_not_exposed(
-    http_client: TestClient[Any, Any], path: str
-) -> None:
-    """Only the MA queue may supply a native playback playlist."""
-    response = await http_client.get(path)
-    assert response.status == 404
+async def test_msx_album_playlist_endpoint(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
+    """GET /msx/playlist/album/{id}.json should return playlist JSON."""
+    track = _make_track()
+    mass_mock.music.albums.tracks.return_value = [track]
+
+    server = MSXHTTPServer(provider, 0)
+    client = AiohttpTestClient(TestServer(server.app))
+    await client.start_server()
+    try:
+        resp = await client.get("/msx/playlist/album/42.json?start=0")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["type"] == "list"
+        assert data["action"] == "player:play"
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert item["action"].startswith("audio:")
+        assert "/msx/audio/" in item["action"]
+        assert "from_playlist=1" in item["action"]
+    finally:
+        await client.close()
+
+
+async def test_msx_playlist_playlist_endpoint(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
+    """GET /msx/playlist/playlist/{id}.json should return playlist JSON."""
+    track = _make_track()
+
+    async def _mock_playlist_tracks(*_args: object, **_kwargs: object) -> AsyncGenerator[Any]:
+        yield track
+
+    mass_mock.music.playlists.iter_tracks = Mock(
+        side_effect=lambda *_a, **_k: _mock_playlist_tracks()
+    )
+
+    server = MSXHTTPServer(provider, 0)
+    client = AiohttpTestClient(TestServer(server.app))
+    await client.start_server()
+    try:
+        resp = await client.get("/msx/playlist/playlist/5.json?start=1")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["type"] == "list"
+        assert data["action"] == "player:play"
+        assert len(data["items"]) == 1
+    finally:
+        await client.close()
+
+
+async def test_msx_tracks_playlist_endpoint(provider: MSXBridgeProvider, mass_mock: Mock) -> None:
+    """GET /msx/playlist/tracks.json should return playlist JSON."""
+    track = _make_track()
+    mass_mock.music.tracks.library_items.return_value = [track]
+
+    server = MSXHTTPServer(provider, 0)
+    client = AiohttpTestClient(TestServer(server.app))
+    await client.start_server()
+    try:
+        resp = await client.get("/msx/playlist/tracks.json?start=0")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["type"] == "list"
+        assert len(data["items"]) == 1
+    finally:
+        await client.close()
 
 
 # --- Duration in track formatting ---

@@ -1090,6 +1090,121 @@ code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; word-break: b
         )
         return web.json_response(dump_msx(content))
 
+    # --- MSX Playlist Endpoints ---
+
+    async def _handle_msx_album_playlist(self, request: web.Request) -> web.Response:
+        """Return album tracks as an MSX playlist JSON."""
+        player_id, device_param, _ = await self._ensure_player_for_request(request)
+        prefix = self._get_prefix(request)
+        item_id = request.match_info["item_id"]
+        provider_name = request.query.get("provider", "library")
+        start = _int_param(request.query, "start", 0)
+        try:
+            tracks = sort_album_tracks(
+                await self.provider.mass.music.albums.tracks(item_id, provider_name, limit=None)
+            )
+        except MusicAssistantError, TimeoutError:
+            logger.exception("Failed to fetch tracks for album playlist %s", item_id)
+            tracks = []
+        playlist = map_tracks_to_msx_playlist(
+            playlist_tracks_from_media_items(tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
+            qr_cover_base=await self._qr_cover_base(prefix),
+        )
+        return web.json_response(dump_msx(playlist))
+
+    async def _handle_msx_playlist_playlist(self, request: web.Request) -> web.Response:
+        """Return playlist tracks as an MSX playlist JSON."""
+        player_id, device_param, _ = await self._ensure_player_for_request(request)
+        prefix = self._get_prefix(request)
+        item_id = request.match_info["item_id"]
+        start = _int_param(request.query, "start", 0)
+        try:
+            tracks = [
+                t async for t in self.provider.mass.music.playlists.iter_tracks(item_id, "library")
+            ]
+        except MusicAssistantError, TimeoutError:
+            logger.exception("Failed to fetch tracks for playlist playlist %s", item_id)
+            tracks = []
+        playlist = map_tracks_to_msx_playlist(
+            playlist_tracks_from_media_items(tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
+            qr_cover_base=await self._qr_cover_base(prefix),
+        )
+        return web.json_response(dump_msx(playlist))
+
+    async def _handle_msx_tracks_playlist(self, request: web.Request) -> web.Response:
+        """Return library tracks as an MSX playlist JSON."""
+        player_id, device_param, _ = await self._ensure_player_for_request(request)
+        prefix = self._get_prefix(request)
+        limit = _int_param(request.query, "limit", 50)
+        offset = _int_param(request.query, "offset", 0)
+        start = _int_param(request.query, "start", 0)
+        tracks = await self.provider.mass.music.tracks.library_items(
+            limit=limit, offset=offset, summary=False
+        )
+        playlist = map_tracks_to_msx_playlist(
+            playlist_tracks_from_media_items(tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
+            qr_cover_base=await self._qr_cover_base(prefix),
+        )
+        return web.json_response(dump_msx(playlist))
+
+    async def _handle_msx_recently_played_playlist(self, request: web.Request) -> web.Response:
+        """Return recently played tracks as an MSX playlist JSON."""
+        player_id, device_param, _ = await self._ensure_player_for_request(request)
+        prefix = self._get_prefix(request)
+        start = _int_param(request.query, "start", 0)
+        tracks = await self.provider.mass.music.tracks.library_items(
+            limit=50,
+            sort_field=SortField.LAST_PLAYED,
+            sort_direction=SortDirection.ASC,
+            summary=False,
+        )
+        playlist = map_tracks_to_msx_playlist(
+            playlist_tracks_from_media_items(tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
+            qr_cover_base=await self._qr_cover_base(prefix),
+        )
+        return web.json_response(dump_msx(playlist))
+
+    async def _handle_msx_search_playlist(self, request: web.Request) -> web.Response:
+        """Return search track results as an MSX playlist JSON."""
+        player_id, device_param, _ = await self._ensure_player_for_request(request)
+        prefix = self._get_prefix(request)
+        query = request.query.get("q", "")
+        start = _int_param(request.query, "start", 0)
+        if not query:
+            return web.json_response(dump_msx(MsxContent(items=[])))
+        limit = _int_param(request.query, "limit", 20)
+        results = await self.provider.mass.music.search(query, limit=limit)
+        playlist = map_tracks_to_msx_playlist(
+            playlist_tracks_from_media_items(results.tracks),
+            start,
+            prefix,
+            player_id,
+            self.provider,
+            device_param,
+            qr_cover_base=await self._qr_cover_base(prefix),
+        )
+        return web.json_response(dump_msx(playlist))
+
     # --- MSX Queue Playlist ---
 
     async def _handle_queue_playlist(self, request: web.Request) -> web.Response:
