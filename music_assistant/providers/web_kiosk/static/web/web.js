@@ -163,6 +163,8 @@
             if (progress && typeof progress.positionMs === 'number') return progress.positionMs / 1000;
             if (waveAnchorAt) return waveAnchor + (playing ? (performance.now() - waveAnchorAt) / 1000 : 0);
         }
+        // A stopped page keeps the audio element's last position; it plays nothing.
+        if (!hasTrack) return 0;
         var t = (current.start || 0) + (audio.currentTime || 0) * (current.speed || 1);
         // A flow stream plays on into the next song before its metadata arrives.
         return current.duration ? Math.min(t, current.duration) : t;
