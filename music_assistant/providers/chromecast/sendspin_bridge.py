@@ -556,11 +556,14 @@ class SendspinChromecastBridge:
             # (including a stale Sendspin session) and starts a fresh instance,
             # so an explicit quit_app() beforehand is unnecessary.
             event = asyncio.Event()
+            launched = False
 
             def launched_callback(
-                success: bool,  # noqa: ARG001
+                success: bool,
                 response: dict[str, Any] | None,  # noqa: ARG001
             ) -> None:
+                nonlocal launched
+                launched = success
                 self.mass.loop.call_soon_threadsafe(event.set)
 
             def launch() -> None:
@@ -575,6 +578,26 @@ class SendspinChromecastBridge:
 
             await self.mass.loop.run_in_executor(None, launch)
             await asyncio.wait_for(event.wait(), timeout=30.0)
+            if not launched:
+                # e.g. CAST_INIT_TIMEOUT from a receiver whose Cast firmware is too old to
+                # run the app: there is no app to send the config to, nor one that will
+                # ever report ready, so fail the waiting command now
+                failure = self.cast_player.cc.socket_client.receiver_controller.launch_failure
+                reason = getattr(failure, "reason", None) or "no reason given"
+                self.logger.warning(
+                    "Cast device %s refused to start the Sendspin Cast App: %s",
+                    self.cast_player.display_name,
+                    reason,
+                )
+                # Bubbles up to the frontend toast via play_media / set_members awaiting
+                # this future.
+                self._resolve_cast_app_ready(
+                    PlayerCommandFailed(
+                        f"Sendspin could not start on {self.cast_player.display_name}: "
+                        f"the Cast receiver refused the launch ({reason})."
+                    )
+                )
+                return
             # Send config with retry — the Cast app's message listener
             # may not be ready immediately after the launch callback fires.
             await self._send_sendspin_config_with_retry()
@@ -727,11 +750,6 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
         await super().evaluate_bridge(player)
         if not client_id or not self._has_bridge(player.player_id):
             return
-        claimed_id = self._claimed_clients.get(player.player_id)
-        if claimed_id is not None and claimed_id != client_id:
-            # A client claimed under the other MAC variant belongs to the device's AirPlay
-            # bridge, not to its Cast output, so its warning and opt-out are not ours.
-            return
         if self.mass.config.get_raw_player_config_value(client_id, CONF_PROTOCOL_EXPERIMENTAL_NOTE):
             # the note is written last, so its presence means this output is settled
             return
@@ -824,7 +842,7 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
         if cast_player.cast_info.is_audio_group and not cast_player.cast_info.is_multichannel_group:
             return False
 
-        if not get_bridge_client_id(cast_player):
+        if not (bridge_client_id := get_bridge_client_id(cast_player)):
             return False
 
         if self.mass.config.get_raw_player_config_value(
@@ -858,8 +876,9 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
             parent_player = self.mass.players.get_player(cast_player.protocol_parent_id)
             if parent_player and parent_player.get_output_protocol_by_domain("airplay"):
                 return False
-
-        return True
+        # Same deny before the AirPlay link exists: another bridge (AirPlay) already
+        # registered a client for this device.
+        return not self._has_foreign_bridge_client(cast_player.player_id, bridge_client_id)
 
     async def _try_claim_existing(self, player: Player) -> bool:
         """
@@ -877,26 +896,23 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
         sendspin_provider = self.sendspin_provider
         if bridge_client_id is None or sendspin_server is None or sendspin_provider is None:
             return False
-        existing_client_id = self._find_existing_sendspin_client(
-            sendspin_server, bridge_client_id, cast_player
-        )
-        if not existing_client_id:
+        if not sendspin_server.get_client(bridge_client_id):
             return False
 
         self.logger.info(
             "Sendspin client %s already registered — claiming existing player for %s",
-            existing_client_id,
+            bridge_client_id,
             cast_player.display_name,
         )
         manufacturer = cast_player.device_info.manufacturer or ""
         model = cast_player.device_info.model or ""
-        bridge_hello = _build_bridge_hello(cast_player, existing_client_id)
+        bridge_hello = _build_bridge_hello(cast_player, bridge_client_id)
         identifiers = {IdentifierType.CAST_UUID: str(cast_player.cast_info.uuid)}
         sendspin_provider.register_bridge_static_delay_default(
-            existing_client_id, get_cast_model_static_delay(manufacturer, model)
+            bridge_client_id, get_cast_model_static_delay(manufacturer, model)
         )
         if not await sendspin_provider.apply_bridge_claim(
-            existing_client_id,
+            bridge_client_id,
             identifiers,
             bridge_hello,
             underlying_player_id=cast_player.player_id,
@@ -905,9 +921,9 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
             # (`_handle_client_added` waits up to 5 s for hello).
             # Pre-register identifiers so `_create_player` attaches
             # CAST_UUID when it runs.
-            sendspin_provider.register_bridge_identifiers(existing_client_id, identifiers)
+            sendspin_provider.register_bridge_identifiers(bridge_client_id, identifiers)
             sendspin_provider.register_bridge_underlying_player(
-                existing_client_id, cast_player.player_id
+                bridge_client_id, cast_player.player_id
             )
             await self.remove_bridge(player_id)
 

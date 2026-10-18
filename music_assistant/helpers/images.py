@@ -53,6 +53,8 @@ LOGGER = logging.getLogger(__name__)
 _THUMB_CACHE_DIR = "thumbnails"
 _THUMB_MEMORY_CACHE_MAX = 50
 _ALLOWED_THUMB_FORMATS: frozenset[str] = frozenset({"PNG", "JPEG"})
+# what detect_image_content_format() reports for a source already in each output format
+_CONTENT_FORMAT: dict[str, str] = {"PNG": "png", "JPEG": "jpg"}
 
 _thumb_memory_cache: OrderedDict[str, bytes] = OrderedDict()
 
@@ -705,7 +707,8 @@ async def _generate_and_cache_thumb(
     if is_svg_data(img_data):
         # Pillow can't decode SVG; pass it through unchanged.
         thumb_data = img_data
-    elif not size and image_format.encode() in img_data:
+    elif not size and detect_image_content_format(img_data) == _CONTENT_FORMAT[image_format]:
+        # original size in the source's own format: skip the decode/re-encode round trip
         thumb_data = img_data
     else:
 

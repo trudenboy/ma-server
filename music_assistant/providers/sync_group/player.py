@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 
@@ -234,10 +235,14 @@ class SyncGroupPlayer(Player):
 
     @property
     def group_members(self) -> list[str]:
-        """Return the list of parent player id's that are part of this sync group."""
-        if (sync_leader := self.sync_leader) and sync_leader.state.group_members:
-            # use state.group_members here so protocol specific id's get correctly translated
-            return sync_leader.state.group_members
+        """Return the live or configured members of this sync group."""
+        if sync_leader := self.sync_leader:
+            # Use state.group_members here so protocol-specific ids get correctly
+            # translated. An active leader with no live children is still the sole
+            # member; configured members must not be presented as live in that state.
+            return sync_leader.state.group_members or [sync_leader.player_id]
+        # While dormant, retain the configured list so saved groups remain visible
+        # and can be formed again on the next playback start.
         return self._attr_group_members
 
     async def get_config_entries(self) -> list[ConfigEntry]:
@@ -294,6 +299,19 @@ class SyncGroupPlayer(Player):
             ),
         ]
         return entries
+
+    @asynccontextmanager
+    async def prepare_play_media(self) -> AsyncIterator[None]:
+        """Keep fake-power formation's takeover transaction scoped to playback."""
+        self._preparing_play_media = True
+        try:
+            yield
+        finally:
+            self._preparing_play_media = False
+            if self._pending_content_takeover is not None:
+                owner, token = self._pending_content_takeover
+                self._pending_content_takeover = None
+                await owner.on_group_content_takeover_aborted(token)
 
     async def power(self, powered: bool) -> None:
         """Handle POWER command to group player."""
@@ -359,26 +377,47 @@ class SyncGroupPlayer(Player):
 
     async def play_media(self, media: PlayerMedia) -> None:
         """Handle PLAY MEDIA on given player."""
+        previous_media = self._attr_current_media
+        new_content = previous_media is None or (
+            previous_media.uri,
+            previous_media.source_id,
+            previous_media.queue_item_id,
+        ) != (media.uri, media.source_id, media.queue_item_id)
         self._attr_current_media = media
         self._attr_active_source = media.source_id or None
         # The controller has already powered us on, but the group may not be
         # formed (e.g. after _dissolve_and_reform left us powered with no leader).
         # _form_syncgroup is idempotent so calling it here is cheap when already formed.
-        await self._form_syncgroup()
-        if sync_leader := self.sync_leader:
-            # Use internal handler to target the sync leader directly,
-            # bypassing group/sync redirect that would loop back to this player.
-            # Hold the group's playback lock until the leader confirms playback
-            # (see play()) so a concurrent (un)group command can't race the start.
-            async with (
-                self.mass.players.get_player_lock(
-                    sync_leader.player_id, PlayerLockPurpose.PLAYBACK
-                ),
-                self._await_leader_playback(),
-            ):
-                await self.mass.players._handle_play_media(sync_leader.player_id, media)
-        else:
-            raise RuntimeError("An empty group cannot play media, consider adding members first")
+        takeover = self._pending_content_takeover
+        self._pending_content_takeover = None
+        playback_started = False
+        try:
+            if takeover is None:
+                takeover = await self._form_syncgroup(new_content=new_content)
+            if sync_leader := self.sync_leader:
+                # Use internal handler to target the sync leader directly,
+                # bypassing group/sync redirect that would loop back to this player.
+                # Hold the group's playback lock until the leader confirms playback
+                # (see play()) so a concurrent (un)group command can't race the start.
+                async with (
+                    self.mass.players.get_player_lock(
+                        sync_leader.player_id, PlayerLockPurpose.PLAYBACK
+                    ),
+                    self._await_leader_playback(),
+                ):
+                    await self.mass.players._handle_play_media(sync_leader.player_id, media)
+                playback_started = True
+            else:
+                raise RuntimeError(
+                    "An empty group cannot play media, consider adding members first"
+                )
+        finally:
+            if takeover is not None:
+                takeover_owner, takeover_token = takeover
+                if playback_started:
+                    await takeover_owner.on_group_content_takeover_finished(takeover_token)
+                else:
+                    await takeover_owner.on_group_content_takeover_aborted(takeover_token)
 
     async def enqueue_next_media(self, media: PlayerMedia) -> None:
         """Handle enqueuing of a next media item on the player."""
@@ -582,6 +621,8 @@ class SyncGroupPlayer(Player):
         """Handle callback when a group member of the group player is updated."""
         self._update_attributes()
         super().on_group_member_updated(member_player, changed_values)
+        if not self.is_dynamic and self.sync_leader is not None:
+            self._schedule_rejoin_missing_members()
 
     async def _form_syncgroup(self) -> None:
         """Form syncgroup by syncing all (possible) members."""
@@ -607,7 +648,7 @@ class SyncGroupPlayer(Player):
         leader = self.sync_leader
         if not leader:
             # we have no members in the group, so we can't form a syncgroup
-            return
+            return None
 
         # ensure the sync leader is first in the list
         self._attr_group_members = [
@@ -637,15 +678,16 @@ class SyncGroupPlayer(Player):
                 if self.sync_leader is not leader:
                     # the group was dissolved or re-led while we waited —
                     # this form attempt is stale, abort
-                    return
+                    return None
             # use _handle_set_members directly to avoid the redirect loop
             # (cmd_set_members redirects sync-leader targets back to this syncgroup)
             async with self.mass.players.get_player_lock(
                 leader.player_id, PlayerLockPurpose.PLAYBACK
             ):
-                await self.mass.players._handle_set_members(
-                    leader, player_ids_to_add=members_to_sync
+                return await self.mass.players._handle_set_members(
+                    leader, player_ids_to_add=members_to_sync, new_content=new_content
                 )
+        return None
 
     @asynccontextmanager
     async def _await_leader_playback(self) -> AsyncIterator[None]:

@@ -55,6 +55,7 @@ from .constants import (
 from .control_player import AirPlayControlPlayer
 from .dashboard import AirPlayDashboards
 from .helpers import (
+    CLI_CLOCK_OFFSET_NS,
     convert_airplay_volume,
     get_cli_binary,
     get_model_info,
@@ -848,7 +849,14 @@ class AirPlayProvider(PlayerProvider):
         # Advertise the same grandmaster identity as the per-stream sessions
         # (which derive their PTP clock id from --dacp), so receivers see one
         # consistent clock whether the daemon or an in-process engine serves it.
-        args = [cli_binary, "--ptp-daemon", "--dacp", self.dacp_id]
+        args = [
+            cli_binary,
+            "--ptp-daemon",
+            "--dacp",
+            self.dacp_id,
+            "--clock-offset-ns",
+            str(CLI_CLOCK_OFFSET_NS),
+        ]
         if_arg = await self.mass.streams.get_source_ip()
         if if_arg:
             args += ["--if", if_arg]

@@ -16,7 +16,8 @@ import asyncio
 import builtins
 import time
 from abc import ABC
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast, final, overload
 
@@ -185,8 +186,8 @@ def _reconcile_position_anchor(
     progression extrapolates to (nearly) the same corrected position as the previous
     anchor and therefore keeps the previous anchor, so steady playback yields no
     state change at all. The anchor is only adopted when the corrected position
-    jumped more than POSITION_JUMP_THRESHOLD (seek/buffer correction) or when
-    force_adopt is set.
+    jumped more than POSITION_JUMP_THRESHOLD (seek/buffer correction), when the
+    playing state changed or when force_adopt is set.
 
     :param prev_position: Position of the previous anchor.
     :param prev_timestamp: Timestamp of the previous anchor.
@@ -215,7 +216,7 @@ def _reconcile_position_anchor(
     prev_corrected = prev_position + (now - prev_timestamp) if prev_playing else prev_position
     new_corrected = new_position + (now - new_timestamp) if new_playing else new_position
     jumped = abs(prev_corrected - new_corrected) > POSITION_JUMP_THRESHOLD
-    if force_adopt or jumped:
+    if force_adopt or jumped or prev_playing != new_playing:
         return new_position, new_timestamp, jumped
     return prev_position, prev_timestamp, False
 
@@ -827,6 +828,11 @@ class Player(ABC):
         """
         return self._attr_supported_sample_rates
 
+    @asynccontextmanager
+    async def prepare_play_media(self) -> AsyncIterator[None]:
+        """Scope provider preparation across auto-power and the ensuing playback."""
+        yield
+
     async def power(self, powered: bool) -> None:
         """
         Handle POWER command on the player.
@@ -976,6 +982,18 @@ class Player(ABC):
         :param output_protocol: The OutputProtocol object containing protocol details.
         """
         return  # Optional callback - no-op by default
+
+    async def on_group_content_takeover(self) -> object | None:
+        """Prepare a protocol group before a new content owner joins it."""
+        return None
+
+    async def on_group_content_takeover_finished(self, token: object) -> None:
+        """Finish a protocol-group content takeover transaction."""
+        return
+
+    async def on_group_content_takeover_aborted(self, token: object) -> None:
+        """Abort a protocol-group content takeover without publishing old content."""
+        return
 
     async def enqueue_next_media(self, media: PlayerMedia) -> None:
         """
@@ -2836,7 +2854,8 @@ class Player(ABC):
         )
         if not mirrors_parent:
             # steady playback resolves to the previous anchor, so nothing changed;
-            # a jump (or a previous anchor that was still incomplete) adopts the new one
+            # a jump, a playing-state change (or a previous anchor that was still
+            # incomplete) adopts the new one
             new_media.elapsed_time = int(position) if position is not None else None
             new_media.elapsed_time_last_updated = timestamp
         return jumped
@@ -3108,8 +3127,10 @@ class Player(ABC):
                     uri=str(media_item.uri),
                     media_type=media_item.media_type,
                     title=f"{media_item.name} ({version})" if version else media_item.name,
-                    artist=getattr(media_item, "artist_str", None),
-                    album=album.name if album else podcast.name if podcast else description,
+                    # a podcast episode has no artists, the podcast name takes the artist line
+                    artist=getattr(media_item, "artist_str", None)
+                    or (podcast.name if podcast else None),
+                    album=album.name if album else None if podcast else description,
                     album_artist=getattr(album, "artist_str", None),
                     image_url=image_url,
                     palette=self._resolved_palette(image_url),
@@ -3255,15 +3276,29 @@ class Player(ABC):
                     repeat_mode=session.repeat_mode,
                 )
             )
-        # standing entries for the audio sources plugins bound to this player, so they
-        # are selectable from the source menu without a session being active first;
+        # standing entries for the audio sources plugins bound to this player or report
+        # as inputs of its own device, so they are selectable from the source menu
+        # without a session being active first;
         # an already listed uri is skipped: the live session entry above carries the
         # live shuffle/repeat state and must win
         present_ids = {x.id for x in sources}
+        # a device's own inputs may be reported on one of its linked protocol players
+        device_player_ids = [
+            self.player_id,
+            *(linked.output_protocol_id for linked in self.linked_output_protocols),
+        ]
         for prov in self.mass.get_providers_supporting_feature(ProviderFeature.AUDIO_SOURCE):
             if not isinstance(prov, PluginProvider):
                 continue
-            for source in prov.get_player_audio_sources(self.player_id) or ():
+            standing_sources = [
+                *(prov.get_player_audio_sources(self.player_id) or ()),
+                *(
+                    source
+                    for device_player_id in device_player_ids
+                    for source in prov.get_player_input_sources(device_player_id)
+                ),
+            ]
+            for source in standing_sources:
                 if not (uri := source.uri) or uri in present_ids:
                     continue
                 present_ids.add(uri)

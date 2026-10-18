@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta
 from sqlite3 import IntegrityError
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from music_assistant_models.auth import AuthProviderType, UserRole
@@ -874,6 +874,182 @@ async def test_get_login_providers_ha_provider_without_url(
 
     assert any(p["provider_id"] == "builtin" for p in providers)
     assert not any(p["provider_id"] == "homeassistant" for p in providers)
+
+
+@pytest.fixture
+def oauth_provider(auth_manager: AuthenticationManager) -> MagicMock:
+    """
+    Register a stub OAuth login provider as "oauth" on the auth manager.
+
+    :param auth_manager: AuthenticationManager instance.
+    """
+    provider = MagicMock(requires_redirect=True)
+    provider.get_authorization_url = AsyncMock(return_value="https://idp.example.com/authorize")
+    auth_manager.login_providers["oauth"] = provider
+    return provider
+
+
+@pytest.mark.parametrize("return_url", ["javascript:alert(1)", "https:///no-host"])
+async def test_get_auth_url_rejects_invalid_return_url(
+    auth_manager: AuthenticationManager, oauth_provider: MagicMock, return_url: str
+) -> None:
+    """Test that an invalid return_url is rejected without asking the provider."""
+    result = await auth_manager.get_auth_url("oauth", return_url)
+
+    assert result == {"authorization_url": None, "error": "Invalid return_url"}
+    oauth_provider.get_authorization_url.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "return_url", ["https://music.example.com/#/home", "musicassistant://auth/callback"]
+)
+async def test_get_auth_url_passes_valid_return_url(
+    auth_manager: AuthenticationManager, oauth_provider: MagicMock, return_url: str
+) -> None:
+    """Test that a valid return_url is passed to the provider and its URL is returned."""
+    result = await auth_manager.get_auth_url("oauth", return_url)
+
+    assert result == {"authorization_url": "https://idp.example.com/authorize"}
+    oauth_provider.get_authorization_url.assert_awaited_once_with(ANY, return_url)
+
+
+@pytest.mark.parametrize(
+    ("external_url", "return_url", "expected_callback_base"),
+    [
+        (None, "https://ma.example.com/#/home", "http://192.168.1.10:8095"),
+        (None, "https://app.music-assistant.io/#/home", "http://192.168.1.10:8095"),
+        ("https://ma.example.com", None, "http://192.168.1.10:8095"),
+        ("https://ma.example.com", "http://192.168.1.10:8095/#/home", "http://192.168.1.10:8095"),
+        ("https://ma.example.com", "https://ma.example.com/#/home", "https://ma.example.com"),
+        ("https://example.com/ma", "https://example.com/ma/#/home", "https://example.com/ma"),
+        (
+            "https://ma.example.com",
+            "https://app.music-assistant.io/#/home",
+            "https://ma.example.com",
+        ),
+        ("https://ma.example.com", "https://other.example.com/#/home", "http://192.168.1.10:8095"),
+    ],
+    ids=[
+        "no_external_url",
+        "remote_app_without_external_url",
+        "no_return_url",
+        "local_return_url",
+        "external_url_return_url",
+        "external_url_with_path",
+        "remote_app",
+        "other_origin",
+    ],
+)
+async def test_get_authorization_url_picks_callback_base(
+    auth_manager: AuthenticationManager,
+    oauth_provider: MagicMock,
+    external_url: str | None,
+    return_url: str | None,
+    expected_callback_base: str,
+) -> None:
+    """
+    Test that the OAuth callback is on the External URL for sign-ins started there or in the app.
+
+    :param external_url: The configured External URL.
+    :param return_url: The URL the sign-in returns to.
+    :param expected_callback_base: The server URL the callback is expected on.
+    """
+    with (
+        patch.object(
+            WebserverController,
+            "base_url",
+            new_callable=PropertyMock,
+            return_value="http://192.168.1.10:8095",
+        ),
+        patch.object(
+            WebserverController,
+            "external_url",
+            new_callable=PropertyMock,
+            return_value=external_url,
+        ),
+    ):
+        await auth_manager.get_authorization_url("oauth", return_url)
+
+    oauth_provider.get_authorization_url.assert_awaited_once_with(
+        f"{expected_callback_base}/auth/callback?provider_id=oauth", return_url
+    )
+
+
+@pytest.mark.parametrize(
+    ("external_url", "path", "headers", "expected_callback_base"),
+    [
+        (
+            "https://ma.example.com",
+            "/ws",
+            {"Host": "192.168.1.10:8095"},
+            "http://192.168.1.10:8095",
+        ),
+        ("https://ma.example.com", "/ws", {"Host": "ma.example.com"}, "https://ma.example.com"),
+        (
+            "https://ma.example.com",
+            "/ws",
+            {"Host": "127.0.0.1:8095", "X-Forwarded-Host": "MA.example.com"},
+            "https://ma.example.com",
+        ),
+        (
+            "https://ma.example.com",
+            "/ws?webrtc_session_id=abc",
+            {"Host": "127.0.0.1:8095"},
+            "https://ma.example.com",
+        ),
+        (None, "/ws?webrtc_session_id=abc", {"Host": "127.0.0.1:8095"}, "http://192.168.1.10:8095"),
+    ],
+    ids=[
+        "local",
+        "external_url",
+        "external_url_forwarded_host",
+        "remote_access",
+        "remote_access_without_external_url",
+    ],
+)
+async def test_get_authorization_url_picks_callback_base_for_app(
+    auth_manager: AuthenticationManager,
+    oauth_provider: MagicMock,
+    external_url: str | None,
+    path: str,
+    headers: dict[str, str],
+    expected_callback_base: str,
+) -> None:
+    """
+    Test that an app sign-in gets its callback on the External URL when it connected through it.
+
+    :param external_url: The configured External URL.
+    :param path: The websocket request path the app connected on.
+    :param headers: The websocket request headers.
+    :param expected_callback_base: The server URL the callback is expected on.
+    """
+    return_url = "musicassistant://auth/callback"
+    request = make_mocked_request("GET", path, headers=headers, app=web.Application())
+    client = WebsocketClientHandler(auth_manager.webserver, request)
+    auth_manager.webserver.register_websocket_client(client)
+    set_current_client_id(client.client_id)
+    try:
+        with (
+            patch.object(
+                WebserverController,
+                "base_url",
+                new_callable=PropertyMock,
+                return_value="http://192.168.1.10:8095",
+            ),
+            patch.object(
+                WebserverController,
+                "external_url",
+                new_callable=PropertyMock,
+                return_value=external_url,
+            ),
+        ):
+            await auth_manager.get_authorization_url("oauth", return_url)
+    finally:
+        set_current_client_id(None)
+
+    oauth_provider.get_authorization_url.assert_awaited_once_with(
+        f"{expected_callback_base}/auth/callback?provider_id=oauth", return_url
+    )
 
 
 async def test_create_user_with_api(auth_manager: AuthenticationManager) -> None:

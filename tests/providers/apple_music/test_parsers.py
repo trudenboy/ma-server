@@ -429,6 +429,7 @@ async def test_library_tracks_request_includes_album_relations() -> None:
         include="catalog,albums,artists",
         extend="dateAdded",
         page_size=_TRACK_PAGE_SIZE,
+        **{"include[songs]": "artists,albums"},
     )
 
 
@@ -449,21 +450,7 @@ async def test_library_tracks_falls_back_to_library_item_when_catalog_missing() 
                     "playParams": {"catalogId": "999999"},
                     "durationInMillis": 180000,
                 },
-                "relationships": {
-                    "catalog": {
-                        "data": [
-                            {
-                                "id": "999999",
-                                "attributes": {
-                                    "name": "Missing Catalog Track",
-                                    "artistName": "Artist 2",
-                                    "durationInMillis": 180000,
-                                    "playParams": {"id": "999999"},
-                                },
-                            }
-                        ]
-                    }
-                },
+                "relationships": {"catalog": {"data": []}},
             }
         ]
     )
@@ -814,21 +801,6 @@ async def test_get_album_tracks_uses_library_endpoint_for_library_id() -> None:
                     }
                 ]
             },
-            # Second call: get_album (called internally)
-            {
-                "data": [
-                    {
-                        "id": "l.PnamISl",
-                        "type": "library-albums",
-                        "attributes": {
-                            "name": "Uploaded Album",
-                            "artistName": "Uploaded Artist",
-                            "playParams": {"id": "l.PnamISl", "isLibrary": True},
-                        },
-                        "relationships": {},
-                    }
-                ]
-            },
         ]
     )
     provider.api_client.get_ratings = AsyncMock(return_value={})
@@ -836,10 +808,13 @@ async def test_get_album_tracks_uses_library_endpoint_for_library_id() -> None:
     manager = AppleMusicMediaManager(provider)
     tracks = await manager.get_album_tracks("l.PnamISl")
 
+    provider.api_client.get_data.assert_awaited_once()
     first_call_args = provider.api_client.get_data.call_args_list[0]
     assert first_call_args[0][0] == "me/library/albums/l.PnamISl/tracks"
     assert len(tracks) == 1
     assert tracks[0].name == "Track 1"
+    # no album name standing in as its id: the caller attaches the album it asked for
+    assert tracks[0].album is None
 
 
 @pytest.mark.asyncio

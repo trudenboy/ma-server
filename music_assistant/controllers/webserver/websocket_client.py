@@ -8,6 +8,7 @@ import inspect
 import logging
 from concurrent import futures
 from contextlib import suppress
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
@@ -33,7 +34,12 @@ from music_assistant_models.media_items.metadata import IMAGE_PROXY_ID_RESOLVER
 from music_assistant_models.translations import TRANSLATION_RESOLVER
 
 from music_assistant.constants import HOMEASSISTANT_SYSTEM_USER, VERBOSE_LOG_LEVEL
-from music_assistant.helpers.api import APICommandHandler, parse_arguments
+from music_assistant.helpers.api import (
+    APICommandHandler,
+    parse_arguments,
+    redact_json_secrets,
+    redact_secrets,
+)
 
 from .helpers.auth_middleware import is_request_from_ingress, set_current_token, set_current_user
 from .helpers.auth_providers import get_ha_user_details, get_ha_user_role
@@ -77,6 +83,16 @@ class WebsocketClientHandler:
             ingress_path = request.headers.get("X-Ingress-Path", "")
             forward_proto = request.headers.get("X-Forwarded-Proto", request.protocol)
             self.base_url = f"{forward_proto}://{forward_host}{ingress_path}"
+
+    @property
+    def webrtc_session_id(self) -> str | None:
+        """Return the id of the WebRTC session this client connected through, if any."""
+        return self._webrtc_session_id
+
+    @property
+    def request_host(self) -> str:
+        """Return the host (and any port) the client says it used to reach the server."""
+        return self.request.headers.get("X-Forwarded-Host") or self.request.host
 
     async def disconnect(self) -> None:
         """Disconnect client."""
@@ -132,12 +148,15 @@ class WebsocketClientHandler:
                 if msg.type != WSMsgType.TEXT:
                     continue
 
-                self._logger.log(VERBOSE_LOG_LEVEL, "Received: %s", msg.data)
+                if self._logger.isEnabledFor(VERBOSE_LOG_LEVEL):
+                    self._logger.log(
+                        VERBOSE_LOG_LEVEL, "Received: %s", redact_json_secrets(msg.data)
+                    )
 
                 try:
                     command_msg = CommandMessage.from_json(msg.data)
                 except ValueError:
-                    disconnect_warn = f"Received invalid JSON: {msg.data}"
+                    disconnect_warn = "Received invalid JSON"
                     break
 
                 await self._handle_command(command_msg)
@@ -295,7 +314,9 @@ class WebsocketClientHandler:
             )
         except Exception as err:
             if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.exception("Error handling message: %s", msg)
+                self._logger.exception(
+                    "Error handling message: %s", replace(msg, args=redact_secrets(msg.args))
+                )
             else:
                 self._logger.error("Error handling message: %s: %s", msg.command, str(err))
             err_msg = str(err) or err.__class__.__name__
@@ -315,7 +336,8 @@ class WebsocketClientHandler:
                     message: str = process()
                 else:
                     message = process
-                self._logger.log(VERBOSE_LOG_LEVEL, "Writing: %s", message)
+                if self._logger.isEnabledFor(VERBOSE_LOG_LEVEL):
+                    self._logger.log(VERBOSE_LOG_LEVEL, "Writing: %s", redact_json_secrets(message))
                 await self.wsock.send_str(message)
 
     async def _send_message(self, message: MessageType) -> None:

@@ -24,7 +24,7 @@ from music_assistant.constants import MASS_LOGGER_NAME, VERBOSE_LOG_LEVEL
 from music_assistant.helpers.diagnostics import install_diagnostics_log_handler
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.logging import activate_log_queue_handler
-from music_assistant.helpers.util import cap_native_thread_pools
+from music_assistant.helpers.util import cap_native_thread_pools, set_model_cache_dirs
 from music_assistant.mass import MusicAssistant
 
 FORMAT_DATE: Final = "%Y-%m-%d"

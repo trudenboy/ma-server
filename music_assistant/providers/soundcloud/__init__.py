@@ -59,6 +59,8 @@ SEARCH_DURATION_COMPARISON_TOLERANCE = 1000
 # Such a track does still advertise plain mp3 transcodings, but requesting one of those returns
 # a 404, so the presence of an encrypted protocol is what tells us the track is unplayable.
 DRM_PROTOCOL_MARKER = "encrypted"
+# 30 second previews (policy SNIP) are served from their own CDN, even for a progressive mp3
+PREVIEW_CDN_HOST = "cf-preview-media.sndcdn.com"
 
 
 class DrmProtectedTrackError(MediaNotFoundError):
@@ -518,7 +520,7 @@ class SoundcloudMusicProvider(RecommendationPayloadMixin, MusicProvider):
         # that makes a fresh HTTP request to the stored URL, which may have expired.
         expiration = 30  # conservative default if expiry cannot be determined
         if parsed_qs := parse_qs(urlparse(url).query):
-            for param in ("Expires", "expire"):
+            for param in ("Expires", "expires", "expire"):
                 if expire_ts := parsed_qs.get(param, [None])[0]:
                     expiration = max(30, int(expire_ts) - int(time.time()) - 10)
                     break
@@ -531,7 +533,10 @@ class SoundcloudMusicProvider(RecommendationPayloadMixin, MusicProvider):
                 content_type=ContentType.UNKNOWN,
             ),
             stream_type=StreamType.HLS
-            if url.startswith("https://cf-hls-media.sndcdn.com")
+            if (
+                url.startswith("https://cf-hls-media.sndcdn.com")
+                or urlparse(url).path.endswith(".m3u8")
+            )
             else StreamType.HTTP,
             path=url,
             can_seek=True,

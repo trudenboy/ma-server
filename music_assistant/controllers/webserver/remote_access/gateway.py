@@ -339,7 +339,6 @@ class WebRTCGateway:
             self.logger.debug("WebSocket connection established, id=%s", id(self._signaling_ws))
             self.logger.debug("Sending registration")
             await self._register()
-            self._current_reconnect_delay = self._reconnect_delay
             self.logger.debug("Registration sent, waiting for confirmation...")
 
             # Run message loop and get close code
@@ -377,7 +376,8 @@ class WebRTCGateway:
         """Process messages from the signaling WebSocket."""
         close_code: int | None = None
         self.logger.debug("Entering message loop")
-        async for msg in ws:
+        while True:
+            msg = await ws.receive()
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     await self._handle_signaling_message(json.loads(msg.data))
@@ -394,6 +394,9 @@ class WebRTCGateway:
                     msg.data,
                     msg.extra,
                 )
+                break
+            elif msg.type == aiohttp.WSMsgType.CLOSING:
+                # Our own close() is in progress
                 break
             elif msg.type == aiohttp.WSMsgType.CLOSED:
                 self.logger.warning("Signaling server closed connection")
@@ -426,6 +429,7 @@ class WebRTCGateway:
             pass
         elif msg_type == "registered":
             self._is_connected = True
+            self._current_reconnect_delay = self._reconnect_delay
             self.logger.info("Registered with signaling server")
         elif msg_type == "error":
             error_msg = message.get("error") or message.get("message", "Unknown error")
