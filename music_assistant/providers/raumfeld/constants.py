@@ -9,6 +9,7 @@ from music_assistant.constants import (
     CONF_ENTRY_FLOW_MODE,
     CONF_ENTRY_HTTP_PROFILE_FORCED_1,
     CONF_ENTRY_ICY_METADATA_DEFAULT_FULL,
+    create_sample_rates_config_entry,
 )
 
 # Errors expected when the host is (temporarily) unreachable or a zone/room cannot be
@@ -35,22 +36,28 @@ RENDERER_QUERY_TIMEOUT = 5
 # unreachable, and health-checks the host while connected.
 RECONNECT_INTERVAL = 30
 
+# How often (seconds) the zones the host reports are compared with the groups Music Assistant
+# shows. The comparison reads hassfeld's in-memory model, so it costs no request.
+ZONE_WATCH_INTERVAL = 2
+
+# How long (seconds) after Music Assistant changed a group itself the host's zones are left
+# alone. A group change takes the host several steps (a room leaves one zone, joins the
+# next, a leader hands over), and mirroring one of the states in between would undo it.
+GROUP_SETTLE_TIME = 10
+
 # Player id prefix so ids are namespaced and stable-ish per room.
 PLAYER_ID_PREFIX = "raumfeld"
 
 # Media-server container listing each device's analog Line-In input, and the MA
 # source id used to expose a room's Line-In via PlayerFeature.SELECT_SOURCE.
 LINE_IN_OBJECT_ID = "0/Line In"
-SOURCE_LINE_IN = "line_in"
 
-# Raumfeld renderers are hi-res capable up to 24-bit/192kHz. Declaring the supported
-# (sample_rate, bit_depth) pairs lets MA output each source at its native rate (so 24-bit
-# lossless passes through) without the user having to enable rates by hand.
-SUPPORTED_SAMPLE_RATES = [
-    (sample_rate, bit_depth)
-    for sample_rate in (44100, 48000, 88200, 96000, 176400, 192000)
-    for bit_depth in (16, 24)
-]
+# The station buttons on a speaker, offered as sources; Raumfeld devices have four.
+STATION_BUTTONS = (1, 2, 3, 4)
+# How often (seconds) the station buttons are read again, as they can be reassigned in the
+# Raumfeld app at any time.
+LIBRARY_REFRESH_INTERVAL = 300
+SOURCE_LINE_IN = "line_in"
 
 # Per-player config entries (MA adds the flow sample-rate entry itself).
 PLAYER_CONFIG_ENTRIES = [
@@ -70,4 +77,14 @@ PLAYER_CONFIG_ENTRIES = [
     # the Raumfeld app can follow the queue. It carries the title only: the app's clock and
     # duration do not follow along.
     CONF_ENTRY_ICY_METADATA_DEFAULT_FULL,
+    # Sample rates, a choice per room. Up to 24-bit/96kHz plays on every model seen so far;
+    # 176.4 and 192 kHz play on some (the One S) and drop out on others (a 1st generation
+    # One M, and a Connector and Stereo Cubes in one setup). No renderer tells which
+    # (GetProtocolInfo lists no rates), so the higher rates are there to switch on per room.
+    create_sample_rates_config_entry(
+        max_sample_rate=192000,
+        max_bit_depth=24,
+        safe_max_sample_rate=96000,
+        safe_max_bit_depth=24,
+    ),
 ]
