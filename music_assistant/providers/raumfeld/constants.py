@@ -41,6 +41,14 @@ RENDERER_QUERY_TIMEOUT = 5
 # unreachable, and health-checks the host while connected.
 RECONNECT_INTERVAL = 30
 
+# How long (seconds) the host gets to answer a health check. hassfeld's own check allows
+# 3 s, which a host on a slow Wi-Fi link misses now and then.
+HOST_CHECK_TIMEOUT = 10
+
+# Failed health checks in a row before the host counts as lost. Losing it marks every room
+# unavailable and rebuilds the connection, too much for one slow answer.
+HOST_CHECK_FAILURES = 3
+
 # How often (seconds) the zones the host reports are compared with the groups Music Assistant
 # shows. The comparison reads hassfeld's in-memory model, so it costs no request.
 ZONE_WATCH_INTERVAL = 2
@@ -49,6 +57,13 @@ ZONE_WATCH_INTERVAL = 2
 # alone. A group change takes the host several steps (a room leaves one zone, joins the
 # next, a leader hands over), and mirroring one of the states in between would undo it.
 GROUP_SETTLE_TIME = 10
+
+# How long (seconds) the host gets at most to hook a joining room into the running stream
+# before that stream is restarted for the room, and how often (seconds) the room is asked
+# whether it plays yet. Restarting while the host still hooks the room in drops it, and the
+# host adds it back about ten seconds later, out of step (measured with a Connector room).
+JOIN_SETTLE_TIME = 5
+JOIN_SETTLE_INTERVAL = 0.5
 
 # Player id prefix so ids are namespaced and stable-ish per room.
 PLAYER_ID_PREFIX = "raumfeld"
