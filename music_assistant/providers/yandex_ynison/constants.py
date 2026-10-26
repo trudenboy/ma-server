@@ -47,9 +47,10 @@ DEFAULT_APP_VERSION: Final[str] = "1.0.0"
 DEVICE_TYPE_WEB: Final[str] = "WEB"
 YNISON_DEVICE_SERVER_DISCONNECT: Final[str] = "server-paused-on-active-device-disconnecting"
 
-# Reconnect settings — indexed by attempt number; attempts past the tuple
-# saturate at the last entry (so reconnect continues forever at 60 s intervals).
-RECONNECT_DELAYS: Final[tuple[float, ...]] = (5.0, 10.0, 30.0, 60.0)
+# Reconnect ladder used when the server supplies none (official client default).
+# Attempts past the tuple saturate at the last entry, so reconnect continues
+# forever at 30 s intervals.
+RECONNECT_DELAYS: Final[tuple[float, ...]] = (1.0, 5.0, 30.0)
 
 # WebSocket timeouts
 WS_CONNECT_TIMEOUT: Final[float] = 15.0

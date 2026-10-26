@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import suppress
 from copy import deepcopy
 from functools import partial
@@ -372,6 +373,48 @@ class TestProviderInit:
             pytest.raises(RuntimeError, match="controlled stop"),
         ):
             await provider._ynison.connect()
+
+    async def test_stored_go_away_window_reaches_the_client(self) -> None:
+        """A go-away window stored by an earlier run holds the new client's first dial."""
+        provider = _make_provider()
+        until = time.time() + 1800
+        provider.mass.cache.get = AsyncMock(return_value=until)  # type: ignore[method-assign]
+        _stub_attr(provider, "_resolve_token", AsyncMock(return_value=SecretStr("t")))
+
+        await provider.handle_async_init()
+
+        assert provider._ynison is not None
+        assert provider._ynison._go_away_until == until
+
+    async def test_expired_stored_window_is_ignored(self) -> None:
+        """A window that already ended does not delay the first dial."""
+        provider = _make_provider()
+        provider.mass.cache.get = AsyncMock(return_value=time.time() - 10)  # type: ignore[method-assign]
+        _stub_attr(provider, "_resolve_token", AsyncMock(return_value=SecretStr("t")))
+
+        await provider.handle_async_init()
+
+        assert provider._ynison is not None
+        assert provider._ynison._go_away_until == 0.0
+
+    async def test_go_away_window_is_cached_until_it_ends(self) -> None:
+        """A window end is cached for its remaining duration and removed once over."""
+        provider = _make_provider()
+        provider.mass.cache.set = AsyncMock()  # type: ignore[method-assign]
+        provider.mass.cache.delete = AsyncMock()  # type: ignore[method-assign]
+        until = time.time() + 3600
+
+        await provider._store_go_away_until(until)
+        await provider._store_go_away_until(0.0)
+
+        set_call = provider.mass.cache.set.await_args
+        assert set_call is not None
+        assert set_call.args == ("ynison_go_away_until", until)
+        assert 3595 <= set_call.kwargs["expiration"] <= 3601
+        assert set_call.kwargs["provider"] == provider.instance_id
+        provider.mass.cache.delete.assert_awaited_once_with(
+            "ynison_go_away_until", provider=provider.instance_id
+        )
 
 
 # ------------------------------------------------------------------

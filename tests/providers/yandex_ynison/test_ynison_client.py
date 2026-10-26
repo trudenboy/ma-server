@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from copy import deepcopy
@@ -1706,6 +1707,114 @@ class TestMessageLoop:
 
         on_state_update.assert_not_awaited()
 
+    async def _record_reconnect_delays(self, client: YnisonClient, count: int) -> list[float]:
+        """Run ``count`` failing reconnect attempts and return their scheduled delays."""
+        client._session = MagicMock()
+        client._session.closed = False
+        sleeps: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            if len(sleeps) >= count:
+                client._stop_event.set()
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
+            patch(
+                "music_assistant.providers.yandex_ynison.ynison_client.random.random",
+                return_value=0.5,
+            ),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("down"),
+            ),
+        ):
+            await client._reconnect()
+        client._stop_event.clear()
+        return sleeps
+
+    async def test_go_away_error_breaks_loop_and_waits_exact_window(
+        self,
+        client: YnisonClient,
+        mock_state_callback: AsyncMock,
+    ) -> None:
+        """A server go-away stops the session and holds the next dial for exactly its window."""
+        go_away_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json"))
+        )
+        valid_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({"player_state": {"status": {"paused": True}}}),
+        )
+
+        await self._run_loop_with_messages(client, [go_away_msg, valid_msg])
+        mock_state_callback.assert_not_awaited()
+
+        assert await self._record_reconnect_delays(client, 1) == [3600.0]
+
+    async def test_repeated_go_away_waits_server_window_without_escalation(
+        self, client: YnisonClient
+    ) -> None:
+        """Consecutive go-aways each wait the server window; the client adds no escalation."""
+        go_away = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json"))
+        )
+        for _ in range(3):
+            await self._run_loop_with_messages(client, [go_away])
+            assert await self._record_reconnect_delays(client, 1) == [3600.0]
+
+    async def test_ladder_restarts_after_go_away_window(self, client: YnisonClient) -> None:
+        """Failures after a go-away wait restart the default ladder from its first step."""
+        await self._record_reconnect_delays(client, 3)
+        await self._run_loop_with_messages(
+            client,
+            [_make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json")))],
+        )
+
+        assert await self._record_reconnect_delays(client, 3) == [3600.0, 1.0, 5.0]
+
+    async def test_server_backoff_ladder_replaces_default(self, client: YnisonClient) -> None:
+        """``ynison-backoff-millis`` supplies the ladder, sorted and de-duplicated."""
+        rebalance = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps(
+                {
+                    "error": {
+                        "details": {
+                            "ynison-error-code": "300100001",
+                            "ynison-backoff-millis": "0:100:500:1000:1000:5000",
+                        },
+                        "grpc_code": 10,
+                        "http_code": 409,
+                    }
+                }
+            ),
+        )
+        await self._run_loop_with_messages(client, [rebalance])
+
+        assert await self._record_reconnect_delays(client, 6) == [0.0, 0.1, 0.5, 1.0, 5.0, 5.0]
+
+    async def test_error_code_change_restarts_ladder(self, client: YnisonClient) -> None:
+        """A different server error code resets the ladder iteration."""
+
+        def error(code: str) -> MagicMock:
+            return _make_ws_msg(
+                aiohttp.WSMsgType.TEXT,
+                json.dumps({"error": {"details": {"ynison-error-code": code}}}),
+            )
+
+        await self._run_loop_with_messages(client, [error("300100001")])
+        await self._record_reconnect_delays(client, 2)
+        await self._run_loop_with_messages(client, [error("300100001")])
+        same = await self._record_reconnect_delays(client, 1)
+        await self._run_loop_with_messages(client, [error("300100002")])
+        changed = await self._record_reconnect_delays(client, 1)
+
+        assert same == [30.0]
+        assert changed == [1.0]
+
     async def test_text_message_invalid_json(self, client: YnisonClient) -> None:
         """TEXT message with invalid JSON logs warning, continues."""
         bad_msg = _make_ws_msg(aiohttp.WSMsgType.TEXT, "not valid json{{{")
@@ -1934,6 +2043,74 @@ class TestReconnect:
             await client._reconnect()
 
         assert attempt_count >= stop_after
+
+    async def test_backoff_escalates_across_sessions_lost_before_healthy_state(
+        self, client: YnisonClient
+    ) -> None:
+        """A session that connects but dies before any state does not reset the backoff."""
+        client._session = MagicMock()
+        client._session.closed = False
+        sleeps: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
+            patch(
+                "music_assistant.providers.yandex_ynison.ynison_client.random.random",
+                return_value=0.5,
+            ),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                return_value=("host", "ticket", 1),
+            ),
+            patch.object(client, "_connect_state", new_callable=AsyncMock),
+        ):
+            for _ in range(3):
+                await client._reconnect()
+
+        assert sleeps == [1.0, 5.0, 30.0]
+
+    async def test_healthy_state_resets_backoff(self, client: YnisonClient) -> None:
+        """The first state message of a session restores the shortest reconnect delay."""
+        client._session = MagicMock()
+        client._session.closed = False
+        sleeps: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        with (
+            patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
+            patch(
+                "music_assistant.providers.yandex_ynison.ynison_client.random.random",
+                return_value=0.5,
+            ),
+            patch.object(
+                client,
+                "_get_redirect_ticket",
+                new_callable=AsyncMock,
+                return_value=("host", "ticket", 1),
+            ),
+            patch.object(client, "_connect_state", new_callable=AsyncMock),
+        ):
+            await client._reconnect()
+            await client._reconnect()
+            await TestMessageLoop()._run_loop_with_messages(
+                client,
+                [
+                    _make_ws_msg(
+                        aiohttp.WSMsgType.TEXT,
+                        json.dumps({"player_state": {"status": {"paused": True}}}),
+                    )
+                ],
+            )
+            await client._reconnect()
+
+        assert sleeps == [1.0, 5.0, 1.0]
 
     async def test_stop_event_before_attempt(self, client: YnisonClient) -> None:
         """stop_event set before reconnect → exits immediately."""
@@ -2599,3 +2776,105 @@ class TestScheduleReconnect:
             client._schedule_reconnect()
         assert client._reconnect_task is None
         mock_rc.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# Persistent go-away hold
+# ------------------------------------------------------------------
+
+
+class TestGoAwayHold:
+    """A go-away window survives client restarts through the owner's storage."""
+
+    def _client(self, **kwargs: Any) -> YnisonClient:
+        return YnisonClient(
+            token=SecretStr("test-token"),
+            device_info=YnisonDeviceInfo(device_id="test-device-id", title="T"),
+            on_state_update=AsyncMock(),
+            logger=MagicMock(),
+            **kwargs,
+        )
+
+    async def test_connect_inside_stored_window_does_not_dial(self) -> None:
+        """A restart inside the window waits out the rest of it before the first dial."""
+        client = self._client(go_away_until=time.time() + 1800)
+        client._external_session = AsyncMock(closed=False)
+        sleeps: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            client._stop_event.set()
+
+        with (
+            patch.object(client, "_get_redirect_ticket", new_callable=AsyncMock) as redirect,
+            patch(SLEEP_PATH, new_callable=AsyncMock, side_effect=record_sleep),
+        ):
+            await client.connect()
+            assert client._reconnect_task is not None
+            await client._reconnect_task
+
+        redirect.assert_not_awaited()
+        assert 1795 <= sleeps[0] <= 1800
+
+    async def test_connect_after_stored_window_dials(self) -> None:
+        """An expired window does not delay the first dial."""
+        client = self._client(go_away_until=time.time() - 5)
+        client._external_session = AsyncMock(closed=False)
+
+        with (
+            patch.object(
+                client, "_get_redirect_ticket", new_callable=AsyncMock, return_value=("h", "t", 1)
+            ) as redirect,
+            patch.object(client, "_connect_state", new_callable=AsyncMock),
+        ):
+            await client.connect()
+
+        redirect.assert_awaited_once()
+
+    async def test_go_away_reports_deadline_and_healthy_state_clears_it(self) -> None:
+        """The owner learns the window's end and later that it is over."""
+        reported: list[float] = []
+        client = self._client(on_go_away=reported.append)
+
+        await TestMessageLoop()._run_loop_with_messages(
+            client,
+            [_make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json")))],
+        )
+        assert len(reported) == 1
+        assert abs(reported[0] - (time.time() + 3600)) < 5
+
+        healthy = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps({"player_state": {"status": {"paused": True}}})
+        )
+        await TestMessageLoop()._run_loop_with_messages(client, [healthy, healthy])
+        assert reported[1:] == [0.0]
+
+    async def test_go_away_log_explains_impact_and_next_attempt(self) -> None:
+        """The warning names the error, the wait, the user impact, and the next attempt time."""
+        client = self._client()
+
+        await TestMessageLoop()._run_loop_with_messages(
+            client,
+            [_make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(_fixture("go_away_throttle.json")))],
+        )
+
+        warnings = [call.args for call in client._logger.warning.call_args_list]
+        message, *args = next(w for w in warnings if "asked to wait" in w[0])
+        rendered = message % tuple(args)
+        assert "500140000" in rendered
+        assert "3600 s" in rendered
+        assert "will not appear in the Yandex Music app" in rendered
+        assert time.strftime("%Y-%m-%d", time.localtime(client._go_away_until)) in rendered
+
+    async def test_recovery_after_wait_is_logged(self) -> None:
+        """The first healthy session after a wait says so."""
+        client = self._client(go_away_until=time.time() - 1)
+        healthy = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps({"player_state": {"status": {"paused": True}}})
+        )
+
+        await TestMessageLoop()._run_loop_with_messages(client, [healthy])
+
+        client._logger.info.assert_any_call(
+            "Ynison accepted the connection again after the requested wait"
+        )

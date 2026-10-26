@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import random
 import time
 from collections.abc import AsyncGenerator, Callable
@@ -110,6 +111,9 @@ AUDIO_SOURCE_ID = "main"
 _API_MAX_RETRIES = 3
 _API_INITIAL_BACKOFF = 2.0
 _API_MAX_BACKOFF = 30.0
+
+# Cache key holding the wall-clock end of a Ynison go-away window across restarts.
+_GO_AWAY_CACHE_KEY = "ynison_go_away_until"
 
 # Cache TTL for stream details (seconds)
 _STREAM_DETAILS_CACHE_TTL = 300  # 5 minutes
@@ -361,6 +365,8 @@ class YandexYnisonProvider(PluginProvider):
             logger=self.logger,
             http_session=self.mass.http_session,
             on_auth_failure=self._refresh_ynison_token,
+            go_away_until=await self._load_go_away_until(),
+            on_go_away=self._on_go_away,
         )
 
         self._runner_task = self.mass.create_task(self._ynison.connect())
@@ -1112,6 +1118,31 @@ class YandexYnisonProvider(PluginProvider):
         self._invalidate_cached_token(raw_x_token)
         self.logger.info("Refreshing Yandex Music token for Ynison reconnect")
         return await self._refresh_via_x_token(raw_x_token)
+
+    def _on_go_away(self, until: float) -> None:
+        """
+        Persist the end of a Ynison go-away window so a restart does not dial inside it.
+
+        :param until: Wall-clock end in epoch seconds, or 0 when the window is over.
+        """
+        self.mass.create_task(self._store_go_away_until(until))
+
+    async def _store_go_away_until(self, until: float) -> None:
+        """Write or clear the stored go-away window end."""
+        if until <= 0:
+            await self.mass.cache.delete(_GO_AWAY_CACHE_KEY, provider=self.instance_id)
+            return
+        await self.mass.cache.set(
+            _GO_AWAY_CACHE_KEY,
+            until,
+            expiration=max(1, math.ceil(until - time.time())),
+            provider=self.instance_id,
+        )
+
+    async def _load_go_away_until(self) -> float:
+        """Return a stored go-away window end, or 0 when none is pending."""
+        until = await self.mass.cache.get(_GO_AWAY_CACHE_KEY, provider=self.instance_id)
+        return float(until) if isinstance(until, (int, float)) and until > time.time() else 0.0
 
     # ------------------------------------------------------------------
     # Ynison state handling
