@@ -1,18 +1,16 @@
 """
-Dialog-skill creation orchestrator — blocking single-click pipeline.
+Dialog-skill creation orchestrator used by the setup flow.
 
-Each click on *Create skill* runs ``auto_create_skill`` end-to-end
-against the Yandex Dialogs developer console using the cached
-``x_token`` already captured by the Step 1 Device Flow (see
-``provider.auth_page.perform_device_auth``). The pipeline is
-``create_app → upload_logo → update_draft → request_deploy`` — a
-handful of fast HTTP calls to ``dialogs.yandex.ru``; the whole click
-typically completes in 5-15 seconds.
+Each call runs ``auto_create_skill`` end-to-end against the Yandex Dialogs
+developer console using an ``x_token`` the setup flow already obtained
+(own sign-in or a borrowed Yandex Music account). The pipeline is
+``create_app → upload_logo → update_draft → request_deploy`` — a handful
+of fast HTTP calls to ``dialogs.yandex.ru``; a run typically completes in
+5-15 seconds.
 
 Before the create_app step we run a duplicate-name pre-check — if a
-skill with the same name already exists in the user's account we
-short-circuit into a UX state that lets the user pick *Recreate* or
-*Adopt*.
+skill with the same name already exists in the user's account the
+outcome reports it so the flow can offer *Adopt*, *Recreate* or *Rename*.
 
 Two helpers expose the resolution paths:
 
@@ -22,11 +20,8 @@ Two helpers expose the resolution paths:
 - :func:`delete_existing_skill_then_recreate` — call ``delete_skill``
   then run a fresh pipeline.
 
-This module is **stateless w.r.t. the form**: it does not persist
-anything between clicks. The previous self-resuming Device Flow
-machinery was removed because MA's frontend does not round-trip
-hidden ``ConfigEntry``s between successive ACTION clicks in
-*add-provider* mode, so a multi-click flow is impossible there.
+This module is stateless: the setup flow keeps the artifacts between
+attempts and stores them on finish.
 """
 
 from __future__ import annotations
@@ -71,14 +66,10 @@ __all__ = [
 
 class LocalAutoCreateStage(StrEnum):
     """
-    High-level UX stage derived from artifacts + cached token.
+    High-level stage of a creation attempt.
 
-    Drives the section routing in :mod:`provider.auto_create_view`
-    and the button label / cancel visibility in Step 2.
-
-    Not persisted directly: rendered on every click from
-    ``(SkillCreationArtifacts, cached_x_token_present,
-    duplicate_pending)``.
+    Tells the setup flow whether to finish, ask about a duplicate, or
+    return to the skill step with an error. Not persisted.
     """
 
     IDLE = "idle"
@@ -91,12 +82,10 @@ class LocalAutoCreateStage(StrEnum):
 @dataclass(frozen=True, slots=True)
 class AutoCreateOutcome:
     """
-    Result of one click on the Create skill / Recreate / Adopt button.
+    Result of one create / recreate / adopt attempt.
 
-    The dispatcher in :mod:`provider.__init__` writes ``artifacts``
-    and (when set) ``x_token`` into the form ``values`` so MA persists
-    them on the next save. ``user_message`` feeds the LABEL the user
-    sees while the flow is in progress.
+    The setup flow keeps ``artifacts`` for the next attempt and stores
+    them on finish; ``user_message`` is shown when the attempt failed.
     """
 
     artifacts: SkillCreationArtifacts
@@ -106,17 +95,16 @@ class AutoCreateOutcome:
     """Newly minted x_token, ``""`` to clear cache, ``None`` to leave existing."""
 
     user_message: str
-    """Human-readable status for the LABEL entry."""
+    """Human-readable status, shown as the skill step's error on failure."""
 
     stage: LocalAutoCreateStage
-    """High-level UX stage — drives button label + section routing."""
+    """High-level stage — drives the setup flow's next step."""
 
     pending_duplicate_skill_id: str | None = None
     """skill_id of a pre-existing same-name skill found by the
     duplicate pre-check. Non-None signals
-    ``stage=DUPLICATE_DETECTED``; the dispatcher persists this in a
-    hidden config entry so the next render shows the Recreate / Adopt
-    resolution UI."""
+    ``stage=DUPLICATE_DETECTED``; the setup flow then offers Adopt /
+    Recreate / Rename."""
 
     pending_duplicate_skill_name: str | None = None
     """Display name of the duplicate skill (as registered in Yandex)."""
@@ -232,8 +220,8 @@ async def _run_pipeline(
        ``ya_passport_auth.refresh_passport_cookies`` is the one
        exception that escapes the library because cookie refresh
        happens inside the authenticator context manager. We translate
-       it into ``outcome.x_token=""`` so the dispatcher clears the
-       cache and the next click triggers a fresh sign-in.
+       it into ``outcome.x_token=""`` so the setup flow asks the user
+       to sign in again before retrying.
 
     Before the create_app step (i.e. when ``artifacts.state == NONE``)
     we run a duplicate-name pre-check and short-circuit into
@@ -341,8 +329,7 @@ async def run_create_skill(
 
     Pre-conditions:
 
-    - ``cached_x_token`` is non-empty (caller must have run
-      :func:`provider.auth_page.perform_device_auth` first).
+    - ``cached_x_token`` is non-empty (the setup flow signs in first).
     - ``backend_uri`` is fully assembled (HTTPS public URL +
       webhook secret).
     - ``intents`` / ``entities`` come from

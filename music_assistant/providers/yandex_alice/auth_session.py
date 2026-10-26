@@ -12,9 +12,8 @@ Two pieces of plumbing:
   (post-auth) and every auto-update call.
 
 Cache-only-by-design: we never fall back to interactive Device Flow from
-inside the authenticator. The caller (auto_create.py) decides separately
-whether to run a Device Flow click; mixing the two would let a stale token
-silently re-trigger user-code prompts mid-pipeline.
+inside the authenticator. Sign-in belongs to the setup flow; mixing the two
+would let a stale token silently re-trigger user-code prompts mid-pipeline.
 """
 
 from __future__ import annotations

@@ -6,14 +6,11 @@
   },
   "config_entries": {
     "ym_instance": {
-      "label": "Yandex account source",
+      "label": "Yandex account",
       "description": "Borrow the Yandex account of a configured Yandex Music provider (single sign-in for the whole household) or use this plugin's own sign-in.",
       "options": {
         "__own__": "Use own credentials (default)"
       }
-    },
-    "alert_error": {
-      "label": "❌ {0}"
     },
     "label_auth_borrowed": {
       "label": "Using the Yandex account of the linked Yandex Music provider. Sign-in is managed there; nothing is stored or rotated by this plugin."
@@ -24,96 +21,18 @@
     "label_auth_status_anonymous": {
       "label": "✅ Signed in to Yandex."
     },
-    "clear_auth": {
-      "label": "Sign out of Yandex",
-      "description": "Clears the cached Yandex Passport x_token. The registered skill stays in Yandex Dialogs; sign in again to manage it.",
-      "action_label": "Sign out"
-    },
-    "label_auth_intro": {
-      "label": "Sign in to Yandex to register a dialog skill on your behalf. We never see your password — Yandex hands us a long-lived x_token only after you confirm a verification code in the popup window."
-    },
-    "sign_in": {
-      "label": "Sign in to Yandex Passport",
-      "description": "Starts the Yandex Passport Device Flow in a popup window. After confirming the code, the form refreshes.",
-      "action_label": "Sign in to Yandex Passport"
-    },
     "dialog_skill_name": {
       "label": "Skill name",
       "description": "At least 2 words. Globally unique across all Yandex skills. Examples: 'Music Assistant', 'My Music', 'Home Audio'."
     },
-    "dialog_skill_name_edit": {
-      "label": "Skill name (activation phrase #1)",
-      "description": "At least 2 words. This is the activation phrase users say to Alice to invoke your skill."
-    },
-    "dialog_skill_name_advanced": {
-      "label": "Skill name",
-      "description": "The skill's display name in Yandex Dialogs."
-    },
     "external_base_url": {
-      "label": "External base URL (HTTPS, required)"
-    },
-    "external_base_url_advanced": {
-      "label": "External base URL (HTTPS)",
-      "description": "Public HTTPS URL Yandex calls for webhooks. Editable here even after the skill is registered."
+      "label": "Public HTTPS address of Music Assistant",
+      "description": "The address Yandex uses to reach the webhook, e.g. https://ma.example.com. It must be HTTPS and reachable from the internet (reverse proxy, DDNS)."
     },
     "test_webhook_reachability": {
       "label": "Test webhook reachability",
       "description": "Sends a sentinel POST to the webhook URL and reports the result. Catches DNS / TLS / reverse-proxy issues *before* you spend a Yandex moderation cycle on a broken setup.",
       "action_label": "Test webhook"
-    },
-    "label_skill_resume": {
-      "label": "⏸ Setup was interrupted. Click 'Continue setup' to resume from step {0}."
-    },
-    "auto_create_continue": {
-      "label": "Continue setup",
-      "description": "Resumes the skill creation pipeline from the last completed step.",
-      "action_label": "Continue setup"
-    },
-    "auto_create_retry": {
-      "label": "Try again",
-      "description": "Retries the skill creation pipeline from the last completed step.",
-      "action_label": "Try again"
-    },
-    "auto_create_start": {
-      "label": "Create skill",
-      "description": "Pre-checks Yandex for an existing skill with the same name; if found, prompts to Recreate or Adopt. Otherwise registers a fresh skill.",
-      "action_label": "Create skill"
-    },
-    "label_skill_failed_unknown": {
-      "label": "❌ Unknown error."
-    },
-    "label_skill_failed_manual": {
-      "label": "Manual fallback: open https://dialogs.yandex.ru/developer in your browser and create the skill yourself with webhook URL {0}{1}/<webhook secret>. Once the skill is created, paste its Skill ID into the Advanced section below."
-    },
-    "cancel_dialog_skill_flow": {
-      "label": "Reset and start over",
-      "description": "Drops partial setup state and clears the failed flag. Cached Passport sign-in is kept.",
-      "action_label": "Reset (start over)"
-    },
-    "label_skill_intro": {
-      "label": "Click 'Create skill' to register a new dialog skill in your Yandex Dialogs account. The external base URL above must be a public HTTPS URL."
-    },
-    "label_skill_dup_intro": {
-      "label": "⚠ A skill named «{0}» already exists in your Yandex Dialogs account. Choose how to proceed:"
-    },
-    "label_skill_dup_recreate_hint": {
-      "label": "  • Recreate — delete the existing skill and register a fresh one with the same name."
-    },
-    "label_skill_dup_adopt_hint": {
-      "label": "  • Adopt — keep the existing skill and re-deploy it against this Music Assistant's webhook URL."
-    },
-    "label_skill_dup_console": {
-      "label": "Open existing skill: {0}"
-    },
-    "recreate_duplicate": {
-      "label": "Recreate (delete + create fresh)",
-      "description": "Deletes the existing skill in Yandex and registers a fresh one.",
-      "action_label": "Recreate skill"
-    },
-    "adopt_existing": {
-      "label": "Adopt existing skill",
-      "description": "Keeps the existing skill and re-deploys it against this MA's webhook.",
-      "action_label": "Adopt existing"
     },
     "label_skill_registered": {
       "label": "✅ Skill «{0}» is registered. Skill ID: {1}"
@@ -133,22 +52,10 @@
     "pub_status_unknown": {
       "label": "ℹ️ Publication status not yet fetched — click Refresh status to query Yandex Dialogs."
     },
-    "label_skill_dev_console_url": {
-      "label": "Yandex Dialogs dev console",
-      "description": "Copy this URL and open it in your browser."
-    },
-    "edit_skill": {
-      "label": "Edit skill",
-      "description": "Reveals editable fields for the skill name, alternative activation phrases, and TTS voice.",
-      "action_label": "Edit skill"
-    },
     "refresh_status": {
       "label": "Refresh publication status",
       "description": "Re-fetches the skill's status from Yandex Dialogs (one HTTP call). Useful while moderation is in progress to see when the skill flips to on-air.",
       "action_label": "Refresh status"
-    },
-    "label_skill_edit_intro": {
-      "label": "Edit the fields below, then click 'Update skill'."
     },
     "dialog_activation_phrase_2": {
       "label": "Alternative activation phrase #2 (optional)",
@@ -166,44 +73,17 @@
       "label": "TTS voice",
       "description": "Voice used for the skill's text-to-speech replies."
     },
-    "dialog_skill_voice_advanced": {
-      "label": "TTS voice",
-      "description": "Yandex TTS voice id."
-    },
-    "update_skill": {
-      "label": "Update skill",
-      "description": "Pushes edits to Yandex via PATCH draft + re-deploy. Yandex moderation: 5-15 min.",
-      "action_label": "Update skill"
-    },
     "delete_skill": {
       "label": "Delete skill",
-      "description": "Permanently deletes the skill from Yandex Dialogs. Cached Passport sign-in is kept.",
+      "description": "Permanently deletes the skill from Yandex Dialogs. Your Yandex sign-in is kept; use Reconfigure to create a new skill.",
       "action_label": "Delete skill"
-    },
-    "cancel_edit": {
-      "label": "Cancel edit",
-      "description": "Discards your edits and exits edit mode.",
-      "action_label": "Cancel edit"
     },
     "dialog_skill_id": {
       "label": "Skill ID",
-      "description": "UUID of the skill — populated automatically after a successful auto-create, or paste manually if you set up the skill yourself."
-    },
-    "dialog_skill_token": {
-      "label": "Skill OAuth token (manual setup only)",
-      "description": "Optional OAuth token from https://oauth.yandex.ru/authorize?response_type=token&client_id=c473ca268cd749d3a8371351a8f2bcbd. Used to push state callbacks to Yandex (future feature; stored encrypted)."
-    },
-    "dialog_webhook_secret": {
-      "label": "Webhook URL secret",
-      "description": "Random secret embedded in the webhook URL. The full URL is <external_base_url>{0}/<this-secret>. Editable: changes here invalidate Yandex's existing registration."
-    },
-    "regenerate_webhook_secret": {
-      "label": "Regenerate webhook secret",
-      "description": "Generates a fresh secret + resets the auto-create state. The current Yandex skill registration becomes stale — you'll need to re-create the skill.",
-      "action_label": "Regenerate (forces re-create)"
+      "description": "ID of the skill you created in the Yandex Dialogs developer console (Settings → Skill ID)."
     },
     "label_diagnostics_inactive": {
-      "label": "Diagnostics: webhook handler not active — skill_id or webhook_secret missing in saved config. Run Create skill to register a new skill, or paste an existing skill_id + secret in Advanced."
+      "label": "Diagnostics: webhook handler not active — no skill is set up yet. Use Reconfigure to create or register one."
     },
     "manifest_banner_bundled": {
       "label": "Skill manifest: bundled default ({0} intents, {1} entities). Use Export to copy it to {2} for editing."
@@ -213,51 +93,6 @@
     },
     "manifest_banner_invalid": {
       "label": "⚠ Skill manifest: override at {0} is invalid — falling back to bundled default ({1} intents, {2} entities). Error: {3}"
-    },
-    "manifest_export_exists": {
-      "label": "Manifest override already exists at {0}; the existing file was not overwritten."
-    },
-    "manifest_export_write_error": {
-      "label": "Manifest export failed: could not write {0}: {1}"
-    },
-    "manifest_export_success": {
-      "label": "Manifest exported to {0}. Open the file in an external editor."
-    },
-    "manifest_import_empty": {
-      "label": "The manifest paste field is empty; there is nothing to import."
-    },
-    "manifest_import_decode_error": {
-      "label": "Manifest import failed: {0}"
-    },
-    "manifest_import_invalid": {
-      "label": "Manifest import failed validation: {0}"
-    },
-    "manifest_import_write_error": {
-      "label": "Manifest import failed: could not write {0}: {1}"
-    },
-    "manifest_import_success": {
-      "label": "Manifest imported into {0} ({1} intents, {2} entities)."
-    },
-    "manifest_reset_absent": {
-      "label": "No manifest override exists; the bundled default is already active."
-    },
-    "manifest_reset_delete_error": {
-      "label": "Manifest reset failed: could not delete {0}: {1}"
-    },
-    "manifest_reset_success": {
-      "label": "Manifest override at {0} was removed; the bundled default is active."
-    },
-    "manifest_validate_absent": {
-      "label": "No manifest override exists; there is nothing to validate."
-    },
-    "manifest_validate_read_error": {
-      "label": "Could not read manifest override {0}: {1}"
-    },
-    "manifest_validate_invalid": {
-      "label": "✗ Manifest override is invalid: {0}"
-    },
-    "manifest_validate_success": {
-      "label": "✓ Manifest override is valid ({0} intents, {1} entities)."
     },
     "export_manifest": {
       "label": "Export manifest",
@@ -294,6 +129,145 @@
     "instance_name": {
       "label": "Instance name (MA-side display)",
       "description": "Display name shown in Music Assistant's provider list. Independent from the Skill name."
+    },
+    "label_auth_signed_out": {
+      "label": "⚠ Not signed in to Yandex. Skill management actions are unavailable — use Reconfigure on this provider to sign in."
+    },
+    "label_skill_missing": {
+      "label": "⚠ No Yandex Dialogs skill is set up. Use Reconfigure on this provider and choose «Create the skill again»."
+    },
+    "label_webhook_url": {
+      "label": "Webhook URL registered with Yandex: {0}"
+    },
+    "open_dev_console": {
+      "label": "Yandex Dialogs developer console",
+      "description": "Opens the skill's page in the Yandex Dialogs developer console (moderation, testing, statistics).",
+      "action_label": "Open console"
+    },
+    "method": {
+      "label": "Sign-in method",
+      "options": {
+        "device": "Code on another device (ya.ru/device)",
+        "qr": "QR code in the Yandex app",
+        "cookies": "Browser cookies"
+      }
+    },
+    "cookies": {
+      "label": "Cookies from passport.yandex.ru",
+      "description": "Paste the cookies as a «key=value; …» string or as the JSON export of a cookie browser extension."
+    },
+    "skill_mode": {
+      "label": "Skill",
+      "options": {
+        "create": "Create the skill automatically",
+        "existing": "I already created a skill in the Yandex Dialogs console"
+      }
+    },
+    "duplicate_choice": {
+      "label": "What to do",
+      "options": {
+        "adopt": "Use the existing skill (re-register it with this Music Assistant)",
+        "recreate": "Delete it and create a new skill",
+        "rename": "Pick another name"
+      }
+    },
+    "reconfigure_action": {
+      "label": "What do you want to change?",
+      "options": {
+        "sign_in": "Sign in to Yandex again",
+        "edit_skill": "Edit the skill (name, activation phrases, voice)",
+        "webhook": "Change the public address or the webhook secret",
+        "recreate": "Create the skill again"
+      }
+    },
+    "new_webhook_secret": {
+      "label": "Generate a new webhook secret",
+      "description": "Use this if the webhook URL leaked. The skill is re-registered with the new URL."
+    },
+    "webhook_url": {
+      "label": "Webhook URL"
     }
+  },
+  "setup_flow": {
+    "user": {
+      "title": "Yandex account",
+      "description": "Borrow the Yandex account of a configured Yandex Music provider (one sign-in for the whole household) or sign in with this provider's own account."
+    },
+    "method": {
+      "title": "Sign in to Yandex",
+      "description": "Music Assistant signs in to Yandex Passport to register and manage the Yandex Dialogs skill on your behalf."
+    },
+    "cookies": {
+      "title": "Sign in with browser cookies",
+      "description": "Sign in to passport.yandex.ru in your browser, export its cookies and paste them below."
+    },
+    "device_login": {
+      "title": "Confirm the sign-in",
+      "description": "Open ya.ru/device, sign in to Yandex if asked and enter the code {0}. This step continues automatically once you confirm."
+    },
+    "scan_qr": {
+      "title": "Scan the QR code",
+      "description": "Scan the code with the Yandex app on your phone and confirm the sign-in.",
+      "progress_text": "Waiting for you to confirm in the Yandex app…"
+    },
+    "skill": {
+      "title": "Yandex Dialogs skill",
+      "description": "Alice reaches Music Assistant through a custom Yandex Dialogs skill. Music Assistant can create it for you, or you can use a skill you created yourself."
+    },
+    "create_skill": {
+      "title": "Creating the skill",
+      "progress_text": "Registering the skill in Yandex Dialogs…"
+    },
+    "duplicate": {
+      "title": "A skill with this name already exists",
+      "description": "Your Yandex account already has a skill «{0}» (ID {1})."
+    },
+    "webhook_info": {
+      "title": "Point the skill to Music Assistant",
+      "description": "In the Yandex Dialogs console, open your skill's settings and set the Webhook URL to:\n\n{0}\n\nThen save and publish the skill."
+    },
+    "reconfigure": {
+      "title": "Change the Yandex Alice setup"
+    },
+    "edit_skill": {
+      "title": "Edit the skill",
+      "description": "Changes are sent to Yandex Dialogs; a renamed skill goes through moderation again."
+    },
+    "update_skill": {
+      "title": "Updating the skill",
+      "progress_text": "Sending the changes to Yandex Dialogs…"
+    },
+    "webhook": {
+      "title": "Webhook address",
+      "description": "Change the public address Yandex uses to reach Music Assistant, or generate a new webhook secret."
+    },
+    "abort": {
+      "login_denied": "The sign-in was declined in Yandex.",
+      "update_failed": "Yandex Dialogs did not accept the new webhook address. Check the address and try again."
+    }
+  },
+  "errors": {
+    "invalid_base_url": "Enter a public HTTPS address (https://…) that is reachable from the internet; local and private addresses do not work.",
+    "skill_id_required": "Enter the ID of your skill."
+  },
+  "config_actions": {
+    "manifest_export_exists": "Manifest override already exists at {0}; the existing file was not overwritten.",
+    "manifest_export_write_error": "Manifest export failed: could not write {0}: {1}",
+    "manifest_export_success": "Manifest exported to {0}. Open the file in an external editor.",
+    "manifest_import_empty": "The manifest paste field is empty; there is nothing to import.",
+    "manifest_import_decode_error": "Manifest import failed: {0}",
+    "manifest_import_invalid": "Manifest import failed validation: {0}",
+    "manifest_import_write_error": "Manifest import failed: could not write {0}: {1}",
+    "manifest_import_success": "Manifest imported into {0} ({1} intents, {2} entities).",
+    "manifest_reset_absent": "No manifest override exists; the bundled default is already active.",
+    "manifest_reset_delete_error": "Manifest reset failed: could not delete {0}: {1}",
+    "manifest_reset_success": "Manifest override at {0} was removed; the bundled default is active.",
+    "manifest_validate_absent": "No manifest override exists; there is nothing to validate.",
+    "manifest_validate_read_error": "Could not read manifest override {0}: {1}",
+    "manifest_validate_invalid": "✗ Manifest override is invalid: {0}",
+    "manifest_validate_success": "✓ Manifest override is valid ({0} intents, {1} entities).",
+    "status_refreshed": "Publication status refreshed.",
+    "status_unavailable": "Could not fetch the publication status — Yandex Dialogs is not reachable, or the skill no longer exists in your account.",
+    "skill_deleted": "Skill deleted from Yandex Dialogs. Use Reconfigure to create a new one."
   }
 }

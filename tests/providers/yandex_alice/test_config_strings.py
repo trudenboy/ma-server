@@ -1,211 +1,191 @@
 """
-Every rendered config entry must resolve its user-facing text.
+Every user-facing text of the options page and the setup flow resolves from ``strings.json``.
 
-Entry texts live in ``strings.json`` under ``config_entries.<key>.<field>``
-and are resolved by MA at serialization (``translation_key`` re-keys an
-entry when one config key needs several texts). An entry that neither
-passes ``label=`` in code nor is authored in ``strings.json`` would render
-empty in the UI — these tests walk the form through its major states and
-fail on any such entry.
-
-Entries whose text is composed at runtime (dispatcher outcome / update
-messages, probe descriptions) pass ``label=``/``description=`` directly;
-their keys must NOT be authored in ``strings.json``, or the static
-translation would silently override the dynamic text.
+Options entries resolve ``config_entries.<key>.<field>``; setup-flow steps
+resolve ``setup_flow.<step_id>``; form errors resolve ``errors.<slug>``; flow
+aborts resolve ``setup_flow.abort.<reason>``; action results resolve
+``config_actions.<slug>``. A missing text renders empty in the UI.
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
-from music_assistant_models.enums import ProviderType
-from ya_dialogs_api import SkillCreationArtifacts, SkillCreationState, dump_artifacts
+from ya_passport_auth.ma import BORROW_SOURCE_OWN
 
-from music_assistant.providers.yandex_alice import get_config_entries
+from music_assistant.providers.yandex_alice import setup_flow as flow
 from music_assistant.providers.yandex_alice.constants import (
-    CATEGORY_AUTHORIZATION,
-    CATEGORY_SETTINGS,
-    CATEGORY_SKILL,
     CONF_AUTH_X_TOKEN,
-    CONF_DIALOG_AUTO_CREATE_ARTIFACTS,
-    CONF_EDIT_MODE,
+    CONF_DIALOG_SKILL_ID,
+    CONF_DIALOG_SKILL_NAME,
     CONF_EXTERNAL_BASE_URL,
-    CONF_PENDING_DUPLICATE_SKILL_ID,
-    CONF_PENDING_DUPLICATE_SKILL_NAME,
     CONF_YM_INSTANCE,
 )
 
 from .localization import authored_texts, load_strings
+from .test_plugin import SETUP, _plugin
+from .test_setup_flow import (  # noqa: F401 -- fixtures used by the flow tests below
+    BASE_URL,
+    EXISTING_DATA,
+    _duplicate,
+    _FakeSession,
+    api,
+    client,
+)
 
 _PLACEHOLDER = re.compile(r"\{(\d+)\}")
 
-
-def _make_mass(ym_instances: dict[str, str] | None = None) -> MagicMock:
-    mass = MagicMock()
-    mass.players.all_players = MagicMock(return_value=[])
-    mass.webserver = None
-    mass.config.get.return_value = {
-        inst_id: {"domain": "yandex_music", "name": name}
-        for inst_id, name in (ym_instances or {}).items()
-    }
-    return mass
-
-
-def _artifacts(state: SkillCreationState, **kwargs: Any) -> str:
-    return dump_artifacts(SkillCreationArtifacts(state=state, **kwargs))
-
-
-_FORM_STATES: dict[str, dict[str, Any]] = {
-    "signed_out": {},
-    "signed_in_idle": {CONF_AUTH_X_TOKEN: "tok"},
-    "pipeline_running": {
-        CONF_AUTH_X_TOKEN: "tok",
-        CONF_DIALOG_AUTO_CREATE_ARTIFACTS: _artifacts(
-            SkillCreationState.APP_CREATED, skill_id="sk-1"
-        ),
-    },
-    "failed": {
-        CONF_AUTH_X_TOKEN: "tok",
-        CONF_EXTERNAL_BASE_URL: "https://ma.example.org",
-        CONF_DIALOG_AUTO_CREATE_ARTIFACTS: _artifacts(SkillCreationState.FAILED, last_error="boom"),
-    },
-    "failed_no_detail": {
-        CONF_AUTH_X_TOKEN: "tok",
-        CONF_DIALOG_AUTO_CREATE_ARTIFACTS: _artifacts(SkillCreationState.FAILED),
-    },
-    "duplicate_pending": {
-        CONF_AUTH_X_TOKEN: "tok",
-        CONF_PENDING_DUPLICATE_SKILL_ID: "sk-dup",
-        CONF_PENDING_DUPLICATE_SKILL_NAME: "My Skill",
-    },
-    "registered": {
-        CONF_AUTH_X_TOKEN: "tok",
-        CONF_DIALOG_AUTO_CREATE_ARTIFACTS: _artifacts(SkillCreationState.DONE, skill_id="sk-1"),
-    },
-    "registered_edit_mode": {
-        CONF_AUTH_X_TOKEN: "tok",
-        CONF_DIALOG_AUTO_CREATE_ARTIFACTS: _artifacts(SkillCreationState.DONE, skill_id="sk-1"),
-        CONF_EDIT_MODE: True,
-    },
-    "borrowing": {CONF_YM_INSTANCE: "ym-a"},
-    "borrowing_error": {CONF_YM_INSTANCE: "ym-broken"},
+_OPTION_STATES: dict[str, dict[str, Any]] = {
+    "signed_in": SETUP,
+    "signed_out": {**SETUP, CONF_AUTH_X_TOKEN: None},
+    "no_skill": {**SETUP, CONF_DIALOG_SKILL_ID: ""},
+    "empty": {},
 }
 
 
-async def _render(state: str) -> tuple[Any, ...]:
-    """Render the form in the named state (borrow states get a linked instance)."""
-    if state == "borrowing":
-        mass = _make_mass({"ym-a": "Main"})
-        owner = MagicMock()
-        owner.domain = "yandex_music"
-        owner.type = ProviderType.MUSIC
-        owner.config.get_value = lambda key: {"x_token": "test-x-ym"}.get(key)
-        mass.get_provider.return_value = owner
-    elif state == "borrowing_error":
-        mass = _make_mass({"ym-broken": "Main"})
-        mass.get_provider.return_value = None
-    else:
-        mass = _make_mass()
-    entries: tuple[Any, ...] = await get_config_entries(mass, values=dict(_FORM_STATES[state]))
-    return entries
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", _FORM_STATES)
-async def test_every_visible_entry_resolves_text(state: str) -> None:
-    """Non-hidden entries carry an in-code label or an authored strings.json text."""
-    entries = await _render(state)
-    assert entries
-    for entry in entries:
-        if getattr(entry, "hidden", False):
+@pytest.mark.parametrize("state", _OPTION_STATES)
+async def test_options_entries_resolve_text(state: str, tmp_path: Path) -> None:
+    """Visible options entries have a label (in code or authored) and enough params."""
+    plugin, _mass = _plugin(tmp_path, setup_data=dict(_OPTION_STATES[state]))
+    for entry in await plugin.get_config_entries():
+        if entry.hidden:
             continue
         texts = authored_texts(entry)
-        in_code_label = getattr(entry, "label", None)
-        assert in_code_label or "label" in texts, (
-            f"{state}: entry '{entry.key}' has no label in code and none authored in strings.json"
-        )
+        assert entry.label or "label" in texts, f"{state}: '{entry.key}' has no label"
         if entry.type.value == "action":
-            assert getattr(entry, "action_label", None) or "action_label" in texts, (
-                f"{state}: action entry '{entry.key}' has no action_label anywhere"
-            )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("state", _FORM_STATES)
-async def test_dynamic_texts_are_not_shadowed_by_strings_json(state: str) -> None:
-    """Runtime-composed label=/description= must stay unauthored in strings.json."""
-    for entry in await _render(state):
-        texts = authored_texts(entry)
-        for field in ("label", "description"):
-            if not getattr(entry, field, None):
-                continue
-            assert field not in texts, (
-                f"{state}: entry '{entry.key}' passes a runtime {field} but the same "
-                f"field is also authored in strings.json — the static translation "
-                "would override the dynamic text"
-            )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("state", _FORM_STATES)
-async def test_placeholders_receive_translation_params(state: str) -> None:
-    """
-    Authored ``{n}`` placeholders must be fed by enough translation_params.
-
-    ``action_label`` is resolved by MA without params, so it may not
-    carry placeholders at all (checked separately below).
-    """
-    for entry in await _render(state):
-        texts = authored_texts(entry)
-        params = getattr(entry, "translation_params", None) or []
+            assert "action_label" in texts, f"{state}: '{entry.key}' has no action_label"
+        if entry.label:
+            assert "label" not in texts, f"{state}: '{entry.key}' runtime label is shadowed"
+        params = entry.translation_params or []
         for field in ("label", "description"):
             placeholders = [int(m) for m in _PLACEHOLDER.findall(texts.get(field, ""))]
-            if not placeholders:
-                continue
-            assert len(params) > max(placeholders), (
-                f"{state}: '{entry.key}.{field}' uses placeholder "
-                f"{{{max(placeholders)}}} but the entry provides "
-                f"only {len(params)} translation_params"
-            )
+            if placeholders:
+                assert len(params) > max(placeholders), f"{state}: '{entry.key}.{field}'"
 
 
 def test_action_labels_carry_no_placeholders() -> None:
     """MA resolves action_label without params — placeholders would render literally."""
     for key, texts in load_strings()["config_entries"].items():
-        assert not _PLACEHOLDER.search(texts.get("action_label", "")), (
-            f"'{key}.action_label' contains a {{n}} placeholder, but MA never "
-            "substitutes translation_params into action_label"
-        )
+        assert not _PLACEHOLDER.search(texts.get("action_label", "")), key
 
 
-def test_states_only_entries_are_authored() -> None:
-    """Texts of entries rendered only in hard-to-simulate states stay authored."""
-    authored = load_strings()["config_entries"]
-    assert "label" in authored.get("label_diagnostics_inactive", {})
-    manifest_results = {
-        "manifest_export_exists",
-        "manifest_export_write_error",
+def test_action_results_and_hard_to_reach_entries_are_authored() -> None:
+    """Action outcome texts and rarely rendered labels exist."""
+    strings = load_strings()
+    actions = strings["config_actions"]
+    for slug in (
+        "status_refreshed",
+        "status_unavailable",
+        "skill_deleted",
         "manifest_export_success",
-        "manifest_import_empty",
-        "manifest_import_decode_error",
-        "manifest_import_invalid",
-        "manifest_import_write_error",
         "manifest_import_success",
-        "manifest_reset_absent",
-        "manifest_reset_delete_error",
+        "manifest_import_invalid",
         "manifest_reset_success",
-        "manifest_validate_absent",
-        "manifest_validate_read_error",
-        "manifest_validate_invalid",
         "manifest_validate_success",
-    }
-    assert manifest_results <= set(authored)
+    ):
+        assert slug in actions, slug
+    for key in ("label_diagnostics_inactive", "label_skill_missing", "label_auth_signed_out"):
+        assert "label" in strings["config_entries"][key], key
 
 
-def test_config_categories_are_authored() -> None:
-    """The three form section slugs resolve from config_categories."""
-    categories = load_strings()["config_categories"]
-    assert {CATEGORY_AUTHORIZATION, CATEGORY_SKILL, CATEGORY_SETTINGS} <= set(categories)
+def _flow_scenarios() -> list[list[tuple[str, dict[str, Any]]]]:
+    own = ("user", {CONF_YM_INSTANCE: BORROW_SOURCE_OWN})
+    skill = (
+        "skill",
+        {
+            flow.CONF_SKILL_MODE: flow.SKILL_MODE_CREATE,
+            CONF_DIALOG_SKILL_NAME: "Music Assistant",
+            CONF_EXTERNAL_BASE_URL: BASE_URL,
+        },
+    )
+    existing = (
+        "skill",
+        {
+            flow.CONF_SKILL_MODE: flow.SKILL_MODE_EXISTING,
+            CONF_DIALOG_SKILL_NAME: "Music Assistant",
+            CONF_EXTERNAL_BASE_URL: BASE_URL,
+            CONF_DIALOG_SKILL_ID: "sk-1",
+        },
+    )
+    return [
+        [
+            own,
+            ("method", {flow.CONF_METHOD: flow.METHOD_COOKIES}),
+            ("cookies", {flow.CONF_COOKIES: "a=b"}),
+            skill,
+        ],
+        [own, ("method", {flow.CONF_METHOD: flow.METHOD_DEVICE}), existing, ("webhook_info", {})],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_setup_flow_steps_and_fields_are_authored(api: Any) -> None:  # noqa: F811
+    """Every step the flow shows has a title, and every field a label and option titles."""
+    strings = load_strings()
+    steps: set[str] = set()
+    entries: list[Any] = []
+    api.create.return_value = _duplicate()
+    scenarios = _flow_scenarios()
+    scenarios[0].append(("duplicate", {flow.CONF_DUPLICATE_CHOICE: flow.DUPLICATE_ADOPT}))
+    for responses in scenarios:
+        session = _FakeSession(responses)
+        await flow.run_setup(session)  # type: ignore[arg-type]
+        steps.update(session.steps)
+        for step_entries in session.form_entries.values():
+            entries.extend(step_entries)
+    api.update.return_value = _updated_outcome()
+    for second_step in (
+        ("edit_skill", {CONF_DIALOG_SKILL_NAME: "Music Assistant"}),
+        ("webhook", {CONF_EXTERNAL_BASE_URL: BASE_URL}),
+    ):
+        action = (
+            flow.RECONFIGURE_EDIT if second_step[0] == "edit_skill" else flow.RECONFIGURE_WEBHOOK
+        )
+        session = _FakeSession(
+            [("reconfigure", {flow.CONF_RECONFIGURE: action}), second_step],
+            kind="reconfigure",
+            setup_data=dict(EXISTING_DATA),
+        )
+        await flow.run_setup(session)  # type: ignore[arg-type]
+        steps.update(session.steps)
+        for step_entries in session.form_entries.values():
+            entries.extend(step_entries)
+    for step in steps:
+        assert "title" in strings["setup_flow"].get(step, {}), f"setup_flow.{step}.title"
+    for entry in entries:
+        texts = strings["config_entries"].get(entry.key, {})
+        assert "label" in texts, f"config_entries.{entry.key}.label"
+        for option in entry.options or []:
+            if option.title is None:
+                assert option.value in texts.get("options", {}), (
+                    f"config_entries.{entry.key}.options.{option.value}"
+                )
+
+
+def test_flow_progress_texts_errors_and_aborts_are_authored() -> None:
+    """Progress texts, form error slugs and abort reasons used by the flow exist."""
+    strings = load_strings()
+    for step in ("device_login", "scan_qr", "create_skill", "update_skill"):
+        assert strings["setup_flow"][step].get("progress_text") or step == "device_login", step
+    for slug in ("invalid_base_url", "skill_id_required"):
+        assert slug in strings["errors"], slug
+    for reason in ("login_denied", "update_failed"):
+        assert reason in strings["setup_flow"]["abort"], reason
+
+
+def _updated_outcome() -> Any:
+    from ya_dialogs_api import SkillCreationArtifacts, SkillCreationState  # noqa: PLC0415
+
+    from music_assistant.providers.yandex_alice.auto_update import (  # noqa: PLC0415
+        AutoUpdateOutcome,
+    )
+
+    return AutoUpdateOutcome(
+        artifacts=SkillCreationArtifacts(state=SkillCreationState.DONE, skill_id="sk-1"),
+        x_token=None,
+        user_message="ok",
+    )

@@ -1,15 +1,15 @@
 """
 Auto-update wrapper around ``ya_dialogs_api.auto_update_skill``.
 
-Used for both rename and drift-sync clicks. ``auto_update_skill`` patches
+Used by the reconfigure flow to edit the skill or re-register its webhook
+address. ``auto_update_skill`` patches
 the full draft (so a rename also re-applies description / activation
 phrases / structured examples) and re-deploys; Yandex moderation queue
 rules then apply (~5-15 min for ``aliceSkill``).
 
 Cache-only-by-design: refuses to fall back to interactive Device Flow.
-If the cached x_token is missing or rejected by Passport, the outcome
-signals the dispatcher to clear the cache so the next click triggers a
-fresh ``auto_create`` flow.
+If the x_token is missing or rejected by Passport, the outcome signals
+the setup flow to ask the user to sign in again.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ __all__ = ["AutoUpdateOutcome", "run_auto_update"]
 
 @dataclass(frozen=True, slots=True)
 class AutoUpdateOutcome:
-    """Result of one click on the rename / drift-sync button."""
+    """Result of one skill update attempt."""
 
     artifacts: SkillCreationArtifacts
     """Latest snapshot — overwrites CONF_DIALOG_AUTO_CREATE_ARTIFACTS."""
@@ -47,7 +47,7 @@ class AutoUpdateOutcome:
     """``""`` to clear cached x_token (auth rejected); ``None`` to leave as-is."""
 
     user_message: str
-    """Status / error string for the LABEL entry."""
+    """Status / error string shown to the user on failure."""
 
 
 async def run_auto_update(
@@ -68,23 +68,19 @@ async def run_auto_update(
 
     Pre-conditions checked synchronously before any network call:
 
-    - ``cached_x_token`` is non-empty — otherwise return FAILED with a hint
-      to run the Create button first.
+    - ``cached_x_token`` is non-empty — otherwise return FAILED.
     - ``artifacts.skill_id`` is set — otherwise FAILED (no skill to update).
 
     The library itself surfaces ya-dialogs-api errors as ``state=FAILED`` /
     ``last_error`` rather than raising. We translate
     :class:`InvalidCredentialsError` from Passport into a token-clear
-    signal so the next click can re-auth cleanly.
+    signal so the setup flow can ask the user to sign in again.
     """
     if not cached_x_token:
         failed = dataclasses.replace(
             artifacts,
             state=SkillCreationState.FAILED,
-            last_error=(
-                "No cached authentication — click 'Sign in to Yandex Passport' "
-                "first to authenticate."
-            ),
+            last_error="No cached authentication — reconfigure the provider and sign in first.",
         )
         return AutoUpdateOutcome(
             artifacts=failed,
@@ -96,7 +92,7 @@ async def run_auto_update(
         failed = dataclasses.replace(
             artifacts,
             state=SkillCreationState.FAILED,
-            last_error="skill_id is missing — create the skill first via the 'Create' button.",
+            last_error="skill_id is missing — create the skill first (reconfigure the provider).",
         )
         return AutoUpdateOutcome(
             artifacts=failed,
@@ -125,9 +121,7 @@ async def run_auto_update(
         failed = dataclasses.replace(
             artifacts,
             state=SkillCreationState.FAILED,
-            last_error=(
-                "Cached auth has expired. Click 'Sign in to Yandex Passport' to re-authenticate."
-            ),
+            last_error=("The Yandex sign-in has expired. Sign in again to continue."),
         )
         return AutoUpdateOutcome(
             artifacts=failed,

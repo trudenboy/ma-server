@@ -35,7 +35,6 @@ CONF_AUTH_USER_NAME = "auth_user_name"
 # Dialog skill (Yandex Dialogs custom skill — voice playback)
 CONF_DIALOG_SKILL_NAME = "dialog_skill_name"
 CONF_DIALOG_SKILL_ID = "dialog_skill_id"
-CONF_DIALOG_SKILL_TOKEN = "dialog_skill_token"
 CONF_DIALOG_WEBHOOK_SECRET = "dialog_webhook_secret"
 CONF_DIALOG_AUTO_CREATE_ARTIFACTS = "dialog_auto_create_artifacts"
 # v1.2.0 — Yandex skill publication status, classified into one of:
@@ -45,60 +44,24 @@ CONF_DIALOG_AUTO_CREATE_ARTIFACTS = "dialog_auto_create_artifacts"
 # moderation banner without making an HTTP call on every render.
 CONF_DIALOG_PUBLICATION_STATUS = "dialog_publication_status"
 
-# ---------------------------------------------------------------------------
-# Config actions (config-flow buttons)
-# ---------------------------------------------------------------------------
-CONF_ACTION_AUTO_CREATE_DIALOG = "auto_create_dialog_skill"
-# v1.2.0 UX revamp — split sign-in / create-skill / clear-auth /
-# delete-skill into four explicit user-facing actions instead of
-# overloading one button.
-CONF_ACTION_SIGN_IN = "sign_in"
-
 # Yandex account source: instance_id of a linked yandex_music provider to
 # borrow the x_token from, or the shared "__own__" sentinel for this
 # plugin's own sign-in (key name matches the other yandex providers).
 CONF_YM_INSTANCE = "ym_instance"
-CONF_ACTION_CLEAR_AUTH = "clear_auth"
+
+# ---------------------------------------------------------------------------
+# Options-page actions
+# ---------------------------------------------------------------------------
 CONF_ACTION_DELETE_SKILL = "delete_skill"
-# v1.2.0 — manual "Refresh status" trigger in Step 3. The dispatcher
-# fetches the live publication status from Yandex Dialogs snapshot
-# and updates the cached value used by the Step 3 status banner.
+# Options-page button: fetch the live publication status from Yandex Dialogs
+# and store it for the status banner.
 CONF_ACTION_REFRESH_STATUS = "refresh_status"
-CONF_ACTION_RENAME_DIALOG_SKILL = "rename_dialog_skill"
-# Cancel an in-flight Device Flow / drop partial artifacts. Visible only when
-# DEVICE_FLOW_STARTED or FAILED. Cached x_token is preserved across cancel.
-CONF_ACTION_CANCEL_DIALOG_SKILL_FLOW = "cancel_dialog_skill_flow"
 # Test webhook reachability — outgoing POST to verify DNS + TLS + reverse proxy.
 CONF_ACTION_TEST_WEBHOOK = "test_webhook_reachability"
-# Regenerate the webhook URL secret. Drops the existing skill registration in
-# Yandex (delete_skill) so the next auto-create starts fresh — guards against
-# the user editing the webhook secret field by hand and orphaning the route.
-CONF_ACTION_REGENERATE_WEBHOOK_SECRET = "regenerate_webhook_secret"
-# Revert Skill name back to artifacts.last_known_name (drift undo).
-CONF_ACTION_REVERT_SKILL_NAME = "revert_skill_name"
 
-# v1.2.0 Step 2: pre-check duplicate name flow — two resolution actions.
-# RECREATE: delete the existing skill in Yandex + register fresh one with
-# the same name. ADOPT: skip create, position artifacts on the discovered
-# skill_id and continue the pipeline (re-deploys with our backend URL).
-CONF_ACTION_RECREATE_DUPLICATE = "recreate_duplicate"
-CONF_ACTION_ADOPT_EXISTING = "adopt_existing"
-# Step 3 identity card: open the skill in the Yandex Dialogs dev console
-# via the AuthenticationHelper popup channel (signal_event), bypassing
-# `help_link` which only renders as a tiny inline `?` icon.
+# Options-page button: open the skill in the Yandex Dialogs dev console.
 CONF_ACTION_OPEN_DEV_CONSOLE = "open_dev_console"
-# Hidden persistence: skill_id of the duplicate found by the pre-check
-# during the previous click. When non-empty, the form renders the
-# Recreate / Adopt resolution UI instead of the regular Create button.
-CONF_PENDING_DUPLICATE_SKILL_ID = "pending_duplicate_skill_id"
-CONF_PENDING_DUPLICATE_SKILL_NAME = "pending_duplicate_skill_name"
 
-# v1.2.0 Step 3: edit-mode toggle + actions. Edit mode is a hidden boolean
-# in form values; flipping it in/out reshapes the post-DONE section.
-CONF_EDIT_MODE = "edit_mode"
-CONF_ACTION_EDIT_SKILL = "edit_skill"
-CONF_ACTION_UPDATE_SKILL = "update_skill"
-CONF_ACTION_CANCEL_EDIT = "cancel_edit"
 
 # v1.6.0 — file-based skill manifest override + UI actions.
 # Override lives at ``<storage>/yandex_alice/skill.toml``. UI exposes
@@ -110,7 +73,7 @@ CONF_ACTION_RESET_MANIFEST = "reset_manifest"
 CONF_ACTION_VALIDATE_MANIFEST = "validate_manifest"
 CONF_DIALOG_SKILL_OVERRIDE_PASTE = "dialog_skill_override_paste"
 
-# Voice + activation phrases editable in edit mode (otherwise auto-derived).
+# Voice + activation phrases, edited in the reconfigure flow (otherwise auto-derived).
 # Yandex Dialogs allows up to **three** alternative activation phrases
 # in addition to the skill name itself (which is the first phrase).
 # Each must be at least 2 words just like the skill name; empty slots

@@ -9,6 +9,7 @@
     ],
     "requirements": [
         "ya-passport-auth[ma]==2.2.0",
+        "segno==1.6.6",
         "ya-dialogs-api==2.4.0"
     ],
     "documentation": "https://github.com/trudenboy/ma-provider-yandex-alice",
