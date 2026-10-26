@@ -21,6 +21,15 @@ def load_strings() -> dict[str, Any]:
     return data
 
 
+@lru_cache(maxsize=1)
+def load_common_strings() -> dict[str, Any]:
+    """Parse Music Assistant's shared ``strings.json`` (the ``common.*`` texts) once."""
+    core_pkg = importlib.import_module("music_assistant")
+    strings_path = Path(str(core_pkg.__file__)).parent / "strings.json"
+    data: dict[str, Any] = json.loads(strings_path.read_text(encoding="utf-8"))
+    return data
+
+
 def entry_text(key: str, field: str = "label") -> str:
     """
     Return ``config_entries.<key>.<field>`` from ``strings.json``.
@@ -39,8 +48,11 @@ def authored_texts(entry: Any) -> dict[str, str]:
 
     :param entry: A ConfigEntry-like object; its ``translation_key`` (or ``key``
         as the structural default) selects the ``config_entries`` record,
-        mirroring MA's serialization-time lookup.
+        mirroring MA's serialization-time lookup; entries MA builds itself (such
+        as its engine pickers) fall back to MA's shared texts.
     """
     translation_key = getattr(entry, "translation_key", None) or entry.key
-    texts: dict[str, str] = load_strings()["config_entries"].get(translation_key, {})
+    texts: dict[str, str] = load_strings()["config_entries"].get(translation_key) or (
+        load_common_strings()["config_entries"].get(translation_key, {})
+    )
     return texts

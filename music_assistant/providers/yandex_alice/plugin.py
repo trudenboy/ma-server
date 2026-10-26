@@ -29,9 +29,14 @@ from ya_dialogs_api import SkillCreationArtifacts, dump_artifacts
 from ya_passport_auth.exceptions import InvalidCredentialsError
 from ya_passport_auth.ma import list_yandex_music_instances
 
+from music_assistant.helpers.plugin_engines import (
+    create_ai_engine_config_entries,
+    select_ai_engine,
+)
 from music_assistant.models.plugin import PluginProvider
 
 from .constants import (
+    CATEGORY_SETTINGS,
     CONF_ACTION_DELETE_SKILL,
     CONF_ACTION_EXPORT_MANIFEST,
     CONF_ACTION_IMPORT_MANIFEST,
@@ -40,6 +45,8 @@ from .constants import (
     CONF_ACTION_RESET_MANIFEST,
     CONF_ACTION_TEST_WEBHOOK,
     CONF_ACTION_VALIDATE_MANIFEST,
+    CONF_AI_ENGINE,
+    CONF_AI_FALLBACK,
     CONF_AUTH_USER_NAME,
     CONF_AUTH_X_TOKEN,
     CONF_DIALOG_AUTO_CREATE_ARTIFACTS,
@@ -92,6 +99,13 @@ class YandexAlicePlugin(PluginProvider):
         self._voice_continuation = bool(
             self.config.get_value(CONF_DIALOG_VOICE_CONTINUATION) or False
         )
+        self._ai_engine_uid: str | None = None
+        if self.config.get_value(CONF_AI_FALLBACK):
+            # An engine whose plugin is not loaded yet resolves to None here but
+            # stays configured; the webhook resolves it again on every question.
+            engine = await select_ai_engine(self, CONF_AI_ENGINE)
+            configured = str(self.config.get_value(CONF_AI_ENGINE) or "")
+            self._ai_engine_uid = engine.uid if engine is not None else configured or None
 
     async def loaded_in_mass(self) -> None:
         """Register the Dialogs webhook route once the webserver is up."""
@@ -107,6 +121,7 @@ class YandexAlicePlugin(PluginProvider):
             exposed_player_ids=self._exposed_player_ids,
             voice_continuation=self._voice_continuation,
             manifest_provider=manifest_provider,
+            ai_engine_uid=self._ai_engine_uid,
         )
         self._dialogs_handler.register_routes()
 
@@ -174,6 +189,9 @@ class YandexAlicePlugin(PluginProvider):
             manifest_paste=str(self.config.get_value(CONF_DIALOG_SKILL_OVERRIDE_PASTE) or ""),
             diagnostics=diagnostics_entries(
                 self.diagnostics_snapshot() if self._dialogs_handler is not None else None
+            ),
+            ai_engine_entries=await create_ai_engine_config_entries(
+                self.mass, CONF_AI_ENGINE, depends_on=CONF_AI_FALLBACK, category=CATEGORY_SETTINGS
             ),
         )
 

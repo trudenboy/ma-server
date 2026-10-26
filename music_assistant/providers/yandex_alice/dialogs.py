@@ -55,10 +55,27 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
+from music_assistant_models.enums import PlaybackState
+
+from music_assistant.helpers.plugin_engines import resolve_ai_engine
 
 from .constants import (
+    AI_INLINE_TIMEOUT,
+    AI_MAX_POLLS,
+    AI_QUERY_TIMEOUT,
     DIALOG_RESOLVE_TIMEOUT,
     DIALOG_WEBHOOK_BASE_PATH,
+)
+from .dialogs_ai import (
+    AISession,
+    AISessions,
+    build_prompt,
+    clip_text,
+    is_ai_question,
+    is_exit_phrase,
+    is_poll_phrase,
+    sanitize_answer,
+    starts_with_play_verb,
 )
 from .dialogs_control import (
     ParsedControl,
@@ -82,6 +99,7 @@ from .tts_dictionary import PHRASE_REPLACEMENTS, WORD_REPLACEMENTS
 
 if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
+    from music_assistant.models.plugin import AIEngine
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -180,6 +198,12 @@ def _has_screen(meta: Any) -> bool:
     return "screen" in interfaces
 
 
+def _message_id(session: dict[str, Any]) -> int | None:
+    """Return the Yandex ``session.message_id`` when it is an int."""
+    message_id = session.get("message_id")
+    return message_id if isinstance(message_id, int) else None
+
+
 def _without_pending(state: dict[str, Any]) -> dict[str, Any]:
     """
     Return a copy of `state` with disambiguation/elicitation keys removed.
@@ -263,6 +287,9 @@ _ORDINAL_LABELS: tuple[str, ...] = (
 _STATE_CACHE_TTL_SEC = 300  # 5 min — Alice session inactivity timeout
 _STATE_CACHE_MAX = 200
 
+_AI_ERROR_TEXT = "Не получилось получить ответ, попробуй спросить иначе."
+_AI_LOG_CLIP = 200
+
 
 class DialogsWebhookHandler:
     """Handles incoming voice-command webhook calls from a Yandex Dialogs skill."""
@@ -277,6 +304,7 @@ class DialogsWebhookHandler:
         voice_continuation: bool = False,
         logger: logging.Logger | None = None,
         manifest_provider: SkillManifestProvider | None = None,
+        ai_engine_uid: str | None = None,
     ) -> None:
         """
         Initialize the handler.
@@ -294,6 +322,9 @@ class DialogsWebhookHandler:
             Stop / pause-with-no-resume utterances still close the session
             via the existing control path.
         :param logger: Optional logger override.
+        :param manifest_provider: Skill manifest snapshot used for grammar intents.
+        :param ai_engine_uid: Configured AI engine uid; when set, conversational
+            questions are answered by that engine instead of the music search.
         """
         self._mass = mass
         self._skill_id = skill_id
@@ -303,6 +334,8 @@ class DialogsWebhookHandler:
         self._logger = logger or _LOGGER
         self._unregister_callbacks: list[Callable[[], None]] = []
         self._manifest_provider = manifest_provider or SkillManifestProvider(mass)
+        self._ai_engine_uid = ai_engine_uid
+        self._ai_sessions = AISessions()
         # In-process state cache; see _STATE_CACHE_TTL_SEC / _MAX.
         self._state_cache: OrderedDict[str, tuple[dict[str, Any], float]] = OrderedDict()
         # Diagnostics counters surfaced via ``get_diagnostics()`` on the
@@ -350,7 +383,8 @@ class DialogsWebhookHandler:
         self._logger.info("Dialogs webhook registered at %s", redacted)
 
     def unregister_routes(self) -> None:
-        """Unregister the webhook route."""
+        """Unregister the webhook route and cancel pending AI queries."""
+        self._ai_sessions.clear()
         for cb in self._unregister_callbacks:
             try:
                 cb()
@@ -505,7 +539,7 @@ class DialogsWebhookHandler:
                 end_session=False,
             )
 
-    async def _handle_authenticated_request(  # noqa: PLR0915
+    async def _handle_authenticated_request(  # noqa: C901, PLR0912, PLR0915
         self,
         *,
         body: dict[str, Any],
@@ -673,6 +707,19 @@ class DialogsWebhookHandler:
         nlu_entities = nlu.get("entities") if isinstance(nlu.get("entities"), list) else None
         nlu_intents = nlu.get("intents") if isinstance(nlu.get("intents"), dict) else None
 
+        # A query still running from the previous turn: a short follow-up
+        # ("ну что") collects it, anything else — including any phrase Yandex
+        # matched to an intent — abandons it.
+        ai_session = self._ai_sessions.get(str(session.get("session_id") or ""))
+        if pending_ai := self._collect_pending_ai(
+            session=session,
+            ai_session=ai_session,
+            command=command,
+            is_intent=bool(nlu_intents),
+            session_state_in=session_state_in,
+        ):
+            return pending_ai
+
         # Built-in YANDEX.* intents — emitted automatically by Yandex once
         # any custom grammar is declared. Two we care about today:
         #
@@ -764,6 +811,21 @@ class DialogsWebhookHandler:
                 has_screen=has_screen,
             )
 
+        if (
+            not awaiting_in
+            and not isinstance(pending_in, dict)
+            and (
+                ai_answer := await self._maybe_answer_with_ai(
+                    session=session,
+                    ai_session=ai_session,
+                    command=command,
+                    default_id=default_id,
+                    session_state_in=session_state_in,
+                )
+            )
+        ):
+            return ai_answer
+
         # P0.4 — awaiting-query re-entry. If the previous turn asked "Что
         # включить?" and the new utterance isn't a control phrase, treat
         # it as the missing query slot. Prepend a synthetic "включи " so
@@ -831,6 +893,196 @@ class DialogsWebhookHandler:
             app_state_in=app_state_in,
             has_screen=has_screen,
         )
+
+    # -------------------------------------------------------------------
+    # AI answers
+    # -------------------------------------------------------------------
+
+    def _collect_pending_ai(
+        self,
+        *,
+        session: dict[str, Any],
+        ai_session: AISession | None,
+        command: str,
+        is_intent: bool,
+        session_state_in: dict[str, Any],
+    ) -> web.Response | None:
+        """Answer "ну что" for a still-tracked query; any other phrase abandons it."""
+        if ai_session is None or ai_session.task is None:
+            return None
+        if not is_intent and is_poll_phrase(command):
+            return self._deliver_pending_ai(
+                session=session, ai_session=ai_session, session_state_in=session_state_in
+            )
+        ai_session.cancel_pending()
+        return None
+
+    async def _maybe_answer_with_ai(
+        self,
+        *,
+        session: dict[str, Any],
+        ai_session: AISession | None,
+        command: str,
+        default_id: str | None,
+        session_state_in: dict[str, Any],
+    ) -> web.Response | None:
+        """Answer a question (or an AI-conversation follow-up) via the AI engine."""
+        session_id = str(session.get("session_id") or "")
+        if not self._ai_engine_uid or not session_id:
+            return None
+        in_conversation = ai_session is not None and ai_session.is_follow_up(
+            session.get("message_id")
+        )
+        if in_conversation and is_exit_phrase(command):
+            self._ai_sessions.drop(session_id)
+            text = "Хорошо, обращайся."
+            return self._yandex_response(
+                incoming_session=session,
+                text=text,
+                tts=_tts_for(text),
+                end_session=True,
+                session_state=session_state_in,
+            )
+        if not is_ai_question(command) and not (
+            in_conversation and not starts_with_play_verb(command)
+        ):
+            return None
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(AI_INLINE_TIMEOUT):
+                engine = await resolve_ai_engine(self._mass, self._ai_engine_uid)
+        except TimeoutError:
+            self._logger.warning("AI engine lookup timed out — no answer this turn")
+            return self._ai_text_response(session, _AI_ERROR_TEXT, session_state_in)
+        if engine is None:
+            self._logger.debug("AI engine %s unavailable — using music search", self._ai_engine_uid)
+            return None
+        return await self._answer_with_ai(
+            session=session,
+            engine=engine,
+            command=command,
+            default_id=default_id,
+            session_state_in=session_state_in,
+            budget=AI_INLINE_TIMEOUT - (time.monotonic() - started),
+        )
+
+    async def _answer_with_ai(
+        self,
+        *,
+        session: dict[str, Any],
+        engine: AIEngine,
+        command: str,
+        default_id: str | None,
+        session_state_in: dict[str, Any],
+        budget: float,
+    ) -> web.Response:
+        """Ask the AI engine; reply inline or say "думаю" and finish later."""
+        ai_session = self._ai_sessions.get_or_create(str(session.get("session_id") or ""))
+        prompt = build_prompt(
+            command,
+            history=ai_session.history,
+            now_playing=self._now_playing_for_ai(default_id),
+        )
+        self._logger.debug("AI question: %r", command[:_AI_LOG_CLIP])
+        task = self._mass.create_task(self._query_ai(engine, prompt))
+        ai_session.start(command, task)
+        done, _ = await asyncio.wait({task}, timeout=max(budget, 0))
+        if done:
+            return self._ai_reply(
+                session=session, ai_session=ai_session, session_state_in=session_state_in
+            )
+        ai_session.last_ai_turn = _message_id(session)
+        return self._ai_text_response(session, "Секунду, думаю… Скажи «ну что».", session_state_in)
+
+    async def _query_ai(self, engine: AIEngine, prompt: str) -> str | None:
+        """Run one AI query; return None (and log) on failure or timeout."""
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(AI_QUERY_TIMEOUT):
+                answer = str(await engine.provider.ai_query(prompt, engine_id=engine.id) or "")
+        except Exception as err:
+            self._logger.warning(
+                "AI query via %s failed after %.1fs: %s",
+                engine.name,
+                time.monotonic() - started,
+                type(err).__name__,
+            )
+            return None
+        self._logger.info("AI answer via %s in %.1fs", engine.name, time.monotonic() - started)
+        self._logger.debug("AI answer: %r", answer[:_AI_LOG_CLIP])
+        return answer
+
+    def _deliver_pending_ai(
+        self,
+        *,
+        session: dict[str, Any],
+        ai_session: AISession,
+        session_state_in: dict[str, Any],
+    ) -> web.Response:
+        """Answer a "ну что" follow-up for a query started on an earlier turn."""
+        task = ai_session.task
+        if task is not None and task.done():
+            return self._ai_reply(
+                session=session, ai_session=ai_session, session_state_in=session_state_in
+            )
+        if ai_session.polls < AI_MAX_POLLS:
+            ai_session.polls += 1
+            ai_session.last_ai_turn = _message_id(session)
+            text = "Ещё думаю… Скажи «ну что» чуть позже."
+        else:
+            ai_session.cancel_pending()
+            text = _AI_ERROR_TEXT
+        return self._ai_text_response(session, text, session_state_in)
+
+    def _ai_reply(
+        self,
+        *,
+        session: dict[str, Any],
+        ai_session: AISession,
+        session_state_in: dict[str, Any],
+    ) -> web.Response:
+        """Speak the finished answer and add it to the conversation history."""
+        raw = ai_session.take_answer()
+        answer = sanitize_answer(raw) if raw else ""
+        if answer:
+            ai_session.remember(ai_session.question, answer)
+            ai_session.last_ai_turn = _message_id(session)
+            text = answer
+        else:
+            text = _AI_ERROR_TEXT
+        return self._ai_text_response(session, text, session_state_in)
+
+    def _ai_text_response(
+        self, session: dict[str, Any], text: str, session_state_in: dict[str, Any]
+    ) -> web.Response:
+        """Speak an AI-path reply and keep the session open for follow-ups."""
+        return self._yandex_response(
+            incoming_session=session,
+            text=text,
+            tts=clip_text(_tts_for(text)),
+            end_session=False,
+            session_state=session_state_in,
+        )
+
+    def _now_playing_for_ai(self, default_id: str | None) -> str | None:
+        """Return the track on the user's player, or the single playing one."""
+        players = list_exposed_players(self._mass, exposed_ids=self._exposed_player_ids)
+        target = next((p for p in players if p.player_id == default_id), None)
+        if target is None:
+            playing = [
+                p for p in players if getattr(p, "playback_state", None) == PlaybackState.PLAYING
+            ]
+            target = playing[0] if len(playing) == 1 else None
+        if target is None:
+            return None
+        try:
+            queue = self._mass.player_queues.get(target.player_id)
+        except Exception:
+            self._logger.debug("player_queues.get failed", exc_info=True)
+            return None
+        current = getattr(queue, "current_item", None)
+        name = getattr(current, "name", None)
+        return name if isinstance(name, str) and name else None
 
     # -------------------------------------------------------------------
     # Play dispatch (slot-elicit + resolve + disambiguate + play)

@@ -39,6 +39,7 @@ from .constants import (
     CONF_ACTION_RESET_MANIFEST,
     CONF_ACTION_TEST_WEBHOOK,
     CONF_ACTION_VALIDATE_MANIFEST,
+    CONF_AI_FALLBACK,
     CONF_DIALOG_SKILL_OVERRIDE_PASTE,
     CONF_EXPOSED_PLAYERS,
     CONF_INSTANCE_NAME,
@@ -307,6 +308,19 @@ def _manifest_block(
     return tuple(entries)
 
 
+def _ai_block(engine_entries: tuple[ConfigEntry, ...]) -> tuple[ConfigEntry, ...]:
+    """AI answers toggle followed by MA's engine picker (shown while the toggle is on)."""
+    return (
+        ConfigEntry(
+            key=CONF_AI_FALLBACK,
+            type=ConfigEntryType.BOOLEAN,
+            required=False,
+            default_value=False,
+        ),
+        *engine_entries,
+    )
+
+
 def _settings_block(
     *,
     player_options: list[ConfigValueOption],
@@ -369,6 +383,7 @@ def build_options_entries(
     manifest_status: ManifestStatus,
     manifest_paste: str,
     diagnostics: tuple[ConfigEntry, ...],
+    ai_engine_entries: tuple[ConfigEntry, ...] = (),
 ) -> tuple[ConfigEntry, ...]:
     """
     Compose the options page.
@@ -381,6 +396,7 @@ def build_options_entries(
     :param manifest_status: Bundled / override state of the skill manifest.
     :param manifest_paste: Saved manifest paste field value.
     :param diagnostics: Webhook diagnostics entries.
+    :param ai_engine_entries: MA's AI engine picker, shown while AI answers are on.
     """
     return (
         *_stamp(_account_block(account), CATEGORY_AUTHORIZATION),
@@ -393,6 +409,7 @@ def build_options_entries(
                     skill_name=skill.name,
                     use_different_instance_name=use_different_instance_name,
                 ),
+                *_ai_block(ai_engine_entries),
                 *_manifest_block(status=manifest_status, paste_value=manifest_paste),
             ),
             CATEGORY_SETTINGS,

@@ -122,6 +122,14 @@
       "label": "Voice-controllable players",
       "description": "Players Alice is allowed to control. Leave empty to expose all players known to MA — Alice will then accept voice commands for any player by name."
     },
+    "ai_fallback": {
+      "label": "Answer questions with AI",
+      "description": "Send questions that are not music commands («почему небо голубое», «расскажи про эту группу») to a Music Assistant AI engine and let Alice speak the answer. Follow-up questions keep the conversation going; «включи …» still plays music."
+    },
+    "ai_engine": {
+      "label": "AI engine",
+      "description": "AI engine that answers the questions. Engines come from AI plugins such as OpenAI-compatible."
+    },
     "use_different_instance_name": {
       "label": "Use a different MA-side instance name",
       "description": "By default the Skill name is also used as the instance name shown in MA's provider list. Turn this on to specify a different MA-side name."

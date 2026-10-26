@@ -170,3 +170,14 @@ YANDEX_OAUTH_URL = (
     "https://oauth.yandex.ru/authorize?response_type=token"
     "&client_id=c473ca268cd749d3a8371351a8f2bcbd"
 )
+
+# ---------------------------------------------------------------------------
+# AI answers
+# ---------------------------------------------------------------------------
+CONF_AI_FALLBACK = "ai_fallback"
+CONF_AI_ENGINE = "ai_engine"
+# How long the webhook waits for the AI engine before replying "думаю" and
+# delivering the answer on the next turn; stays inside Yandex's 3 s cap.
+AI_INLINE_TIMEOUT = 2.3
+AI_QUERY_TIMEOUT = 30
+AI_MAX_POLLS = 2

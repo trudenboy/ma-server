@@ -13,11 +13,14 @@ from ya_passport_auth.ma import BORROW_SOURCE_OWN
 from music_assistant.providers.yandex_alice import plugin as plugin_module
 from music_assistant.providers.yandex_alice import setup
 from music_assistant.providers.yandex_alice.constants import (
+    CATEGORY_SETTINGS,
     CONF_ACTION_DELETE_SKILL,
     CONF_ACTION_IMPORT_MANIFEST,
     CONF_ACTION_OPEN_DEV_CONSOLE,
     CONF_ACTION_REFRESH_STATUS,
     CONF_ACTION_TEST_WEBHOOK,
+    CONF_AI_ENGINE,
+    CONF_AI_FALLBACK,
     CONF_AUTH_USER_NAME,
     CONF_AUTH_X_TOKEN,
     CONF_DIALOG_PUBLICATION_STATUS,
@@ -235,6 +238,53 @@ async def test_replace_manifest_provider_updates_running_handler(tmp_path: Path)
     assert plugin._dialogs_handler._manifest_provider is replacement
 
 
+@pytest.mark.asyncio
+async def test_ai_answers_disabled_by_default(tmp_path: Path) -> None:
+    """Without the AI toggle the webhook handler gets no AI engine."""
+    plugin, _mass = _plugin(tmp_path, values={CONF_AI_ENGINE: "openai--gpt"})
+    await plugin.handle_async_init()
+    await plugin.loaded_in_mass()
+
+    assert plugin._dialogs_handler is not None
+    assert plugin._dialogs_handler._ai_engine_uid is None
+
+
+@pytest.mark.asyncio
+async def test_ai_answers_use_selected_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the AI toggle on, the selected (or adopted) engine reaches the handler."""
+    selected: list[str] = []
+
+    async def _select(_provider: object, key: str, **_kwargs: object) -> MagicMock:
+        selected.append(key)
+        engine = MagicMock()
+        engine.uid = "openai--gpt"
+        return engine
+
+    monkeypatch.setattr(plugin_module, "select_ai_engine", _select)
+    plugin, _mass = _plugin(tmp_path, values={CONF_AI_FALLBACK: True})
+    await plugin.handle_async_init()
+    await plugin.loaded_in_mass()
+
+    assert selected == [CONF_AI_ENGINE]
+    assert plugin._dialogs_handler is not None
+    assert plugin._dialogs_handler._ai_engine_uid == "openai--gpt"
+
+
+@pytest.mark.asyncio
+async def test_ai_answers_keep_configured_engine_until_it_loads(tmp_path: Path) -> None:
+    """An engine that is not loaded yet stays configured and is resolved per request."""
+    plugin, _mass = _plugin(
+        tmp_path, values={CONF_AI_FALLBACK: True, CONF_AI_ENGINE: "openai--gpt"}
+    )
+    await plugin.handle_async_init()
+    await plugin.loaded_in_mass()
+
+    assert plugin._dialogs_handler is not None
+    assert plugin._dialogs_handler._ai_engine_uid == "openai--gpt"
+
+
 # ---------------------------------------------------------------------------
 # Options page
 # ---------------------------------------------------------------------------
@@ -400,3 +450,17 @@ async def test_unknown_action_is_unavailable(tmp_path: Path) -> None:
     plugin, _mass = _plugin(tmp_path)
     with pytest.raises(ActionUnavailable):
         await plugin.handle_config_action("sign_in")
+
+
+@pytest.mark.asyncio
+async def test_options_page_has_ai_answer_settings(tmp_path: Path) -> None:
+    """The AI toggle and the engine picker (shown only when on) live under Settings."""
+    plugin, _mass = _plugin(tmp_path)
+    entries = {entry.key: entry for entry in await plugin.get_config_entries()}
+    toggle = entries[CONF_AI_FALLBACK]
+    picker = entries[CONF_AI_ENGINE]
+    assert toggle.type.value == "boolean"
+    assert toggle.default_value is False
+    assert toggle.category == CATEGORY_SETTINGS
+    assert picker.depends_on == CONF_AI_FALLBACK
+    assert picker.category == CATEGORY_SETTINGS
