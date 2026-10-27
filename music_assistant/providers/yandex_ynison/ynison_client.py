@@ -86,15 +86,6 @@ def _local_time(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _navigation_identity(queue: dict[str, Any]) -> dict[str, Any]:
-    """Return the queue fields that must not change between a navigation decision and its send."""
-    return {
-        key: value
-        for key, value in queue.items()
-        if key not in ("version", "options", "shuffle_optional")
-    }
-
-
 def _current_playable_id(queue: dict[str, Any]) -> Any:
     """Return the playable id at the current index of a queue, or ``None``."""
     playables = queue.get("playable_list") or []
@@ -102,27 +93,6 @@ def _current_playable_id(queue: dict[str, Any]) -> Any:
     if isinstance(index, int) and 0 <= index < len(playables):
         return playables[index].get("playable_id")
     return None
-
-
-def _keeps_navigation_target(
-    expected: dict[str, Any], queue: dict[str, Any], device_id: str
-) -> bool:
-    """
-    Return whether ``queue`` still holds the item a navigation decision was made for.
-
-    Besides an unchanged queue, this accepts our own append or window trim of the
-    same entity, which keeps the same item current at a possibly shifted index.
-    """
-    identity = _navigation_identity(queue)
-    if identity == expected:
-        return True
-    return (
-        (queue.get("version") or {}).get("device_id") == device_id
-        and identity.get("entity_id") == expected.get("entity_id")
-        and identity.get("entity_type") == expected.get("entity_type")
-        and _current_playable_id(identity) is not None
-        and _current_playable_id(identity) == _current_playable_id(expected)
-    )
 
 
 def normalize_player_state_timestamps(player_state: dict[str, Any]) -> None:
@@ -173,9 +143,12 @@ class _StatusWatermark:
 class NavigationBaseline:
     """Playback that a queue navigation decision was made for."""
 
-    queue: dict[str, Any]
+    # Queue lineage: changes only when a queue from another device is adopted.
+    lineage: int
+    playable_id: Any
     active_device_id: str | None
     paused: bool
+    navigation_version: int | None
 
 
 @dataclass
@@ -281,6 +254,9 @@ class YnisonClient:
         self._pending_queue_until = 0.0
         self._last_queue_version: int | None = None
         self._queue_epoch = 0
+        self._queue_lineage = 0
+        self._navigation_version: int | None = None
+        self._confirmed_queue_version: int | None = None
         self._message_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
@@ -583,13 +559,14 @@ class YnisonClient:
         mutation: Callable[[dict[str, Any]], bool | None],
         *,
         expected_generation: int | None = None,
-    ) -> None:
+    ) -> int | None:
         """
         Serialize a queue change against the latest successfully sent queue.
 
         :param mutation: Synchronous edit of a private complete player-state copy.
             Return ``False`` to leave the queue unchanged without publishing.
         :param expected_generation: Queue generation that an asynchronous result belongs to.
+        :return: Version of the published queue, or ``None`` when nothing was sent.
         """
         requested_epoch = self._queue_epoch if expected_generation is None else expected_generation
         async with self._send_lock:
@@ -598,7 +575,7 @@ class YnisonClient:
             player_state = deepcopy(self.state.player_state)
             player_state["player_queue"] = self.queue_snapshot()
             if mutation(player_state) is False:
-                return
+                return None
             queue = player_state.get("player_queue", {})
             queue["version"] = make_version_block(self.device_id)
             epoch = self._queue_epoch
@@ -608,28 +585,49 @@ class YnisonClient:
             self._pending_queue = deepcopy(queue)
             self._pending_queue_until = time.monotonic() + 30
             self._last_queue_version = int(queue["version"]["version"])
+            return self._last_queue_version
 
     def navigation_baseline(self) -> NavigationBaseline:
         """Capture the playback that a later :meth:`advance_queue` must still find."""
         return NavigationBaseline(
-            queue=_navigation_identity(self.queue_snapshot()),
+            lineage=self._queue_lineage,
+            playable_id=_current_playable_id(self.queue_snapshot()),
             active_device_id=self.state.active_device_id,
             paused=self.state.is_paused,
+            navigation_version=self._navigation_version,
         )
 
     def is_current_playback(self, baseline: NavigationBaseline) -> bool:
         """
         Return whether navigation decided for ``baseline`` still applies.
 
-        Our own appends and window trims keep it valid; a queue from another
-        device, an active-device change or a pause change do not.
+        Our own appends, window trims and option edits keep it valid; a queue
+        from another device, an active-device change or a pause change do not.
 
         :param baseline: Playback captured with :meth:`navigation_baseline`.
         """
+        return self._matches_baseline(baseline, self.queue_snapshot())
+
+    def navigation_confirmed(self, baseline: NavigationBaseline) -> bool:
+        """
+        Return whether navigation published after ``baseline`` has settled.
+
+        It settles once Ynison echoes that navigation, or when another device
+        replaces the queue or becomes active, which supersedes it.
+
+        :param baseline: Playback captured before the navigation was published.
+        """
+        if (
+            self._queue_lineage != baseline.lineage
+            or self.state.active_device_id != baseline.active_device_id
+        ):
+            return True
+        version = self._navigation_version
         return (
-            self.state.active_device_id == baseline.active_device_id
-            and self.state.is_paused == baseline.paused
-            and _keeps_navigation_target(baseline.queue, self.queue_snapshot(), self.device_id)
+            version is not None
+            and version != baseline.navigation_version
+            and self._confirmed_queue_version is not None
+            and self._confirmed_queue_version >= version
         )
 
     async def advance_queue(
@@ -657,20 +655,16 @@ class YnisonClient:
 
         def mutate(player_state: dict[str, Any]) -> bool | None:
             nonlocal outcome
-            if (
-                not _keeps_navigation_target(
-                    expected.queue, player_state["player_queue"], self.device_id
-                )
-                or self.state.active_device_id != expected.active_device_id
-                or self.state.is_paused != expected.paused
-            ):
+            if not self._matches_baseline(expected, player_state["player_queue"]):
                 raise ResourceTemporarilyUnavailable("Ynison playback changed during navigation")
             outcome = plan_navigation(
                 player_state, natural=natural, duration_ms=duration_ms, device_id=self.device_id
             )
             return False if outcome == "radio" else None
 
-        await self.mutate_player_state(mutate)
+        version = await self.mutate_player_state(mutate)
+        if version is not None and outcome in ("change", "restart"):
+            self._navigation_version = version
         return outcome
 
     async def go_to_index(
@@ -693,7 +687,9 @@ class YnisonClient:
         def mutate(player_state: dict[str, Any]) -> None:
             set_index(player_state, index, device_id=self.device_id, items=items)
 
-        await self.mutate_player_state(mutate, expected_generation=expected_generation)
+        version = await self.mutate_player_state(mutate, expected_generation=expected_generation)
+        if version is not None:
+            self._navigation_version = version
 
     async def publish_items(
         self,
@@ -826,6 +822,15 @@ class YnisonClient:
             bool(status.get("paused", True)),
             time.monotonic(),
             status.get("version") or {},
+        )
+
+    def _matches_baseline(self, baseline: NavigationBaseline, queue: dict[str, Any]) -> bool:
+        """Return whether ``queue`` and the current playback are still those of ``baseline``."""
+        return (
+            self._queue_lineage == baseline.lineage
+            and self.state.active_device_id == baseline.active_device_id
+            and self.state.is_paused == baseline.paused
+            and _current_playable_id(queue) == baseline.playable_id
         )
 
     def _channel_ready(self) -> bool:
@@ -1216,6 +1221,27 @@ class YnisonClient:
         self._last_queue_version = None
         self._queue_epoch += 1
 
+    def _accept_queue(self, queue: dict[str, Any], current: dict[str, Any] | None) -> bool:
+        """
+        Track the lineage and our confirmed versions for an inbound queue.
+
+        :return: ``False`` for an echo of our own queue older than our newest send.
+        """
+        version = queue.get("version", {})
+        number = str(version.get("version", ""))
+        if version.get("device_id") != self.device_id:
+            if queue != current:
+                self._queue_lineage += 1
+                self._reset_pending_queue()
+            return True
+        if number.isdigit():
+            self._confirmed_queue_version = max(self._confirmed_queue_version or 0, int(number))
+        if self._last_queue_version is not None:
+            if number.isdigit() and int(number) < self._last_queue_version:
+                return False
+            self._pending_queue = None
+        return True
+
     def _parse_state(self, data: dict[str, Any]) -> None:
         """Parse PutYnisonStateResponse into YnisonState."""
         old_track = self.state.current_track_id
@@ -1240,16 +1266,10 @@ class YnisonClient:
             is_echo, suppress_status = self._classify_state_as_echo(incoming_ps)
             existing_ps = self.state.player_state
             for key, value in incoming_ps.items():
-                if key == "player_queue":
-                    version = value.get("version", {})
-                    if version.get("device_id") != self.device_id:
-                        if value != existing_ps.get("player_queue"):
-                            self._reset_pending_queue()
-                    elif self._last_queue_version is not None:
-                        number = str(version.get("version", ""))
-                        if number.isdigit() and int(number) < self._last_queue_version:
-                            continue
-                        self._pending_queue = None
+                if key == "player_queue" and not self._accept_queue(
+                    value, existing_ps.get("player_queue")
+                ):
+                    continue
                 if key == "status":
                     self.state.status_is_relay = self._is_known_status(value)
                 if suppress_status and key == "status":

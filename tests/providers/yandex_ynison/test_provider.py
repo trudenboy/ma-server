@@ -1785,9 +1785,37 @@ class TestYnisonStateHandling:
             current_playable_index=1,
             playable_list=[{"playable_id": "same"}, {"playable_id": "same"}],
         )
-        provider._ynison = _mock_ynison(state)
+        client = YnisonClient(
+            SecretStr("test"), YnisonDeviceInfo("dev1", "Test"), AsyncMock(), MagicMock()
+        )
+        client.state = state
+        baseline = client.navigation_baseline()
+        provider._ynison = client
+        client._navigation_version = 2
+        client._confirmed_queue_version = 2
 
-        assert await provider._wait_for_track_change(("same", 0), timeout=0.1)
+        assert await provider._wait_for_track_change("same", baseline, timeout=0.1)
+
+    async def test_trim_echo_does_not_end_the_wait_for_navigation(self) -> None:
+        """A shifted index of the finished track is a trim, not the published navigation."""
+        provider = _make_provider()
+        client = YnisonClient(
+            SecretStr("test"), YnisonDeviceInfo("dev1", "Test"), AsyncMock(), MagicMock()
+        )
+        client.state = _make_ynison_state(
+            current_playable_index=5,
+            playable_list=[{"playable_id": f"t{i}"} for i in range(5)] + [{"playable_id": "done"}],
+        )
+        baseline = client.navigation_baseline()
+        client._navigation_version = 2
+        client.state.player_state["player_queue"] = {
+            "current_playable_index": 3,
+            "playable_list": [{"playable_id": f"t{i}"} for i in range(2, 5)]
+            + [{"playable_id": "done"}],
+        }
+        provider._ynison = client
+
+        assert not await provider._wait_for_track_change("done", baseline, timeout=0.1)
 
 
 # ------------------------------------------------------------------
@@ -2573,6 +2601,9 @@ def _wire_queue_mutation(mock: MagicMock) -> None:
 
     mock.queue_snapshot.side_effect = snapshot
     mock.queue_generation = 0
+    mock._queue_lineage = 0
+    mock._navigation_version = None
+    mock._confirmed_queue_version = None
 
     async def mutate(mutation: Any, *, expected_generation: int | None = None) -> None:
         nonlocal pending
@@ -2594,6 +2625,8 @@ def _wire_queue_mutation(mock: MagicMock) -> None:
         "go_to_index",
         "publish_items",
         "is_current_playback",
+        "navigation_confirmed",
+        "_matches_baseline",
         "set_repeat_mode",
         "set_shuffle",
     ):

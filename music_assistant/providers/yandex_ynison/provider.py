@@ -570,7 +570,7 @@ class YandexYnisonProvider(PluginProvider):
                 )
                 if natural_end:
                     self.logger.info("Track %s finished, advancing to next", track_id)
-                    old_index = self._ynison.state.current_index
+                    baseline = self._ynison.navigation_baseline()
                     completion = await self._signal_track_completion()
                     if completion == "restart":
                         playback.request_restart(0, RestartReason.REPEAT, grace=False)
@@ -578,7 +578,7 @@ class YandexYnisonProvider(PluginProvider):
                         # Another device changed playback meanwhile; follow its state.
                         pass
                     elif completion in ("stop", "failed") or not await self._wait_for_track_change(
-                        (track_id, old_index)
+                        track_id, baseline
                     ):
                         playback.request_stop(StopReason.QUEUE_END)
                         break
@@ -670,19 +670,20 @@ class YandexYnisonProvider(PluginProvider):
         self._playback.release(owner_player_id, stream_session_id)
 
     async def _wait_for_track_change(
-        self, old_track: str | tuple[str, int], timeout: float = 30.0
+        self,
+        old_track_id: str,
+        baseline: NavigationBaseline | None = None,
+        timeout: float = 30.0,
     ) -> bool:
         """
         Wait for Ynison to report a different track, ignoring echoes.
 
         After _signal_track_completion sends update_playing_status, Ynison
         echoes back the same track with updated progress.  Only return True
-        once current_track_id actually differs from old_track_id.
+        once current_track_id actually differs from old_track_id, or, with a
+        ``baseline``, once the navigation published after it has settled. A
+        shifted index alone may be our own window trim, so it is not proof.
         """
-        if isinstance(old_track, tuple):
-            old_track_id, old_index = old_track
-        else:
-            old_track_id, old_index = old_track, None
         deadline = time.monotonic() + timeout
         while not self._playback.stop_requested():
             # Check state BEFORE consuming the wake-up.  Ynison may have already
@@ -692,13 +693,10 @@ class YandexYnisonProvider(PluginProvider):
             # Check is race-free: no await between the read and clear() below.
             # None means empty/unreadable queue — treat as "not advanced."
             if self._ynison:
-                state = self._ynison.state
-                current = state.current_track_id
-                current_index = state.current_index
-                if current is not None and (
-                    current != old_track_id
-                    or (old_index is not None and current_index != old_index)
-                ):
+                current = self._ynison.state.current_track_id
+                if current is not None and current != old_track_id:
+                    return True
+                if baseline is not None and self._ynison.navigation_confirmed(baseline):
                     return True
             self._playback.consume_restart()
             remaining = deadline - time.monotonic()
