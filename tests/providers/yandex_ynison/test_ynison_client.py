@@ -3306,20 +3306,42 @@ class TestQueueCommands:
         )
         assert self._sent_queue()["current_playable_index"] == 1
 
-    async def test_trim_reports_the_shift_before_sending(self, client: YnisonClient) -> None:
-        """The window trim is announced before the edit leaves, so its echo cannot outrun it."""
+    async def test_own_trim_echo_keeps_the_current_item(self, client: YnisonClient) -> None:
+        """The echo of our window trim moves the index but keeps the same item current."""
         queue = client.state.player_state["player_queue"]
         queue["playable_list"] = [{"playable_id": f"t{i}"} for i in range(200)]
         queue["current_playable_index"] = 199
-        sent_before: list[int] = []
-
-        def on_trim(dropped: int) -> None:
-            sent_before.append(self.mock_ws.send_str.await_count)
-            assert dropped == 1
-
         items = [*queue["playable_list"], {"playable_id": "n"}]
-        assert await client.publish_items(items, on_trim=on_trim) == 1
-        assert sent_before == [0]
+        assert await client.publish_items(items) == 1
+
+        client._parse_state({"player_state": {"player_queue": self._sent_queue()}})
+
+        assert client.state.current_index == 198
+        assert client.state.current_item_kept is True
+
+    async def test_navigation_echo_during_the_send_is_navigation(
+        self, client: YnisonClient
+    ) -> None:
+        """Navigation is registered before it is sent, so an early echo is recognised."""
+        baseline = client.navigation_baseline()
+
+        async def echo_while_sending(raw: str) -> None:
+            queue = json.loads(raw)["update_player_state"]["player_state"]["player_queue"]
+            client._parse_state({"player_state": {"player_queue": queue}})
+
+        self.mock_ws.send_str.side_effect = echo_while_sending
+        assert await client.advance_queue(natural=True, duration_ms=9000) == "change"
+
+        assert client.state.current_item_kept is False
+        assert client.navigation_confirmed(baseline)
+
+    def test_estimated_progress_extrapolates_the_server_status(self, client: YnisonClient) -> None:
+        """The server-known position advances with time while playing."""
+        with patch(
+            "music_assistant.providers.yandex_ynison.ynison_client.time.monotonic",
+            return_value=time.monotonic() + 3,
+        ):
+            assert 2900 <= client.estimated_progress_ms() <= 3100
 
     def test_peer_queue_is_not_the_current_playback(self, client: YnisonClient) -> None:
         """A queue from another device replaces the playback a decision was made for."""

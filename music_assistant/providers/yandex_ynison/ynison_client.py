@@ -251,6 +251,10 @@ class YnisonState:
     # Status is published only on change, so such a status carries a
     # deliberately stale position.
     status_is_relay: bool = False
+    # True iff the most recent update was the echo of our own queue edit that
+    # kept the current item (an append, window trim or option change), so a
+    # shifted index is the same occurrence, not navigation.
+    current_item_kept: bool = False
 
     @property
     def current_track_id(self) -> str | None:
@@ -638,6 +642,7 @@ class YnisonClient:
         mutation: Callable[[dict[str, Any]], bool | None],
         *,
         expected_generation: int | None = None,
+        navigation: bool = False,
     ) -> int | None:
         """
         Serialize a queue change against the latest successfully sent queue.
@@ -645,6 +650,8 @@ class YnisonClient:
         :param mutation: Synchronous edit of a private complete player-state copy.
             Return ``False`` to leave the queue unchanged without publishing.
         :param expected_generation: Queue generation that an asynchronous result belongs to.
+        :param navigation: Whether the edit moves the current item; it is registered
+            before sending so that an early echo is recognised as navigation.
         :return: Version of the published queue, or ``None`` when nothing was sent.
         """
         requested_epoch = self._queue_epoch if expected_generation is None else expected_generation
@@ -657,6 +664,8 @@ class YnisonClient:
                 return None
             queue = player_state.get("player_queue", {})
             queue["version"] = make_version_block(self.device_id)
+            if navigation:
+                self._navigation_version = int(queue["version"]["version"])
             epoch = self._queue_epoch
             await self._send_locked(self._player_state_message(player_state), strict=True)
             if epoch != self._queue_epoch:
@@ -665,6 +674,14 @@ class YnisonClient:
             self._pending_queue_until = time.monotonic() + 30
             self._last_queue_version = int(queue["version"]["version"])
             return self._last_queue_version
+
+    def estimated_progress_ms(self) -> int:
+        """Return the server-known position of the current item, extrapolated to now."""
+        baseline = self._status_baseline
+        if baseline is None:
+            return self.state.progress_ms
+        progress = baseline.expected_progress_ms(time.monotonic())
+        return min(progress, baseline.duration_ms) if baseline.duration_ms > 0 else progress
 
     def navigation_baseline(self) -> NavigationBaseline:
         """Capture the playback that a later :meth:`advance_queue` must still find."""
@@ -741,9 +758,7 @@ class YnisonClient:
             )
             return False if outcome == NavigationOutcome.RADIO else None
 
-        version = await self.mutate_player_state(mutate)
-        if version is not None and outcome in (NavigationOutcome.CHANGE, NavigationOutcome.RESTART):
-            self._navigation_version = version
+        await self.mutate_player_state(mutate, navigation=True)
         return outcome
 
     async def go_to_index(
@@ -766,24 +781,21 @@ class YnisonClient:
         def mutate(player_state: dict[str, Any]) -> None:
             set_index(player_state, index, device_id=self.device_id, items=items)
 
-        version = await self.mutate_player_state(mutate, expected_generation=expected_generation)
-        if version is not None:
-            self._navigation_version = version
+        await self.mutate_player_state(
+            mutate, expected_generation=expected_generation, navigation=True
+        )
 
     async def publish_items(
         self,
         items: list[dict[str, Any]],
         *,
         expected_generation: int | None = None,
-        on_trim: Callable[[int], None] | None = None,
     ) -> int | None:
         """
         Publish an appended playable list without moving, while this device is active.
 
         :param items: Current playables followed by appended ones.
         :param expected_generation: Queue generation the items were fetched for.
-        :param on_trim: Called with the number of leading items the window drops,
-            before the edit is sent, so its echo cannot arrive first.
         :return: Leading items dropped by the window (the current index moved down
             by that much), or ``None`` when another device is active and nothing
             was sent.
@@ -797,8 +809,6 @@ class YnisonClient:
         def mutate(player_state: dict[str, Any]) -> None:
             nonlocal dropped
             dropped = replace_items(player_state, items)
-            if dropped and on_trim is not None:
-                on_trim(dropped)
 
         await self.mutate_player_state(mutate, expected_generation=expected_generation)
         return dropped
@@ -1273,6 +1283,12 @@ class YnisonClient:
         """
         version = queue.get("version", {})
         number = str(version.get("version", ""))
+        self.state.current_item_kept = (
+            version.get("device_id") == self.device_id
+            and number != str(self._navigation_version)
+            and current is not None
+            and _current_playable_id(queue) == _current_playable_id(current)
+        )
         if version.get("device_id") != self.device_id:
             if queue != current:
                 self._queue_lineage += 1
@@ -1299,6 +1315,7 @@ class YnisonClient:
         # objects, so merging nested dicts would retain stale keys that are
         # absent from the update.
         incoming_ps = data.get("player_state")
+        self.state.current_item_kept = False
         # A frame without a status keeps the retained one, which is already known.
         self.state.status_is_relay = not (isinstance(incoming_ps, dict) and "status" in incoming_ps)
         if incoming_ps is not None:

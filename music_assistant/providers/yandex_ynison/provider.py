@@ -1152,7 +1152,9 @@ class YandexYnisonProvider(PluginProvider):
         significant_change = False
         new_track = state.current_track_id
         new_index = state.current_index
-        self._playback.follow_window_trim(new_track, new_index)
+        if state.current_item_kept and new_track == self._playback.track_id:
+            # Our own trim re-indexed the playing item; it is the same occurrence.
+            self._playback.index = new_index
         if new_track and (
             new_track != self._playback.track_id
             or (self._playback.index >= 0 and new_index != self._playback.index)
@@ -1160,7 +1162,6 @@ class YandexYnisonProvider(PluginProvider):
             self.logger.info("Track changed: %s -> %s", self._playback.track_id, new_track)
             self._playback.track_id = new_track
             self._playback.index = new_index
-            self._playback.pending_index_shift = 0
             # The grace window ignores stale echoed progress after the change.
             self._playback.request_restart(state.progress_ms, RestartReason.TRACK_CHANGE)
             significant_change = True
@@ -1229,8 +1230,9 @@ class YandexYnisonProvider(PluginProvider):
             meta.duration = best_duration // 1000
         # Only update elapsed from Ynison when NOT actively streaming —
         # during streaming, _sync_progress provides byte-accurate progress.
-        if state.progress_ms is not None and not self._playback.owner_player_id:
-            meta.elapsed_time = state.progress_ms // 1000
+        if not self._playback.owner_player_id:
+            progress = self._ynison.estimated_progress_ms() if self._ynison else state.progress_ms
+            meta.elapsed_time = progress // 1000
             meta.elapsed_time_last_updated = time.time()
 
         # Extract track info from player state if available
@@ -1813,17 +1815,12 @@ class YandexYnisonProvider(PluginProvider):
             raise PlayerCommandFailed("Ynison WebSocket disconnected")
         return self._ynison
 
-    def _current_progress_ms(self, state: YnisonState) -> int:
+    def _current_progress_ms(self, client: YnisonClient) -> int:
         """Return the position of the current Ynison track, preferring our own stream."""
         # Status is published only on change, so the server sample can be far
         # behind the position this source has streamed.
-        if self._playback.owner_player_id and self._playback.track_id == state.current_track_id:
-            # Until the stream starts a requested item, its start is the position.
-            if self._playback.restart_requested():
-                return self._playback.restart_at_ms
-            if self._playback.progress_ms >= 0:
-                return self._playback.progress_ms
-        return state.progress_ms
+        position = self._playback.position_ms(client.state.current_track_id)
+        return position if position is not None else client.estimated_progress_ms()
 
     async def _on_play(self) -> None:
         """Handle play command — send resume to Ynison."""
@@ -1832,7 +1829,7 @@ class YandexYnisonProvider(PluginProvider):
             return
         try:
             await client.report_status(
-                progress_ms=self._current_progress_ms(client.state),
+                progress_ms=self._current_progress_ms(client),
                 duration_ms=self._best_duration_ms(),
                 paused=False,
                 strict=True,
@@ -1848,7 +1845,7 @@ class YandexYnisonProvider(PluginProvider):
             return
         try:
             await client.report_status(
-                progress_ms=self._current_progress_ms(client.state),
+                progress_ms=self._current_progress_ms(client),
                 duration_ms=self._best_duration_ms(),
                 paused=True,
                 strict=True,
@@ -2172,25 +2169,10 @@ class YandexYnisonProvider(PluginProvider):
         """
         if not self._ynison or not self._ynison.connected:
             return
-        registered = 0
-
-        def register_trim(dropped: int) -> None:
-            # The playing item moves down once Ynison reports the trimmed queue;
-            # registered before the send so an early echo is recognised.
-            nonlocal registered
-            if self._playback.index >= 0:
-                self._playback.pending_index_shift += dropped
-                registered = dropped
-
         try:
-            await self._ynison.publish_items(
-                expanded_list, expected_generation=expected_generation, on_trim=register_trim
-            )
+            await self._ynison.publish_items(expanded_list, expected_generation=expected_generation)
         except YnisonSendError, ResourceTemporarilyUnavailable:
             self.logger.warning("RADIO queue update dropped", exc_info=True)
-            self._playback.pending_index_shift = max(
-                0, self._playback.pending_index_shift - registered
-            )
 
     async def _on_next(self) -> None:
         """Handle next track command — signal track end so Yandex advances."""
