@@ -213,7 +213,7 @@ def control_confirmation(control: ParsedControl) -> str:  # noqa: PLR0911
     return "Готово."
 
 
-async def execute_control(  # noqa: PLR0915
+async def execute_control(  # noqa: C901, PLR0915
     mass: MusicAssistant,
     control: ParsedControl,
     player: Any,
@@ -291,12 +291,11 @@ async def execute_control(  # noqa: PLR0915
         elif action == "shuffle_off":
             await mass.player_queues.set_shuffle(pid, shuffle_enabled=False)
         elif action == "repeat_off":
-            # NB: set_repeat is sync, not async — do NOT await.
-            mass.player_queues.set_repeat(pid, RepeatMode.OFF)
+            await mass.player_queues.set_repeat(pid, RepeatMode.OFF)
         elif action == "repeat_one":
-            mass.player_queues.set_repeat(pid, RepeatMode.ONE)
+            await mass.player_queues.set_repeat(pid, RepeatMode.ONE)
         elif action == "repeat_all":
-            mass.player_queues.set_repeat(pid, RepeatMode.ALL)
+            await mass.player_queues.set_repeat(pid, RepeatMode.ALL)
         elif action == "seek_forward":
             await mass.player_queues.skip(pid, seconds=control.value or 0)
         elif action == "seek_back":

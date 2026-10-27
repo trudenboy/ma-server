@@ -208,7 +208,10 @@ class YandexAlicePlugin(PluginProvider):
                 str(self.get_setup_value(CONF_EXTERNAL_BASE_URL) or ""),
                 str(self.get_setup_value(CONF_DIALOG_WEBHOOK_SECRET) or ""),
             )
-            return ConfigActionResult(message=("✅ " if reachable else "❌ ") + message)
+            return ConfigActionResult(
+                translation_key="webhook_probe_ok" if reachable else "webhook_probe_failed",
+                translation_args=[message],
+            )
         if action == CONF_ACTION_OPEN_DEV_CONSOLE:
             return ConfigActionResult(
                 open_url=f"{_DEV_CONSOLE_URL}/{skill_id}" if skill_id else _DEV_CONSOLE_URL
@@ -216,14 +219,9 @@ class YandexAlicePlugin(PluginProvider):
         if action == CONF_ACTION_REFRESH_STATUS:
             status = await fetch_skill_publication_status(self._x_token(), skill_id)
             if status is None:
-                return ConfigActionResult(
-                    message="Could not fetch the publication status from Yandex Dialogs.",
-                    translation_key="status_unavailable",
-                )
+                return ConfigActionResult(translation_key="status_unavailable")
             self._update_setup_data(CONF_DIALOG_PUBLICATION_STATUS, status)
-            return ConfigActionResult(
-                message="Publication status refreshed.", translation_key="status_refreshed"
-            )
+            return ConfigActionResult(translation_key="status_refreshed")
         if action == CONF_ACTION_DELETE_SKILL:
             x_token = self._x_token()
             try:
@@ -236,10 +234,7 @@ class YandexAlicePlugin(PluginProvider):
             self._update_setup_data(
                 CONF_DIALOG_AUTO_CREATE_ARTIFACTS, dump_artifacts(SkillCreationArtifacts())
             )
-            return ConfigActionResult(
-                message="Skill deleted. Reconfigure the provider to create a new one.",
-                translation_key="skill_deleted",
-            )
+            return ConfigActionResult(translation_key="skill_deleted")
         if action in (
             CONF_ACTION_EXPORT_MANIFEST,
             CONF_ACTION_IMPORT_MANIFEST,

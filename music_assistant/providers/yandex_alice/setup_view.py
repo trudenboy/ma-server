@@ -223,10 +223,7 @@ def diagnostics_entries(stats: dict[str, Any] | None) -> tuple[ConfigEntry, ...]
         ConfigEntry(
             key="label_diagnostics_summary",
             type=ConfigEntryType.LABEL,
-            label=(
-                f"Diagnostics: {webhook_calls} webhook hits "
-                f"({authenticated_calls} past auth) · last webhook {last_ago}."
-            ),
+            translation_params=[str(webhook_calls), str(authenticated_calls), last_ago],
             advanced=True,
         ),
     )

@@ -58,7 +58,9 @@ async def cached_authenticated_session(x_token: str) -> AsyncIterator[aiohttp.Cl
 
     secret = SecretStr(x_token)
     jar = aiohttp.CookieJar()
-    async with aiohttp.ClientSession(cookie_jar=jar) as session:
+    async with aiohttp.ClientSession(  # ma-allow: MA001 isolated cookie jar for Passport auth
+        cookie_jar=jar
+    ) as session:
         client = PassportClient(session=session)
         await client.refresh_passport_cookies(secret)
         yield session

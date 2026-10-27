@@ -174,8 +174,8 @@ def _find_yandex_music_provider(mass: MusicAssistant) -> Any:
                     prov, "available", True
                 ):
                     return prov
-        except Exception:  # noqa: S110
-            pass
+        except Exception as err:
+            _LOGGER.debug("Failed to enumerate mass.%s: %s", attr, err)
     return None
 
 

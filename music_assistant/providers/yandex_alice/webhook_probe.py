@@ -137,7 +137,9 @@ async def probe_webhook_reachability(base_url: str, webhook_secret: str) -> tupl
 
     try:
         async with (
-            aiohttp.ClientSession(timeout=timeout, connector=connector) as session,
+            aiohttp.ClientSession(  # ma-allow: MA001 SSRF-guard connector with public-only resolver
+                timeout=timeout, connector=connector
+            ) as session,
             session.post(
                 url,
                 data=body,

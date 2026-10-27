@@ -475,7 +475,8 @@ class DialogsWebhookHandler:
             body = await request.json()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as err:
+            self._logger.debug("Failed to parse Dialogs webhook body: %s", err)
             return self._yandex_response(
                 incoming_session={},
                 text="Что-то пошло не так с запросом.",

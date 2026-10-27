@@ -203,7 +203,7 @@ class TestExecuteControl:
         mass.player_queues.next = AsyncMock()
         mass.player_queues.previous = AsyncMock()
         mass.player_queues.set_shuffle = AsyncMock()
-        mass.player_queues.set_repeat = MagicMock()  # NB: sync, not async
+        mass.player_queues.set_repeat = AsyncMock()
         mass.player_queues.skip = AsyncMock()
         mass.player_queues.seek = AsyncMock()
         mass.players = MagicMock()
@@ -332,20 +332,20 @@ class TestExecuteControl:
         mass.player_queues.set_shuffle.assert_awaited_once_with("p1", shuffle_enabled=False)
 
     async def test_repeat_off(self) -> None:
-        """`set_repeat` is sync, not async — verified via `assert_called_once`."""
+        """`set_repeat` is a coroutine on MA dev and stable, so it must be awaited."""
         mass = self._make_mass()
         await execute_control(mass, ParsedControl(action="repeat_off"), self._player())
-        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.OFF)
+        mass.player_queues.set_repeat.assert_awaited_once_with("p1", RepeatMode.OFF)
 
     async def test_repeat_one(self) -> None:
         mass = self._make_mass()
         await execute_control(mass, ParsedControl(action="repeat_one"), self._player())
-        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ONE)
+        mass.player_queues.set_repeat.assert_awaited_once_with("p1", RepeatMode.ONE)
 
     async def test_repeat_all(self) -> None:
         mass = self._make_mass()
         await execute_control(mass, ParsedControl(action="repeat_all"), self._player())
-        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ALL)
+        mass.player_queues.set_repeat.assert_awaited_once_with("p1", RepeatMode.ALL)
 
     async def test_seek_forward(self) -> None:
         mass = self._make_mass()

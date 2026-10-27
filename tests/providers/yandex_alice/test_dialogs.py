@@ -956,7 +956,7 @@ class TestControlCommandsIntegration:
         mass.player_queues.next = AsyncMock()
         mass.player_queues.previous = AsyncMock()
         mass.player_queues.set_shuffle = AsyncMock()
-        mass.player_queues.set_repeat = MagicMock()  # NB: sync
+        mass.player_queues.set_repeat = AsyncMock()
         mass.player_queues.skip = AsyncMock()
         mass.player_queues.seek = AsyncMock()
         mass.player_queues.transfer_queue = AsyncMock()
@@ -1284,7 +1284,7 @@ class TestControlCommandsIntegration:
         mass.player_queues.set_shuffle.assert_awaited_once_with("p1", shuffle_enabled=False)
 
     async def test_repeat_one(self) -> None:
-        """'повтори песню на кухне' → set_repeat(p1, RepeatMode.ONE) — sync, not awaited."""
+        """'повтори песню на кухне' → set_repeat(p1, RepeatMode.ONE), awaited."""
         mass = self._setup_mass_with_control_methods([MockPlayer(player_id="p1", name="Кухня")])
         handler = DialogsWebhookHandler(mass, skill_id="skill-uuid-1", webhook_secret=_TEST_SECRET)
         body = {
@@ -1296,7 +1296,7 @@ class TestControlCommandsIntegration:
         }
         await handler._handle_webhook(_build_request(body))
         await asyncio.sleep(0)
-        mass.player_queues.set_repeat.assert_called_once_with("p1", RepeatMode.ONE)
+        mass.player_queues.set_repeat.assert_awaited_once_with("p1", RepeatMode.ONE)
 
     async def test_seek_forward_minute(self) -> None:
         """

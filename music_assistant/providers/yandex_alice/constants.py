@@ -26,7 +26,7 @@ CONF_EXPOSED_PLAYERS = "exposed_players"
 # Reused on subsequent auto-create / rename runs so the user doesn't have
 # to re-confirm the device code every time. Long-lived (months);
 # automatically refreshed on use. Cleared if Yandex returns 401 on refresh.
-CONF_AUTH_X_TOKEN = "auth_x_token"
+CONF_AUTH_X_TOKEN = "auth_x_token"  # noqa: S105 config key name, not a secret
 # Display name of the signed-in Yandex account (login or display name).
 # Surfaced as a "Authorized as <name>" banner once auth is complete; not
 # used for any API call.
@@ -35,7 +35,7 @@ CONF_AUTH_USER_NAME = "auth_user_name"
 # Dialog skill (Yandex Dialogs custom skill — voice playback)
 CONF_DIALOG_SKILL_NAME = "dialog_skill_name"
 CONF_DIALOG_SKILL_ID = "dialog_skill_id"
-CONF_DIALOG_WEBHOOK_SECRET = "dialog_webhook_secret"
+CONF_DIALOG_WEBHOOK_SECRET = "dialog_webhook_secret"  # noqa: S105 config key name, not a secret
 CONF_DIALOG_AUTO_CREATE_ARTIFACTS = "dialog_auto_create_artifacts"
 # v1.2.0 — Yandex skill publication status, classified into one of:
 # ``on_air`` / ``in_moderation`` / ``draft`` / ``rejected`` / ``unknown``.

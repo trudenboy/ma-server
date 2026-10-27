@@ -194,6 +194,9 @@
     },
     "webhook_url": {
       "label": "Webhook URL"
+    },
+    "label_diagnostics_summary": {
+      "label": "Diagnostics: {0} webhook hits ({1} past auth) · last webhook {2}."
     }
   },
   "setup_flow": {
@@ -276,6 +279,8 @@
     "manifest_validate_success": "✓ Manifest override is valid ({0} intents, {1} entities).",
     "status_refreshed": "Publication status refreshed.",
     "status_unavailable": "Could not fetch the publication status — Yandex Dialogs is not reachable, or the skill no longer exists in your account.",
-    "skill_deleted": "Skill deleted from Yandex Dialogs. Use Reconfigure to create a new one."
+    "skill_deleted": "Skill deleted from Yandex Dialogs. Use Reconfigure to create a new one.",
+    "webhook_probe_ok": "✅ {0}",
+    "webhook_probe_failed": "❌ {0}"
   }
 }
