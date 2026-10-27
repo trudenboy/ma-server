@@ -45,7 +45,7 @@ from .constants import (
     YNISON_STATE_PATH,
 )
 from .queue_model import (
-    QueueOutcome,
+    NavigationOutcome,
     make_version_block,
     plan_navigation,
     replace_items,
@@ -137,6 +137,87 @@ class _StatusWatermark:
     duration_ms: int
     paused: bool
     sent_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class StatusBaseline:
+    """Newest playback status known to the server: received from it or sent by us."""
+
+    progress_ms: int
+    duration_ms: int
+    paused: bool
+    # Monotonic time at which ``progress_ms`` was current.
+    anchor: float
+    # ``None`` for a status we sent; its echo comes back without our version.
+    version: dict[str, Any] | None
+
+    @classmethod
+    def from_status(cls, status: dict[str, Any], *, anchor: float) -> StatusBaseline | None:
+        """
+        Build a baseline from a server status, or ``None`` when it is unreadable.
+
+        :param status: Ynison ``player_state.status`` object.
+        :param anchor: Monotonic time at which the status was received.
+        """
+        try:
+            progress = int(status.get("progress_ms", 0))
+            duration = int(status.get("duration_ms", 0))
+        except TypeError, ValueError:
+            return None
+        return cls(
+            progress,
+            duration,
+            bool(status.get("paused", True)),
+            anchor,
+            status.get("version") or {},
+        )
+
+    def expected_progress_ms(self, now: float) -> int:
+        """
+        Return the position this status implies at ``now``.
+
+        :param now: Monotonic time to extrapolate to.
+        """
+        if self.paused:
+            return self.progress_ms
+        return self.progress_ms + int((now - self.anchor) * 1000)
+
+    def matches(self, progress_ms: int, duration_ms: int, paused: bool, now: float) -> bool:
+        """
+        Return whether a status adds nothing to this one within the dedup window.
+
+        :param progress_ms: Position of the candidate status.
+        :param duration_ms: Duration of the candidate status.
+        :param paused: Pause flag of the candidate status.
+        :param now: Monotonic time of the candidate status.
+        """
+        if self.paused != paused or self.duration_ms != duration_ms:
+            return False
+        return abs(self.expected_progress_ms(now) - progress_ms) <= STATUS_DEDUP_WINDOW_MS
+
+    def is_repeated_by(self, status: dict[str, Any], device_id: str) -> bool:
+        """
+        Return whether an inbound status merely repeats this one.
+
+        :param status: Inbound Ynison ``player_state.status`` object.
+        :param device_id: This device, whose own sends come back unversioned.
+        """
+        try:
+            progress = int(status.get("progress_ms", 0))
+            duration = int(status.get("duration_ms", 0))
+        except TypeError, ValueError:
+            return False
+        # A status authored by another device under a new version is a fresh
+        # command, even when it lands on the position we already know.
+        version = status.get("version") or {}
+        author = version.get("device_id") or ""
+        if author and author != device_id and version != self.version:
+            return False
+        return (progress, duration, bool(status.get("paused", True))) == (
+            self.progress_ms,
+            self.duration_ms,
+            self.paused,
+        )
 
 
 @dataclass(frozen=True)
@@ -265,11 +346,7 @@ class YnisonClient:
         self._policy = ReconnectPolicy(RECONNECT_DELAYS, RECONNECT_IDLE_DELAY)
         self._heartbeat = WS_HEARTBEAT
         self._status_watermarks: deque[_StatusWatermark] = deque(maxlen=8)
-        # (progress_ms, duration_ms, paused, monotonic time) of the newest
-        # status known to the server: received from it or sent by us.
-        # (progress, duration, paused, monotonic time, version); the version is
-        # None for a status we sent, whose echo comes back without our version.
-        self._status_baseline: tuple[int, int, bool, float, dict[str, Any] | None] | None = None
+        self._status_baseline: StatusBaseline | None = None
 
         # Latest state from server
         self.state = YnisonState()
@@ -470,7 +547,9 @@ class YnisonClient:
         }
         sent = await self._send(msg, strict=strict)
         if sent:
-            self._status_baseline = (progress_ms, duration_ms, paused, time.monotonic(), None)
+            self._status_baseline = StatusBaseline(
+                progress_ms, duration_ms, paused, time.monotonic(), None
+            )
             track_id = self.state.current_track_id
             if track_id is not None:
                 self._status_watermarks.append(
@@ -636,7 +715,7 @@ class YnisonClient:
         natural: bool,
         duration_ms: int,
         baseline: NavigationBaseline | None = None,
-    ) -> QueueOutcome:
+    ) -> NavigationOutcome:
         """
         Publish the next logical item of the current queue, honouring repeat.
 
@@ -651,7 +730,7 @@ class YnisonClient:
         :raises YnisonSendError: When the edit could not be sent.
         """
         expected = baseline or self.navigation_baseline()
-        outcome: QueueOutcome = "failed"
+        outcome = NavigationOutcome.FAILED
 
         def mutate(player_state: dict[str, Any]) -> bool | None:
             nonlocal outcome
@@ -660,10 +739,10 @@ class YnisonClient:
             outcome = plan_navigation(
                 player_state, natural=natural, duration_ms=duration_ms, device_id=self.device_id
             )
-            return False if outcome == "radio" else None
+            return False if outcome == NavigationOutcome.RADIO else None
 
         version = await self.mutate_player_state(mutate)
-        if version is not None and outcome in ("change", "restart"):
+        if version is not None and outcome in (NavigationOutcome.CHANGE, NavigationOutcome.RESTART):
             self._navigation_version = version
         return outcome
 
@@ -788,41 +867,12 @@ class YnisonClient:
         """Return whether a status repeats the newest server-known one."""
         if self._status_baseline is None or not isinstance(status, dict):
             return False
-        try:
-            progress = int(status.get("progress_ms", 0))
-            duration = int(status.get("duration_ms", 0))
-        except TypeError, ValueError:
-            return False
-        base_progress, base_duration, base_paused, _at, base_version = self._status_baseline
-        # A status authored by another device under a new version is a fresh
-        # command, even when it lands on the position we already know.
-        version = status.get("version") or {}
-        author = version.get("device_id") or ""
-        if author and author != self.device_id and version != base_version:
-            return False
-        return (progress, duration, bool(status.get("paused", True))) == (
-            base_progress,
-            base_duration,
-            base_paused,
-        )
+        return self._status_baseline.is_repeated_by(status, self.device_id)
 
     def _remember_server_status(self, status: Any) -> None:
         """Record a server-authoritative status as the dedup baseline."""
-        if not isinstance(status, dict):
-            return
-        try:
-            progress = int(status.get("progress_ms", 0))
-            duration = int(status.get("duration_ms", 0))
-        except TypeError, ValueError:
-            self._status_baseline = None
-            return
-        self._status_baseline = (
-            progress,
-            duration,
-            bool(status.get("paused", True)),
-            time.monotonic(),
-            status.get("version") or {},
-        )
+        if isinstance(status, dict):
+            self._status_baseline = StatusBaseline.from_status(status, anchor=time.monotonic())
 
     def _matches_baseline(self, baseline: NavigationBaseline, queue: dict[str, Any]) -> bool:
         """Return whether ``queue`` and the current playback are still those of ``baseline``."""
@@ -841,13 +891,7 @@ class YnisonClient:
         """Return whether a status equals the newest server-known one within the dedup window."""
         if self._status_baseline is None:
             return False
-        base_progress, base_duration, base_paused, at, _version = self._status_baseline
-        if base_paused != paused or base_duration != duration_ms:
-            return False
-        expected = base_progress
-        if not base_paused:
-            expected += int((time.monotonic() - at) * 1000)
-        return abs(expected - progress_ms) <= STATUS_DEDUP_WINDOW_MS
+        return self._status_baseline.matches(progress_ms, duration_ms, paused, time.monotonic())
 
     def _classify_state_as_echo(self, incoming_ps: dict[str, Any]) -> tuple[bool, bool]:
         """

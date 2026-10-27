@@ -25,6 +25,7 @@ from music_assistant.providers.yandex_ynison.constants import (
     YNISON_ORIGIN,
 )
 from music_assistant.providers.yandex_ynison.ynison_client import (
+    StatusBaseline,
     YnisonClient,
     YnisonDeviceInfo,
     YnisonSendError,
@@ -3432,3 +3433,27 @@ class TestQueueCommands:
         sent = self._sent_queue()
         assert sent["options"]["repeat_mode"] == "ALL"
         assert sent["shuffle_optional"]["playable_indices"][0] == 0
+
+
+class TestStatusBaseline:
+    """The newest server-known status and the questions asked of it."""
+
+    def test_playing_status_extrapolates_and_paused_does_not(self) -> None:
+        """A playing position advances with time; a paused one stays."""
+        playing = StatusBaseline(10000, 200000, False, anchor=100.0, version=None)
+        paused = StatusBaseline(10000, 200000, True, anchor=100.0, version=None)
+
+        assert playing.expected_progress_ms(160.0) == 70000
+        assert paused.expected_progress_ms(160.0) == 10000
+
+    def test_matches_within_the_dedup_window_only(self) -> None:
+        """A candidate within two seconds of the extrapolation adds nothing."""
+        baseline = StatusBaseline(10000, 200000, False, anchor=100.0, version=None)
+
+        assert baseline.matches(71500, 200000, False, now=160.0)
+        assert not baseline.matches(73000, 200000, False, now=160.0)
+        assert not baseline.matches(70000, 200000, True, now=160.0)
+
+    def test_unreadable_status_has_no_baseline(self) -> None:
+        """A status with a non-numeric position cannot anchor deduplication."""
+        assert StatusBaseline.from_status({"progress_ms": "x"}, anchor=0.0) is None
