@@ -1348,7 +1348,12 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
         self._set_transitioning(player_id, False)
         if permanent:
             self.purge_saved_queue(player_id)
-        self._queue_data.pop(player_id, None)
+        if (queue_data := self._queue_data.pop(player_id, None)) is not None:
+            # no queue removal event exists, so clients get the gone queue as idle
+            queue_data.queue.state = PlaybackState.IDLE
+            self.mass.signal_event(
+                EventType.QUEUE_UPDATED, object_id=player_id, data=queue_data.queue
+            )
         self._managed_pool.forget(player_id)
 
     def purge_saved_queue(self, queue_id: str) -> None:
@@ -1896,7 +1901,8 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
         # alongside that teardown, where the task id can already belong to a new session.
         self.mass.cancel_task(f"prepare_next_audio_buffer_{queue_id}")
         self._set_transitioning(queue_id, False)
-        queue_data = self._queue_data[queue_id]
+        if not (queue_data := self._queue_data.get(queue_id)):
+            raise PlayerUnavailableError(f"Queue {queue_id} is not available")
         session_id = queue_data.session_id
         if (queue := self.get(queue_id)) and queue.active:
             if queue.state == PlaybackState.PLAYING:
