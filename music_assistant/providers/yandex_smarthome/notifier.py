@@ -203,7 +203,7 @@ class StateNotifier:
             await self._send_state_callback(devices)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # ma-allow: MA002 send callback already logged it; re-queue and retry
             # Re-queue failed player IDs and reschedule. _send_state_callback
             # already deduplicated the log entry (WARNING for known classes,
             # ERROR-with-traceback for unexpected) so we swallow the exception

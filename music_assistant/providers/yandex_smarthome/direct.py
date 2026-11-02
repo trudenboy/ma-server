@@ -245,7 +245,8 @@ class DirectConnectionHandler:
 
         try:
             body = await request.json()
-        except Exception:
+        except Exception as err:
+            self._logger.debug("Invalid /user/devices/query request body: %s", err)
             return web.json_response(build_response(request_id, {}), status=400)
 
         try:
@@ -276,7 +277,8 @@ class DirectConnectionHandler:
 
         try:
             body = await request.json()
-        except Exception:
+        except Exception as err:
+            self._logger.debug("Invalid /user/devices/action request body: %s", err)
             return web.json_response(build_response(request_id, {}), status=400)
 
         try:
@@ -368,7 +370,8 @@ class DirectConnectionHandler:
         """
         try:
             data = await request.post()
-        except Exception:
+        except Exception as err:
+            self._logger.debug("Invalid /auth/token request body: %s", err)
             return web.json_response({"error": "invalid_request"}, status=400)
 
         # Validate client credentials
