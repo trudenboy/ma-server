@@ -1,1 +1,1 @@
-"""Tests for ma-provider-mcp."""
+"""Tests for the builtin MCP server provider."""
