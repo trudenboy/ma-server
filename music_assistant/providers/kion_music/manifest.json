@@ -5,9 +5,8 @@
   "name": "KION Music",
   "description": "Stream music, personalized recommendations, and lossless FLAC from KION Music — including My Wave radio and library sync.",
   "codeowners": [
-    "@trudenboy"
+    "@TrudenBoy"
   ],
-  "tier": "community",
   "credits": [
     "[yandex-music-api](https://github.com/MarshalX/yandex-music-api)"
   ],
