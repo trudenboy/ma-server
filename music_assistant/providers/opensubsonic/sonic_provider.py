@@ -133,12 +133,6 @@ class OpenSonicProvider(MusicProvider):
                 default_value=True,
             ),
             ConfigEntry(
-                key=CONF_ENABLE_LEGACY_AUTH,
-                type=ConfigEntryType.BOOLEAN,
-                required=True,
-                default_value=False,
-            ),
-            ConfigEntry(
                 key=CONF_RECO_FAVES,
                 type=ConfigEntryType.BOOLEAN,
                 required=True,
@@ -204,7 +198,7 @@ class OpenSonicProvider(MusicProvider):
                 str(self.get_setup_value(CONF_BASE_URL)),
                 username=str(username),
                 password=str(password),
-                legacy_auth=bool(self.config.get_value(CONF_ENABLE_LEGACY_AUTH)),
+                legacy_auth=bool(self.get_setup_value(CONF_ENABLE_LEGACY_AUTH)),
                 port=port,
                 server_path=str(path),
                 use_get=True,
@@ -359,9 +353,6 @@ class OpenSonicProvider(MusicProvider):
 
     async def resolve_image(self, path: str) -> bytes | Any:
         """Return the image."""
-        if path.startswith(("http://", "https://")):
-            # artist/album info image URLs are fetched directly, not via getCoverArt
-            return path
         self.logger.debug("Requesting cover art for '%s'", path)
 
         try:
