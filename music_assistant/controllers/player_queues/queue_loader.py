@@ -373,7 +373,9 @@ class QueueLoaderMixin(_PlayerQueuesBase):
         playing_album_tracks = self._plays_as_album_track(queue_item)
         if is_start:
             # a track skip should hand its source slot to the item the user is starting
-            await self._abort_superseded_source_buffers(queue_item)
+            await self._abort_superseded_source_buffers(
+                queue_item, seek_position_ms=int(seek_position * 1000)
+            )
 
         # Fetch streamdetails (reuses existing if buffer is still valid for the seek).
         queue_item.streamdetails = await self.mass.streams.audio.get_stream_details(
@@ -727,10 +729,6 @@ class QueueLoaderMixin(_PlayerQueuesBase):
         # cancel any pending play_index calls for this queue to prevent conflicts
         self.mass.cancel_timer(f"queue_play_index_{queue_id}")
         self._set_transitioning(queue_id, False)
-        # we use a contextvar to bypass the throttler for this asyncio task/context
-        # this makes sure that playback has priority over other requests that may be
-        # happening in the background
-        BYPASS_THROTTLER.set(True)
         if not (queue := self.get(queue_id)):
             raise PlayerUnavailableError(f"Queue {queue_id} is not available")
         queue_data = self._queue_data[queue_id]
@@ -1133,11 +1131,14 @@ class QueueLoaderMixin(_PlayerQueuesBase):
         queued_keys = {key for item in queue_track_items for key in _track_keys(item)}
         return [track for track in dynamic_tracks if queued_keys.isdisjoint(_track_keys(track))]
 
-    async def _abort_superseded_source_buffers(self, queue_item: QueueItem) -> None:
+    async def _abort_superseded_source_buffers(
+        self, queue_item: QueueItem, seek_position_ms: int = 0
+    ) -> None:
         """
         Abort the still-filling source buffers of other items in the same queue.
 
         :param queue_item: The queue item that is about to start playing.
+        :param seek_position_ms: Position in milliseconds the item starts playing from.
         """
         queue_data = self._queue_data.get(queue_item.queue_id)
         items = tuple(queue_data.items) if queue_data else ()
@@ -1155,8 +1156,18 @@ class QueueLoaderMixin(_PlayerQueuesBase):
             if item.queue_item_id in spared_item_ids:
                 continue
             await self._abort_source_buffer(item, queue_item)
-        if successor is not None:
-            await self._abort_source_buffer(successor, queue_item, only_when_saturated=True)
+        if successor is None:
+            return
+        # an item that resumes from its own buffer (the reuse check of get_buffer) opens no
+        # new source, so the prewarm of its successor has no slot to make room for
+        own_buffer = queue_item.streamdetails.buffer if queue_item.streamdetails else None
+        if (
+            own_buffer is not None
+            and not own_buffer.has_error
+            and own_buffer.is_valid(seek_position_ms)
+        ):
+            return
+        await self._abort_source_buffer(successor, queue_item, only_when_saturated=True)
 
     async def _abort_source_buffer(
         self,

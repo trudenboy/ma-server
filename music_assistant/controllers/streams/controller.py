@@ -12,13 +12,16 @@ import logging
 import os
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
+from dataclasses import dataclass
 from ipaddress import ip_address
 from math import ceil
 from typing import TYPE_CHECKING, cast
 
 from aiofiles.os import wrap
 from aiohttp import web
+from mashumaro import DataClassDictMixin
 from music_assistant_models.audio_processing import AudioQueueProcessing
+from music_assistant_models.auth import Scope
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
 from music_assistant_models.enums import (
     ConfigEntryType,
@@ -53,7 +56,6 @@ from music_assistant.constants import (
     CONF_VOLUME_NORMALIZATION_TRACKS,
     DEFAULT_STREAM_HEADERS,
     ICY_HEADERS,
-    SILENCE_FILE,
     VERBOSE_LOG_LEVEL,
     WILDCARD_BIND_IPS,
 )
@@ -353,17 +355,14 @@ class StreamsController(CoreController):
                     "/source/{session_id}/{source_player_id}/{player_id}.{fmt}",
                     self.serve_audio_source_stream,
                 ),
-                (
-                    "*",
-                    "/command/{session_id}/{queue_id}/{command}.mp3",
-                    self.serve_command_request,
-                ),
                 ("*", "/announcement/{player_id}.{fmt}", self.serve_announcement_stream),
                 (
                     "*",
                     "/pluginsource/{plugin_source}/{player_id}.{fmt}",
                     self.serve_plugin_source_stream,
                 ),
+                ("GET", "/info", self._handle_info_request),
+                ("OPTIONS", "/info", self._handle_info_preflight),
             ],
         )
         # adopt what the server actually bound to: a configured port of 0 is only resolved
@@ -868,6 +867,12 @@ class StreamsController(CoreController):
                 "Denying flow stream request from %s: its session already streamed to the end",
                 player.display_name,
             )
+            if request.headers.get("Range") and (range_start := request.http_range.start):
+                # a Cast receiver resumes a stream that closed short of its declared length;
+                # a 404 makes it drop its buffer, a 416 lets it play out and finish
+                raise web.HTTPRequestRangeNotSatisfiable(
+                    headers={"Content-Range": f"bytes */{range_start}"}
+                )
             raise web.HTTPNotFound(reason=f"Flow stream already finished: {session_id}")
         start_queue_item_id = request.match_info["queue_item_id"]
         start_queue_item = self._get_flow_start_item(queue, start_queue_item_id)
@@ -1026,28 +1031,6 @@ class StreamsController(CoreController):
                     del self._open_item_streams[queue_id]
 
         return resp
-
-    async def serve_command_request(self, request: web.Request) -> web.FileResponse:
-        """Handle special 'command' request for a player."""
-        self._log_request(request)
-        queue_id = request.match_info["queue_id"]
-        session_id = request.match_info["session_id"]
-        queue_data = self.mass.player_queues.queue_data_or_none(queue_id)
-        if queue_data is None or queue_data.session_id != session_id:
-            raise web.HTTPNotFound(reason=f"Unknown (or invalid) session: {session_id}")
-        command = request.match_info["command"]
-        if queue_data.last_served_item_id is None:
-            # the session rotates when a new item starts loading, so a command fetched before
-            # any of its audio went out follows the superseded stream and would skip a track
-            self.logger.debug(
-                "Ignoring %s command for queue %s: session %s has not streamed yet",
-                command,
-                queue_id,
-                session_id,
-            )
-        elif command == "next":
-            self.mass.create_task(self.mass.player_queues.next(queue_id))
-        return web.FileResponse(SILENCE_FILE, headers={"icy-name": "Music Assistant"})
 
     async def serve_announcement_stream(self, request: web.Request) -> web.StreamResponse:
         """Stream announcement audio to a player."""
@@ -1646,27 +1629,39 @@ class StreamsController(CoreController):
         return self.mass.player_queues.get_item(queue.queue_id, queue_item_id)
 
     async def _finish_flow_stream(
-        self, resp: web.StreamResponse, queue_id: str, session_id: str
+        self,
+        request: web.Request,
+        resp: web.StreamResponse,
+        queue_id: str,
+        session_id: str,
+        player: Player,
     ) -> None:
         """
         Close a fully served flow stream, giving the player time to drain when it ends the queue.
 
+        :param request: The flow stream request.
         :param resp: The flow stream response, already fully written.
         :param queue_id: Id of the queue the flow stream belongs to.
         :param session_id: Stream session this response was opened for.
+        :param player: The player that requested the flow stream.
         """
         if self.mass.player_queues.flow_queue_exhausted(queue_id, session_id):
-            # the player is still holding a few seconds of audio it has not rendered yet
-            # and drops that as soon as the stream ends, so let it play out first.
+            # the player is still holding audio it has not rendered yet and drops that as
+            # soon as the stream ends, so let it play out first.
             # a flow that ends to be restarted right away gets no such grace: there the
             # player should go idle as soon as possible so the next stream can start.
             self.logger.debug(
                 "Flow stream for queue %s reached the end of the queue - holding the "
-                "connection open for %ss so the player can play out its buffer",
+                "connection open (at most %ss) until the player played out its buffer",
                 queue_id,
-                FLOW_STREAM_LEAD_OUT_SECONDS,
+                FLOW_STREAM_MAX_LEAD_OUT_SECONDS,
             )
-            await asyncio.sleep(FLOW_STREAM_LEAD_OUT_SECONDS)
+            for _ in range(FLOW_STREAM_MAX_LEAD_OUT_SECONDS):
+                if request.transport is None or self.mass.player_queues.flow_stream_played_out(
+                    queue_id, session_id, player
+                ):
+                    break
+                await asyncio.sleep(1)
         # aiohttp derives keep-alive from the request, so the 'Connection: close' we
         # advertise is relayed to the player but never applied to the response itself.
         # Without this the player is left waiting on a stream that already ended.
@@ -1773,6 +1768,16 @@ class StreamsController(CoreController):
         # the single address players are handed, taken from the top of the ranked list
         self.publish_ip = self._publish_addresses[0]
         self._base_url = f"http://{format_ip_for_url(self.publish_ip)}:{self.publish_port}"
+
+    async def _handle_info_request(self, request: web.Request) -> web.Response:
+        """Answer a reachability probe with this server's id."""
+        # a browser on the local network checks whether the published address leads to
+        # this server; the id is public already, the webserver's /info reports it too
+        return web.json_response({"server_id": self.mass.server_id}, headers=_INFO_CORS_HEADERS)
+
+    async def _handle_info_preflight(self, request: web.Request) -> web.Response:
+        """Answer the CORS preflight a browser may send ahead of a probe."""
+        return web.Response(status=204, headers=_INFO_CORS_HEADERS)
 
 
 def _same_ip_family(ip: str, other_ip: str) -> bool:

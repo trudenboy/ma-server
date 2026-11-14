@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
+from aiohttp import ClientConnectorCertificateError, ClientConnectorSSLError
 from libopensonic import AsyncConnection as SonicConnection
 from libopensonic import Extensions as OpenSubsonicExtensions
 from libopensonic.errors import (
@@ -42,6 +43,7 @@ from music_assistant_models.media_items import (
     UniqueList,
 )
 from music_assistant_models.streamdetails import StreamDetails
+from yarl import URL
 
 from music_assistant.constants import (
     CONF_PASSWORD,
@@ -129,12 +131,6 @@ class OpenSonicProvider(MusicProvider):
                 default_value=True,
             ),
             ConfigEntry(
-                key=CONF_ENABLE_LEGACY_AUTH,
-                type=ConfigEntryType.BOOLEAN,
-                required=True,
-                default_value=False,
-            ),
-            ConfigEntry(
                 key=CONF_RECO_FAVES,
                 type=ConfigEntryType.BOOLEAN,
                 required=True,
@@ -176,7 +172,11 @@ class OpenSonicProvider(MusicProvider):
     async def handle_async_init(self) -> None:
         """Set up the music provider and test the connection."""
         port = self.get_setup_value(CONF_PORT)
-        port = int(str(port)) if port is not None else 443
+        if port is not None:
+            port = int(str(port))
+        else:
+            # the scheme's default port (80/443), 443 when the url carries no scheme
+            port = URL(str(self.get_setup_value(CONF_BASE_URL))).port or 443
         path = self.get_setup_value(CONF_PATH)
 
         if path is None:
@@ -200,7 +200,7 @@ class OpenSonicProvider(MusicProvider):
                 str(self.get_setup_value(CONF_BASE_URL)),
                 username=str(username),
                 password=str(password),
-                legacy_auth=bool(self.config.get_value(CONF_ENABLE_LEGACY_AUTH)),
+                legacy_auth=bool(self.get_setup_value(CONF_ENABLE_LEGACY_AUTH)),
                 port=port,
                 server_path=str(path),
                 use_get=True,
@@ -215,20 +215,7 @@ class OpenSonicProvider(MusicProvider):
                 translation_args=[self.get_setup_value(CONF_BASE_URL)],
             )
 
-        try:
-            success = await self.conn.ping()
-            if not success:
-                raise CredentialError
-        except (AuthError, CredentialError) as e:
-            msg = (
-                f"Failed to connect to {self.get_setup_value(CONF_BASE_URL)}, check your settings."
-            )
-            raise LoginFailed(
-                msg,
-                translation_key="connect_failed",
-                translation_owner=self.translation_owner,
-                translation_args=[self.get_setup_value(CONF_BASE_URL)],
-            ) from e
+        await self._verify_connection()
 
         try:
             extensions: list[OpenSubsonicExtension] = await self.conn.get_open_subsonic_extensions()
@@ -936,7 +923,7 @@ class OpenSonicProvider(MusicProvider):
                 return (
                     False,
                     mark.position,
-                    datetime.fromisoformat(mark.created) if mark.created else None,
+                    datetime.fromisoformat(mark.changed) if mark.changed else None,
                 )
         # If we get here, there is no bookmark
         return (False, 0, None)
@@ -1090,3 +1077,35 @@ class OpenSonicProvider(MusicProvider):
         for sonic_album in albums:
             recent.items.append(parse_album(self.logger, self.instance_id, sonic_album))
         return recent
+
+    async def _verify_connection(self) -> None:
+        """Ping the server, raising LoginFailed with a translated reason when that fails."""
+        base_url = self.get_setup_value(CONF_BASE_URL)
+        try:
+            success = await self.conn.ping()
+            if not success:
+                raise CredentialError
+        except (AuthError, CredentialError) as e:
+            msg = f"Failed to connect to {base_url}, check your settings."
+            translation_key = "connect_failed"
+            cause: Exception = e
+        except ClientConnectorCertificateError as e:
+            msg = f"The certificate of {base_url} is not trusted."
+            translation_key = "certificate_not_trusted"
+            cause = e
+        except ClientConnectorSSLError as e:
+            # also raised when an https url points at a server that only speaks plain http
+            msg = (
+                f"Could not open a secure connection to {base_url}. "
+                "If the server only serves plain http, use an http:// address."
+            )
+            translation_key = "secure_connection_failed"
+            cause = e
+        else:
+            return
+        raise LoginFailed(
+            msg,
+            translation_key=translation_key,
+            translation_owner=self.translation_owner,
+            translation_args=[base_url],
+        ) from cause

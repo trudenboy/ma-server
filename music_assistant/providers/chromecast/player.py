@@ -29,7 +29,11 @@ from pychromecast.controllers.media import (
 from pychromecast.controllers.multizone import MultizoneController
 from pychromecast.socket_client import CONNECTION_STATUS_CONNECTED, CONNECTION_STATUS_DISCONNECTED
 
-from music_assistant.constants import MASS_LOGO_ONLINE, VERBOSE_LOG_LEVEL
+from music_assistant.constants import (
+    CONF_ENTRY_HTTP_PROFILE_DEFAULT_2,
+    MASS_LOGO_ONLINE,
+    VERBOSE_LOG_LEVEL,
+)
 from music_assistant.helpers.util import is_valid_mac_address
 from music_assistant.models.player import DeviceInfo, Player, PlayerMedia
 
@@ -45,7 +49,7 @@ from .constants import (
     MASS_APP_ID,
     SENDSPIN_CAST_APP_ID,
 )
-from .helpers import CastStatusListener, ChromecastInfo, http_profile_entry, is_google_device
+from .helpers import CastStatusListener, ChromecastInfo, is_google_device
 from .receiver_commands import MassCastCommandController
 
 if TYPE_CHECKING:
@@ -153,13 +157,13 @@ class ChromecastPlayer(Player):
         if self.type == PlayerType.GROUP:
             return [
                 *CAST_PLAYER_CONFIG_ENTRIES,
-                http_profile_entry(self.cast_info),
+                CONF_ENTRY_HTTP_PROFILE_DEFAULT_2,
                 CONF_ENTRY_SAMPLE_RATES_CAST_GROUP,
             ]
 
         return [
             *CAST_PLAYER_CONFIG_ENTRIES,
-            http_profile_entry(self.cast_info),
+            CONF_ENTRY_HTTP_PROFILE_DEFAULT_2,
             CONF_ENTRY_SAMPLE_RATES_CAST,
         ]
 
@@ -390,40 +394,6 @@ class ChromecastPlayer(Player):
                 }
                 await asyncio.to_thread(
                     media_controller.send_message, data=queuedata, inc_session_id=True
-                )
-
-            if len(getattr(media_controller.status, "items", [])) < 2 and (
-                cmd_next_url := self.mass.streams.get_command_url(self.player_id, "next")
-            ):
-                # In flow mode, all queue tracks are sent to the player as continuous stream.
-                # add a special 'command' item to the queue
-                # this allows for on-player next buttons/commands to still work
-                msg = {
-                    "type": "QUEUE_INSERT",
-                    "mediaSessionId": media_controller.status.media_session_id,
-                    "items": [
-                        {
-                            "media": {
-                                "contentId": cmd_next_url,
-                                "customData": {
-                                    "uri": cmd_next_url,
-                                    "queue_item_id": cmd_next_url,
-                                },
-                                # must match the silence file the command url actually
-                                # serves: strict (vendor) cast stacks error out on a
-                                # contentType mismatch where Google's receiver is lenient
-                                "contentType": "audio/mpeg",
-                                "streamType": STREAM_TYPE_LIVE,
-                                "metadata": {},
-                            },
-                            "autoplay": True,
-                            "startTime": 0,
-                            "preloadTime": 0,
-                        }
-                    ],
-                }
-                await asyncio.to_thread(
-                    media_controller.send_message, data=msg, inc_session_id=True
                 )
 
         self.mass.create_task(update_flow_metadata())

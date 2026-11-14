@@ -1135,6 +1135,7 @@ class MusicAssistant:
             self.translations,
             self.webserver,
             self.webserver.auth,
+            self.streams,
             self.streams.audio_analysis,
             self.diagnostics,
         ):

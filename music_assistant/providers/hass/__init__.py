@@ -16,7 +16,8 @@ from functools import partial
 from itertools import batched
 from sys import intern
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, TypedDict, cast
+from urllib.parse import unquote
 
 from hass_client import HomeAssistantClient
 from hass_client.exceptions import BaseHassClientError, FailedCommand
@@ -102,6 +103,16 @@ DEVICE_REGISTRY_CACHE_TTL = 60
 AREA_REGISTRY_CACHE_TTL = 60
 
 SEARCH_CONTROL_ENTITIES_COMMAND = f"{DOMAIN}/search_control_entities"
+
+# HA paths a media player's entity_picture points at, the only images this provider resolves
+IMAGE_PATH_PREFIXES: Final = (
+    "/api/media_player_proxy/",
+    "/api/image_proxy/",
+    "/api/image/serve/",
+    "/local/",
+)
+IMAGE_MAX_BYTES: Final = 10 * 1024 * 1024
+IMAGE_READ_CHUNK_SIZE: Final = 64 * 1024
 
 # Home Assistant entity domains that back the TTS and AI Task features.
 FEATURE_DOMAINS = ("tts", "ai_task")

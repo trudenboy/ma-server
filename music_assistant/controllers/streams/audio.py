@@ -31,6 +31,7 @@ from music_assistant_models.enums import (
     CrossfadeMode,
     MediaType,
     PlayerFeature,
+    PlayerType,
     ProviderFeature,
     ProviderType,
     StreamType,
@@ -80,6 +81,7 @@ from music_assistant.controllers.streams.constants import (
     CONF_ALLOW_CROSSFADE_SAME_ALBUM,
     DEFAULT_VOLUME_NORMALIZATION_MODE,
     ICY_PLACEHOLDER_IMAGE_URLS,
+    NORMALIZATION_LIMITER_CEILING_DB,
     OUTCOME_ONLY_NORMALIZATION_MODES,
     STREAM_SLOT_MATCH_TIMEOUT,
     STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT,
@@ -1770,6 +1772,16 @@ class StreamsAudio:
             gain_correct = round(gain_correct, 2)
             filter_params.append(f"volume={gain_correct}dB")
         streamdetails.volume_normalization_gain_correct = gain_correct
+        # a positive gain can push peaks past full scale; a player's DSP chain owns its limiting
+        if (
+            gain_correct is not None
+            and gain_correct > 0
+            and not self._is_dsp_active_for_queue(streamdetails.queue_id)
+        ):
+            filter_params.append(
+                f"alimiter=limit={NORMALIZATION_LIMITER_CEILING_DB}dB"
+                ":level=false:asc=true:latency=true"
+            )
 
         # handle playback speed
         if playback_speed != 1.0:

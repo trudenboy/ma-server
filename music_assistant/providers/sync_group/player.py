@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
@@ -560,8 +561,7 @@ class SyncGroupPlayer(Player):
             # or we just removed the last member from the group, so we dissolve the syncgroup
             # Use internal handler to stop the sync leader directly,
             # bypassing group redirect that would loop back to this player.
-            async with self.mass.players.wait_for_player_update(leader.player_id, timeout=5):
-                await self.mass.players._handle_cmd_stop(leader.player_id)
+            await self._stop_departing_leader(leader)
             await self._dissolve_syncgroup()
 
         elif leader := self.sync_leader:
@@ -743,22 +743,33 @@ class SyncGroupPlayer(Player):
                 x for x in group_leader.state.group_members if x != group_leader.player_id
             ]
             if sync_children:
-                # wait for the leader's state to reflect the ungroup
-                # use _handle_set_members directly to avoid the redirect loop
-                # (cmd_set_members redirects sync-leader targets back to this syncgroup)
-                async with (
-                    self.mass.players.wait_for_player_update(group_leader.player_id, timeout=5),
-                    self.mass.players.get_player_lock(
-                        group_leader.player_id, PlayerLockPurpose.PLAYBACK
-                    ),
-                ):
-                    await self.mass.players._handle_set_members(
-                        group_leader, player_ids_to_remove=sync_children
+                # a leader that dropped off the network can't ungroup its members; the provider
+                # (or a later form) releases them, so the dissolve carries on
+                try:
+                    # wait for the leader's state to reflect the ungroup
+                    # use _handle_set_members directly to avoid the redirect loop
+                    # (cmd_set_members redirects sync-leader targets back to this syncgroup)
+                    async with (
+                        self.mass.players.wait_for_player_update(group_leader.player_id, timeout=5),
+                        self.mass.players.get_player_lock(
+                            group_leader.player_id, PlayerLockPurpose.PLAYBACK
+                        ),
+                    ):
+                        await self.mass.players._handle_set_members(
+                            group_leader, player_ids_to_remove=sync_children
+                        )
+                except Exception as err:
+                    self.logger.log(
+                        logging.WARNING if group_leader.state.available else logging.DEBUG,
+                        "Could not ungroup the members of %s while dissolving group %s: %s",
+                        group_leader.display_name,
+                        self.display_name,
+                        err,
                     )
             if group_leader is not sync_leader:
                 # our callers only ever stop the leader we track, so a provider-promoted
                 # one would keep streaming on its own once the members are released
-                await self.mass.players._handle_cmd_stop(group_leader.player_id)
+                await self._stop_departing_leader(group_leader, wait_for_update=False)
                 self.mass.players.schedule_active_output_protocol_clear(group_leader)
         # Clear the leader's active protocol once it stops playing; the controller's
         # clearing in _handle_cmd_stop is skipped for a still-grouped protocol player.
@@ -1015,10 +1026,7 @@ class SyncGroupPlayer(Player):
                 self.display_name,
                 leader_to_stop.display_name,
             )
-            async with self.mass.players.wait_for_player_update(
-                leader_to_stop.player_id, timeout=5
-            ):
-                await self.mass.players._handle_cmd_stop(leader_to_stop.player_id)
+            await self._stop_departing_leader(leader_to_stop)
         await self._dissolve_syncgroup()
         if old_leader_id in self._attr_group_members:
             self._attr_group_members.remove(old_leader_id)
@@ -1111,8 +1119,7 @@ class SyncGroupPlayer(Player):
                 self.display_name,
                 old_leader.display_name,
             )
-            async with self.mass.players.wait_for_player_update(old_leader.player_id, timeout=5):
-                await self.mass.players._handle_cmd_stop(old_leader.player_id)
+            await self._stop_departing_leader(old_leader)
             await self._dissolve_syncgroup()
             return
 
