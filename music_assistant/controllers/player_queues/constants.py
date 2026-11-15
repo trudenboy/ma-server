@@ -9,7 +9,7 @@ from music_assistant.controllers.streams.constants import FLOW_STREAM_MAX_LEAD_O
 CONF_DEFAULT_ENQUEUE_SELECT_ARTIST = "default_enqueue_select_artist"
 CONF_DEFAULT_ENQUEUE_SELECT_ALBUM = "default_enqueue_select_album"
 
-ENQUEUE_SELECT_ARTIST_DEFAULT_VALUE = "all_tracks"
+ENQUEUE_SELECT_ARTIST_DEFAULT_VALUE = "prefer_library"
 ENQUEUE_SELECT_ALBUM_DEFAULT_VALUE = "all_tracks"
 
 CONF_DEFAULT_ENQUEUE_OPTION_ARTIST = "default_enqueue_option_artist"
@@ -113,6 +113,9 @@ CACHE_CATEGORY_PLAYER_QUEUE_ITEMS = 1
 # The play action - and with it the UI's in-progress indication - is held until the player
 # reports PLAYING, capped by this timeout so a player that never reports state can't block.
 PLAYBACK_START_TIMEOUT = 5.0
+# Seconds a play request may spend resolving what to play (e.g. a big artist or playlist fetched
+# through a throttled provider) while it holds the playback lock; it fails when that runs out.
+PLAY_REQUEST_RESOLVE_TIMEOUT = 60
 
 # The queue's cached state/items are written through a debounced timer, so a burst of updates (or
 # the per-track updates during playback) collapses into a single write instead of hitting the cache

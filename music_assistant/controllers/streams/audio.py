@@ -45,6 +45,8 @@ from music_assistant_models.errors import (
     ProviderPermissionDenied,
     ProviderUnavailableError,
     QueueEmpty,
+    RateLimited,
+    ResourceTemporarilyUnavailable,
     RetriesExhausted,
 )
 from music_assistant_models.media_items import Album, AudioFormat, Track

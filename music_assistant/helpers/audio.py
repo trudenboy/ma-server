@@ -44,6 +44,8 @@ HTTP_HEADERS_ICY = {**HTTP_HEADERS, "Icy-MetaData": "1"}
 
 SLOW_PROVIDERS = ("tidal", "ytmusic", "apple_music")
 
+_CONTROL_CHARS_RE: Final = re.compile(r"[\x00-\x1f\x7f]")
+
 # Mapping of audio format identifiers to their correct IANA MIME types
 # where the format name differs from the MIME subtype.
 # Strict DLNA/UPnP devices reject non-standard MIME types (e.g. audio/mp3).
