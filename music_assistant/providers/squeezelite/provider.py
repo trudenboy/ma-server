@@ -10,10 +10,10 @@ from aioslimproto.models import EventType as SlimEventType
 from aioslimproto.models import SlimEvent
 from aioslimproto.server import SlimServer
 from music_assistant_models.config_entries import ConfigEntry
-from music_assistant_models.enums import ConfigEntryType, MediaType
-from music_assistant_models.errors import SetupFailedError
+from music_assistant_models.enums import ConfigEntryType, MediaType, ProtocolRole
+from music_assistant_models.errors import MusicAssistantError, SetupFailedError
 
-from music_assistant.constants import CONF_PORT, CONF_SYNC_ADJUST, VERBOSE_LOG_LEVEL
+from music_assistant.constants import CONF_PORT, VERBOSE_LOG_LEVEL
 from music_assistant.helpers.audio import get_mime_type
 from music_assistant.helpers.util import is_port_in_use
 from music_assistant.models.player_provider import PlayerProvider
@@ -27,7 +27,7 @@ from .constants import (
 from .player import SqueezelitePlayer
 
 if TYPE_CHECKING:
-    from aioslimproto.client import SlimClient
+    from aioslimproto.cli import SlimCLICommand
 
 
 class SqueezelitePlayerProvider(PlayerProvider):
@@ -88,6 +88,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
             ip_address=self.mass.streams.publish_ip,
             name="Music Assistant",
             control_port=control_port,
+            cli_command_handler=self._handle_cli_command,
         )
 
     async def loaded_in_mass(self) -> None:
@@ -115,6 +116,17 @@ class SqueezelitePlayerProvider(PlayerProvider):
             "/jsonrpc.js", self.slimproto.cli._handle_jsonrpc_client
         )
 
+    async def discover_players(self) -> None:
+        """Attach the connected players that have no attached protocol, such as a removed one."""
+        if not self.slimproto:
+            return
+        for slimclient in self.slimproto.players:
+            protocol_id = slimclient.player_id
+            if self.get_protocol(protocol_id) is None and self.mass.players.wants_protocol(
+                protocol_id
+            ):
+                await SqueezelitePlayer(self, protocol_id, slimclient).setup()
+
     async def unload(self, is_removed: bool = False) -> None:
         """Handle unload/close of the provider."""
         # Ensure complete cleanup
@@ -122,17 +134,10 @@ class SqueezelitePlayerProvider(PlayerProvider):
         self.mass.streams.unregister_dynamic_route("/slimproto/multi")
         self.mass.streams.unregister_dynamic_route("/jsonrpc.js")
 
-    def get_corrected_elapsed_milliseconds(self, slimplayer: SlimClient) -> int:
-        """Return corrected elapsed milliseconds for a slimplayer."""
-        sync_delay = self.mass.config.get_raw_player_config_value(
-            slimplayer.player_id, CONF_SYNC_ADJUST, 0
-        )
-        return int(slimplayer.elapsed_milliseconds - sync_delay)
-
     def _lookup_display_name(self, player_id: str) -> str | None:
-        """Return Music Assistant's display name for a player, or None if it does not know it."""
-        mass_player = self.mass.players.get_player(player_id)
-        return mass_player.display_name if mass_player else None
+        """Return Music Assistant's display name for a slimproto player, or None if unknown."""
+        mass_player = self.mass.players.get_player_by_protocol(player_id)
+        return mass_player.name if mass_player else None
 
     async def _validate_all_ports(
         self, control_port: int, telnet_port: int | None, json_port: int | None
@@ -186,18 +191,20 @@ class SqueezelitePlayerProvider(PlayerProvider):
                 return  # should not happen, but guard anyways
             # a reconnect before the old socket closed is not reported as a disconnect
             self._release_from_sync_leader(event.player_id)
+            if not self.mass.players.wants_protocol(event.player_id):
+                return
             player = SqueezelitePlayer(self, event.player_id, slimclient)
             self.mass.create_task(player.setup())
             return
 
-        if not (mass_player := self.mass.players.get_player(event.player_id)):
+        if not (mass_player := self.get_protocol(event.player_id)):
             return  # guard for unknown player
         player = cast("SqueezelitePlayer", mass_player)
 
         # Handle player disconnect
         if event.type == SlimEventType.PLAYER_DISCONNECTED:
-            self._release_from_sync_leader(player.player_id)
-            self.mass.create_task(self.mass.players.unregister(player.player_id))
+            self._release_from_sync_leader(player.protocol_id)
+            self.mass.create_task(self.mass.players.unregister(player.protocol_id))
             return
 
         # forward all other events to the player itself
@@ -216,11 +223,11 @@ class SqueezelitePlayerProvider(PlayerProvider):
         if not child_player_id:
             raise web.HTTPNotFound(reason="Missing child_player_id parameter")
 
-        if not (sync_parent := self.mass.players.get_player(player_id)):
+        if not (sync_parent := self.get_protocol(player_id)):
             raise web.HTTPNotFound(reason=f"Unknown player: {player_id}")
         sync_parent = cast("SqueezelitePlayer", sync_parent)
 
-        if not (child_player := self.mass.players.get_player(child_player_id)):
+        if not (child_player := self.get_protocol(child_player_id)):
             raise web.HTTPNotFound(reason=f"Unknown player: {child_player_id}")
 
         if not (stream := sync_parent.multi_client_stream) or stream.done:
@@ -273,12 +280,60 @@ class SqueezelitePlayerProvider(PlayerProvider):
         return resp
 
     def _release_from_sync_leader(self, player_id: str) -> None:
-        """Drop a player whose connection ended from the group of its sync leader."""
-        # a reconnect registers a fresh player, so the leader must let go of the old
+        """Drop a player that left the stream of its sync group from the group of its leader."""
+        # a reconnect attaches a fresh protocol, so the leader must let go of the old
         # one or it keeps listing a member that is no longer part of its stream
         if (
-            (player := self.mass.players.get_player(player_id))
+            (player := self.get_protocol(player_id))
             and (leader_id := player.synced_to)
-            and (leader := self.mass.players.get_player(leader_id))
+            and (leader := self.get_protocol(leader_id))
         ):
-            cast("SqueezelitePlayer", leader).remove_disconnected_member(player_id)
+            cast("SqueezelitePlayer", leader).release_member(player_id)
+
+    async def _handle_cli_command(self, command: SlimCLICommand) -> None:
+        """
+        Handle play, pause and stop sent by a client, acting on its whole group like LMS does.
+
+        A stop from a protocol-only device stops only that device, which then leaves its group
+        unless that group belongs to a sync group player.
+
+        :param command: The CLI command as received from the client.
+        :raises NotImplementedError: For any other command, an unknown player and a stop
+            from a protocol-only device, so aioslimproto handles it for that client alone.
+        """
+        if (
+            not command.player_id
+            or not (protocol := self.get_protocol(command.player_id))
+            or not (player := protocol.player)
+        ):
+            raise NotImplementedError
+        arg = str(command.args[0]) if command.args else None
+        match command.command, arg:
+            case ("play", _) | ("mode", "play") | ("pause", "0"):
+                player_cmd = self.mass.players.cmd_play
+            case ("pause", "1") | ("mode", "pause"):
+                player_cmd = self.mass.players.cmd_pause
+            case ("pause", None):
+                player_cmd = self.mass.players.cmd_play_pause
+            # a protocol-only device also sends stop when another source or app takes
+            # over, so that stop must only stop the device itself and not its group
+            case ("stop", _) | ("mode", "stop") if protocol.role != ProtocolRole.AUDIO:
+                player_cmd = self.mass.players.cmd_stop
+            case ("stop", _) | ("mode", "stop"):
+                # it most likely switched to another source, and a member that stays in the
+                # group would be pulled back by the group's next track or resume; a sync
+                # group player would add it back right away, so its members stay
+                if not player.active_group:
+                    self._release_from_sync_leader(protocol.protocol_id)
+                raise NotImplementedError
+            case _:
+                raise NotImplementedError
+        try:
+            await player_cmd(player.player_id)
+        except MusicAssistantError as err:
+            self.logger.warning(
+                "Failed to handle %s command from %s: %s",
+                command.command,
+                protocol.display_name,
+                err,
+            )

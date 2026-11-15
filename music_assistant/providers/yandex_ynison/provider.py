@@ -41,6 +41,7 @@ from ya_passport_auth import SecretStr
 
 from music_assistant.controllers.streams.constants import STREAM_SLOT_PLAYBACK_WAIT_TIMEOUT
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
+from music_assistant.helpers.player import get_available_player
 from music_assistant.helpers.throttle_retry import (
     RequestPriority,
     ThrottlerManager,
@@ -371,7 +372,7 @@ class YandexYnisonProvider(PluginProvider):
                     EventType.PLAYER_CONFIG_UPDATED,
                     EventType.PLAYER_UPDATED,
                 ),
-                id_filter=self._default_player_id,
+                id_filter=self._connected_player_id,
             )
         )
         # Initial check for matching provider
@@ -468,16 +469,23 @@ class YandexYnisonProvider(PluginProvider):
         reload), the new format takes effect only on the *next* session —
         preventing bit-depth/sample-rate mismatches that cause noise.
         """
-        playback = self._playback
-        playback.begin_stream()
-        # Capture the claim at stream start. The physical consumer may be a
-        # protocol bridge, while the claim names the user-facing owner. MA's
-        # `_load_item` preload path drives the generator BEFORE
-        # `on_source_selected`, so there may be no claim yet; such a stream is
-        # never bound to a claim (`lost()` stays False) and never releases one.
-        # A same-owner reconnect refreshes only the session id; it still
-        # supersedes this stream, which then must not release the new claim.
-        token = playback.capture()
+        self._stream_stop_event.clear()
+        # Snapshot the source-session owner at stream start. The player that consumes
+        # the stream can be another one (a group member), while this id remains the
+        # user-facing player.
+        # The lock may legitimately be empty here — MA's `_load_item` preload
+        # path drives the generator to fill an initial audio buffer BEFORE
+        # `on_source_selected` has been dispatched, so `_in_use_by_player` is
+        # still None on that call. `had_claim` records whether a lock was
+        # already in force at entry; only in that case do we enforce
+        # cross-session invariants on the loop and the `finally` cleanup.
+        player_id = self._in_use_by_player or ""
+        had_claim = self._in_use_by_player is not None
+        # Snapshot the active session id too so a same-owner reconnect (which
+        # updates _active_session_id but not _in_use_by_player) is treated as a
+        # superseding session: the loop exits early, and the finally clear
+        # below skips the release so it doesn't clobber the new claim.
+        captured_session_id = self._active_session_id
 
         # MA's streams controller may pass a non-zero seek_position for a
         # resume that did not go through Ynison; Ynison-driven restarts win.
@@ -620,14 +628,14 @@ class YandexYnisonProvider(PluginProvider):
 
         # Check if manual player switching is allowed
         if not self._allow_player_switch:
-            locked_owner_id = self._default_player_id
+            locked_owner_id = self._connected_player_id
             if owner_player_id != locked_owner_id:
                 # Redirect to the configured target, but only once per
                 # idempotency window. Compare stable owner ids here: the
-                # physical consumer may be a bridge whose id differs from the
+                # player that consumes the stream can differ from the
                 # configured owner and may already be `_active_player_id` on a
                 # repeated callback.
-                if self.mass.players.get_player(locked_owner_id) and self._idempotent(
+                if get_available_player(self.mass, locked_owner_id) and self._idempotent(
                     "source_redirect", locked_owner_id
                 ):
                     self.logger.debug(
@@ -647,10 +655,15 @@ class YandexYnisonProvider(PluginProvider):
                 # be changed to: raise ActionUnavailable(msg)
                 raise RuntimeError(msg)
 
-        # Stop a previous physical consumer when switching. A protocol bridge and
-        # its owner represent the same source session and must not stop each other.
-        if self._playback.consumer_player_id and self._playback.consumer_player_id not in (
-            player_id,
+        # the stream is requested by the protocol that renders it; hold its player
+        consumer = self.mass.players.get_player_by_protocol(player_id)
+        consumer_player_id = consumer.player_id if consumer else owner_player_id
+
+        # Stop a previous physical consumer when switching. The consuming player (a
+        # group member) and its owner represent the same source session and must not
+        # stop each other.
+        if self._active_player_id and self._active_player_id not in (
+            consumer_player_id,
             owner_player_id,
         ):
             prev_player_id = self._playback.consumer_player_id
@@ -668,11 +681,17 @@ class YandexYnisonProvider(PluginProvider):
                     err,
                 )
 
-        # Claim here, not in get_stream_details, so preload paths can fetch
-        # stream details without blocking a later cross-player handoff. The
-        # session id lets on_source_unselected reject stale teardowns.
-        self._playback.claim(owner_player_id, player_id, stream_session_id)
-        self.logger.debug("Active player set to: %s", player_id)
+        # Claim ownership for this player. The lock lives here (not in
+        # get_stream_details) so preload paths can fetch streamdetails without
+        # accidentally blocking a subsequent cross-player handoff at the actual
+        # stream request.
+        self._in_use_by_player = owner_player_id
+        # Record this request's session id so a later on_source_unselected can
+        # tell whether it is the live teardown or a stale callback from a
+        # superseded same-owner request.
+        self._active_session_id = stream_session_id
+        self._active_player_id = consumer_player_id
+        self.logger.debug("Active player set to: %s", consumer_player_id)
         self._publish_source_options(owner_player_id)
 
     async def on_source_unselected(
@@ -1287,11 +1306,49 @@ class YandexYnisonProvider(PluginProvider):
         meta.elapsed_time = seek_ms // 1000 if seek_ms else 0
         meta.elapsed_time_last_updated = time.time()
         # Use `_active_player_id`, the physical player wrapping our stream (a
-        # protocol bridge when present), rather than the source-session owner.
-        if self._playback.consumer_player_id:
-            self.mass.players.trigger_player_update(
-                self._playback.consumer_player_id, force_update=True
-            )
+        # group member when the owner is a group), rather than the source-session owner.
+        if self._active_player_id:
+            self.mass.players.trigger_player_update(self._active_player_id, force_update=True)
+
+    async def _send_progress_to_ynison(
+        self,
+        progress_ms: int,
+        duration_ms: int,
+        paused: bool,
+        *,
+        strict: bool = False,
+    ) -> None:
+        """
+        Send progress to Ynison.
+
+        Progress is clamped to duration because Ynison rejects updates where
+        progress > duration (error 400030001) and disconnects the WebSocket.
+        The byte counter can slightly overshoot duration at end-of-stream.
+
+        Echo detection is done upstream via YnisonState.last_update_is_echo,
+        which is set when Ynison rebroadcasts an update we authored.
+
+        :param progress_ms: Current playback position in milliseconds.
+        :param duration_ms: Current track duration in milliseconds.
+        :param paused: Whether playback is paused.
+        :param strict: When ``True``, propagate transport failures as
+            :class:`provider.ynison_client.YnisonSendError`. Used by user-command
+            and end-of-track callers. Heartbeat callers leave the default.
+        """
+        if duration_ms <= 0:
+            # Ynison rejects progress > duration; skip until duration is known.
+            return
+        if not self._ynison or not self._ynison.connected:
+            if strict:
+                raise YnisonSendError("Ynison not connected")
+            return
+        progress_ms = min(progress_ms, duration_ms)
+        await self._ynison.update_playing_status(
+            progress_ms=progress_ms,
+            duration_ms=duration_ms,
+            paused=paused,
+            strict=strict,
+        )
 
     def _bytes_to_ms(self, byte_count: int, fmt: AudioFormat | None = None) -> int:
         """Convert PCM byte count to milliseconds using the given format."""
@@ -1355,13 +1412,14 @@ class YandexYnisonProvider(PluginProvider):
                 exc_info=True,
             )
             return
-        # Demote `_active_player_id` from the bridge MA streams to
-        # (e.g. `spb_*`) back to the queue id; queues live on the bare
-        # UUID. Without this, resume's `play_media(_active_player_id,
-        # …)` would target the bridge and raise
-        # `PlayerUnavailableError`. Post-success only so a failure
-        # path keeps the bridge id intact for the next attempt.
-        self._playback.pause_externally(target)
+        # Demote `_active_player_id` from the player MA streams to (a
+        # group member when the owner is a group) back to the owner,
+        # whose queue holds the session. Without this, resume's
+        # `play_media(_active_player_id, …)` would play on the member
+        # alone. Post-success only so a failure path keeps the
+        # consumer id intact for the next attempt.
+        self._active_player_id = target
+        self._externally_paused = True
 
     # ------------------------------------------------------------------
     # Player selection
@@ -1380,29 +1438,35 @@ class YandexYnisonProvider(PluginProvider):
         self.mass.call_later(1, self.mass.load_provider_config, self.config, task_id=task_id)
 
     @property
+    def _connected_player_id(self) -> str:
+        """Return the id the configured player answers to now, also after it was merged."""
+        return self.mass.players.resolve_player_id(self._default_player_id)
+
+    @property
     def _display_name(self) -> str:
         """Return the connected player's current or stored display name."""
-        if player := self.mass.players.get_player(self._default_player_id):
-            return str(player.display_name)
-        stored_name = self.mass.config.get_raw_player_config_value(
-            self._default_player_id, "name"
-        ) or self.mass.config.get_raw_player_config_value(self._default_player_id, "default_name")
+        player_id = self._connected_player_id
+        if player := self.mass.players.get_player(player_id):
+            return str(player.name)
+        stored_name = self.mass.config.get_player_value(
+            player_id, "name"
+        ) or self.mass.config.get_player_value(player_id, "default_name")
         return stored_name if isinstance(stored_name, str) and stored_name else DEFAULT_DISPLAY_NAME
 
     def _get_target_player_id(self) -> str | None:
         """Determine the target player ID for playback."""
-        # If there's an active player, validate it still exists
-        if self._playback.consumer_player_id:
-            if self.mass.players.get_player(self._playback.consumer_player_id):
-                return self._playback.consumer_player_id
-            self._playback.consumer_player_id = None
+        # If there's an active player, validate it is still available
+        if self._active_player_id:
+            if get_available_player(self.mass, self._active_player_id):
+                return self._active_player_id
+            self._active_player_id = None
 
         # The configured player is mandatory; never redirect to another player.
-        if self.mass.players.get_player(self._default_player_id):
-            return self._default_player_id
+        if get_available_player(self.mass, player_id := self._connected_player_id):
+            return player_id
 
         self.logger.warning(
-            "Configured default player '%s' no longer exists",
+            "Configured default player '%s' is not available",
             self._default_player_id,
         )
         return None
@@ -1506,10 +1570,10 @@ class YandexYnisonProvider(PluginProvider):
 
     def _clear_active_player(self) -> None:
         """Clear the active player and reset plugin state."""
-        prev_player_id = self._playback.consumer_player_id
-        # the owner is the user-facing MA player; _active_player_id can be the protocol
-        # player that consumed the stream, which is not what holds the source session
-        owner_player_id = self._playback.owner_player_id
+        prev_player_id = self._active_player_id
+        # the owner is the user-facing MA player; _active_player_id can be the group
+        # member that consumed the stream, which is not what holds the source session
+        owner_player_id = self._in_use_by_player
         source_session = (
             self.mass.players.get_audio_source_session(owner_player_id) if owner_player_id else None
         )
@@ -1623,9 +1687,10 @@ class YandexYnisonProvider(PluginProvider):
         if not player_id:
             return rate
         player = self.mass.players.get_player(player_id)
-        if player is None:
+        protocol = player.resolve_output_protocol() if player else None
+        if protocol is None:
             return rate
-        supported = [sr for sr, _ in player.get_supported_sample_rates()]
+        supported = [sr for sr, _ in protocol.get_supported_sample_rates()]
         if not supported or rate in supported:
             return rate
         return max((r for r in supported if r <= rate), default=min(supported))

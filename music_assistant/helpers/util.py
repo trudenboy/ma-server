@@ -659,9 +659,14 @@ def filename_from_string(string: str) -> str:
 _FORBIDDEN_HEADER_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def strip_control_characters(value: str) -> str:
+    """Replace control characters (including line breaks) with a space and strip the result."""
+    return _FORBIDDEN_HEADER_CHARS_RE.sub(" ", value).strip()
+
+
 def sanitize_http_header_value(value: str) -> str:
     """Replace control characters that are not allowed in HTTP header values."""
-    return _FORBIDDEN_HEADER_CHARS_RE.sub(" ", value).strip()
+    return strip_control_characters(value)
 
 
 def try_parse_int(possible_int: Any, default: int | None = 0) -> int | None:
@@ -1567,6 +1572,19 @@ async def load_provider_module(manifest: ProviderManifest) -> ProviderModuleType
     # try loading the provider again to be safe
     # this will fail if something else is wrong (as it should)
     return await _get_provider_module()
+
+
+def set_provider_tier(manifest: ProviderManifest, tier: ProviderTier) -> None:
+    """
+    Set who maintains a provider, which overrides what its manifest says about being built-in.
+
+    :param manifest: Manifest of the provider, changed in place.
+    :param tier: Who maintains the provider.
+    """
+    manifest.tier = tier
+    if tier == ProviderTier.COMMUNITY:
+        manifest.builtin = False
+        manifest.allow_disable = True
 
 
 def purge_provider_modules(domain: str) -> None:
