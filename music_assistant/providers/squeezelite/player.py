@@ -7,10 +7,10 @@ import time
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, cast
 
+from aioslimproto.models import ButtonCode, RemoteCode, SlimEvent
 from aioslimproto.models import EventType as SlimEventType
 from aioslimproto.models import PlayerState as SlimPlayerState
 from aioslimproto.models import Preset as SlimPreset
-from aioslimproto.models import SlimEvent
 from aioslimproto.models import VisualisationType as SlimVisualisationType
 from aioslimproto.sync import SyncGroup
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
@@ -39,6 +39,7 @@ from music_assistant.helpers.util import TaskManager
 from music_assistant.models.player import DeviceInfo, PlayerMedia
 from music_assistant.models.player_protocol import PlayerProtocol
 from music_assistant.models.player_state import POSITION_JUMP_THRESHOLD
+from music_assistant.providers.sendspin.bridge_manager import evaluate_bridge_of
 
 from .constants import (
     CONF_ENTRY_DISPLAY,
@@ -55,11 +56,16 @@ if TYPE_CHECKING:
     from aioslimproto.models import MediaMetadata
 
     from .provider import SqueezelitePlayerProvider
+    from .sendspin_bridge import SendspinSqueezeliteBridge
 
 
 CACHE_CATEGORY_PREV_STATE = (
     1  # category for caching previous player state (bumped to invalidate old format)
 )
+
+# Device models of the LMS bridge tools that expose AirPlay/Chromecast/UPnP devices as
+# squeezelite players.
+BRIDGE_TOOL_MODELS = ("raopbridge", "castbridge", "upnpbridge")
 
 PROTOCOL_ONLY_MODELS = (
     # Device models where slimproto is only a secondary protocol on a device with
@@ -68,9 +74,7 @@ PROTOCOL_ONLY_MODELS = (
     # squeezelite players. These attach as an audio protocol to the player of
     # the device.
     "wiim",
-    "raopbridge",
-    "castbridge",
-    "upnpbridge",
+    *BRIDGE_TOOL_MODELS,
 )
 
 
@@ -80,8 +84,17 @@ def is_protocol_only_device(device_model: str) -> bool:
     return any(model.lower() in device_model_lower for model in PROTOCOL_ONLY_MODELS)
 
 
+def is_bridge_tool(device_model: str) -> bool:
+    """Return True if the device is an LMS bridge tool for a device of another protocol."""
+    device_model_lower = device_model.lower()
+    return any(model in device_model_lower for model in BRIDGE_TOOL_MODELS)
+
+
 class SqueezelitePlayer(PlayerProtocol):
     """Squeezelite Player implementation."""
+
+    # the Sendspin bridge of this player while it has one, set by that bridge
+    sendspin_bridge: SendspinSqueezeliteBridge | None = None
 
     def __init__(
         self,
@@ -129,6 +142,11 @@ class SqueezelitePlayer(PlayerProtocol):
         # must rebuild the stream session instead of taking the LMS _Resume path
         self._restream_needed: bool = False
 
+    @property
+    def native_grouping_requires_own_stream(self) -> bool:
+        """Return True: sync members are fed by the stream this player serves to its group."""
+        return True
+
     async def on_config_updated(self) -> None:
         """Handle logic when the PlayerConfig is first loaded or updated."""
         # map the per-player sync delay setting to the LMS play delay
@@ -137,6 +155,14 @@ class SqueezelitePlayer(PlayerProtocol):
         # set presets and display
         await self._set_preset_items()
         await self._set_display()
+        # not awaited: the attach of this protocol does not wait for its Sendspin bridge
+        self.mass.create_task(evaluate_bridge_of(self.mass, self.protocol_id))
+
+    def on_player_media_updated(self) -> None:
+        """Handle callback when the current media of the player is updated."""
+        if (bridge := self.sendspin_bridge) is not None:
+            # the stream of the bridge plays on from track to track
+            bridge.update_now_playing()
 
     async def on_detach(self) -> None:
         """Handle logic when the protocol is detached from its player."""
@@ -144,6 +170,10 @@ class SqueezelitePlayer(PlayerProtocol):
             self.multi_client_stream = None
             await stream.stop()
         await super().on_detach()
+
+    async def on_remove(self) -> None:
+        """Handle logic when the protocol is removed for good."""
+        await self._provider.bridge_manager.remove_bridge(self.protocol_id, permanent=True)
 
     async def setup(self) -> None:
         """Set up the player and register it."""
@@ -218,6 +248,9 @@ class SqueezelitePlayer(PlayerProtocol):
 
     async def stop(self) -> None:
         """Handle STOP command on the player."""
+        if (bridge := self.sendspin_bridge) is not None:
+            # a stream of the Sendspin bridge ends with the stop below
+            bridge.stop_streaming()
         # Clean up any existing multi-client stream
         if self.multi_client_stream is not None:
             await self.multi_client_stream.stop()
@@ -275,6 +308,15 @@ class SqueezelitePlayer(PlayerProtocol):
         # don't report the old stream's position until the new stream's first heartbeat
         self._attr_elapsed_time = 0
         self._attr_elapsed_time_last_updated = time.time()
+
+        # a Sendspin bridge that plays on one of the players gives it back: the new
+        # stream replaces the stream of that bridge
+        for slimplayer in self._get_sync_clients():
+            member = cast(
+                "SqueezelitePlayer | None", self.provider.get_protocol(slimplayer.player_id)
+            )
+            if member is not None and (bridge := member.sendspin_bridge) is not None:
+                bridge.stop_streaming()
 
         # Clean up any existing multi-client stream before starting a new one
         if self.multi_client_stream is not None:
@@ -446,6 +488,23 @@ class SqueezelitePlayer(PlayerProtocol):
                 # the next resume (LMS takes the stream-idle / _syncStart path, not _Resume)
                 self._restream_needed = True
 
+    async def release_native_playback(self) -> None:
+        """
+        End what this protocol plays itself, for a stream that takes the player over.
+
+        The player leaves the sync group of its leader, the stream it serves to a sync
+        group of its own ends, and the protocol reports no position of its own anymore.
+        The stream on the player itself is left to the one taking over.
+        """
+        if (leader_id := self.synced_to) and (leader := self.provider.get_protocol(leader_id)):
+            cast("SqueezelitePlayer", leader).release_member(self.protocol_id)
+        if (stream := self.multi_client_stream) is not None:
+            self.multi_client_stream = None
+            await stream.stop()
+        self._paused_at = 0.0
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time.time()
+
     def release_member(self, player_id: str) -> None:
         """
         Remove a group member that left the group stream on its own, e.g. it disconnected.
@@ -464,14 +523,23 @@ class SqueezelitePlayer(PlayerProtocol):
     def handle_slim_event(self, event: SlimEvent) -> None:
         """Handle player event from slimproto server."""
         if event.type == SlimEventType.PLAYER_BUFFER_READY:
-            self.mass.create_task(self._handle_buffer_ready())
+            # the Sendspin bridge starts its own stream, at the instant of its timeline
+            if not self._plays_for_bridge:
+                self.mass.create_task(self._handle_buffer_ready())
             return
 
         if event.type == SlimEventType.PLAYER_HEARTBEAT:
-            self._handle_player_heartbeat()
+            # the position of the stream of the Sendspin bridge is not one of this
+            # protocol, and its sync is not that of the sync group
+            if not self._plays_for_bridge:
+                self._handle_player_heartbeat()
             return
 
-        if event.type in (SlimEventType.PLAYER_BTN_EVENT, SlimEventType.PLAYER_CLI_EVENT):
+        if event.type == SlimEventType.PLAYER_BTN_EVENT:
+            self.mass.create_task(self._handle_player_button_event(event))
+            return
+
+        if event.type == SlimEventType.PLAYER_CLI_EVENT:
             self.mass.create_task(self._handle_player_cli_event(event))
             return
 
@@ -520,6 +588,9 @@ class SqueezelitePlayer(PlayerProtocol):
                 queue_item_id=cast("str | None", metadata.get("queue_item_id")),
             )
         else:
+            self._attr_current_media = None
+        if self._plays_for_bridge:
+            # the stream of the Sendspin bridge is no media of this protocol
             self._attr_current_media = None
 
     async def _handle_play_url_for_slimplayer(
@@ -650,6 +721,9 @@ class SqueezelitePlayer(PlayerProtocol):
                 break
             count += 1
 
+        if self._plays_for_bridge:
+            # the Sendspin bridge took the player over while its members buffered
+            return
         # all children ready (or timeout) - start playback in sync
         clients = list(self._get_sync_clients())
         if len(clients) < 2:
@@ -667,7 +741,11 @@ class SqueezelitePlayer(PlayerProtocol):
         event_data = cast("str", event.data)
         if self.player is None:
             return
-        queue = self.mass.player_queues.get_active_queue(self.player.player_id)
+        # while the player plays for its Sendspin bridge, its buttons act on the player
+        # that leads its Sendspin group
+        bridge = self.sendspin_bridge
+        player_id = (bridge.transport_command_target() if bridge else None) or self.player.player_id
+        queue = self.mass.player_queues.get_active_queue(player_id)
         if not queue:
             return
         if event_data.startswith("button preset_") and event_data.endswith(".single"):
@@ -703,6 +781,45 @@ class SqueezelitePlayer(PlayerProtocol):
             if param.isnumeric():
                 await self.mass.player_queues.seek(queue.queue_id, int(param))
         self.logger.log(VERBOSE_LOG_LEVEL, "CLI Event: %s", event_data)
+
+    async def _handle_player_button_event(self, event: SlimEvent) -> None:
+        """
+        Handle a button or remote key of the device that aioslimproto passed on.
+
+        aioslimproto passes play and pause on when the device can not act on them itself,
+        such as on a stopped device: play starts playback on the player and pause toggles
+        it, which reaches the group that owns its playback. Other buttons are ignored.
+
+        :param event: The button event of the device.
+        """
+        match event.data:
+            case {"type": "butn", "button": ButtonCode.PLAY} | {
+                "type": "ir",
+                "code": RemoteCode.PLAY,
+            }:
+                command = self.mass.players.cmd_play
+            case {"type": "butn", "button": ButtonCode.PAUSE} | {
+                "type": "ir",
+                "code": RemoteCode.PAUSE,
+            }:
+                command = self.mass.players.cmd_play_pause
+            case _:
+                return
+        if self.player is None:
+            return
+        bridge = self.sendspin_bridge
+        player_id = (bridge.transport_command_target() if bridge else None) or self.player.player_id
+        try:
+            await command(player_id)
+        except MusicAssistantError as err:
+            self.logger.warning(
+                "Failed to handle the play or pause button of %s: %s", self.display_name, err
+            )
+
+    @property
+    def _plays_for_bridge(self) -> bool:
+        """Return whether the stream on the player is that of its Sendspin bridge."""
+        return (bridge := self.sendspin_bridge) is not None and bridge.owns_stream
 
     def _handle_sync(self) -> None:
         """Synchronize audio of the sync group."""

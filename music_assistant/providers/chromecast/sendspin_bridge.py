@@ -49,13 +49,11 @@ from music_assistant.providers.sendspin.bridge_role import (
     BRIDGE_SAMPLE_RATE,
     BridgePlayerRole,
 )
-from music_assistant.providers.sendspin.constants import (
-    BRIDGE_PREFIX,
-    CONF_SENDSPIN_STATIC_DELAY,
-)
+from music_assistant.providers.sendspin.constants import CONF_SENDSPIN_STATIC_DELAY
 from music_assistant.providers.sendspin.helpers import (
     bridge_client_id_from_mac,
     bridge_client_id_from_uuid,
+    bridge_client_id_variants,
 )
 
 from .constants import (
@@ -95,7 +93,8 @@ _CAST_LOG_LEVEL_MAP: dict[str, int] = {
 }
 
 # Player state fields the bridge policy of its Cast protocol depends on: its device, its
-# other outputs (an AirPlay output denies the Cast bridge) and its availability.
+# other outputs (an AirPlay or a bridgeable squeezelite output denies the Cast bridge) and
+# its availability.
 _BRIDGE_POLICY_STATE_FIELDS = {
     "available",
     "device_info.identifiers",
@@ -189,23 +188,6 @@ def get_bridge_client_id(cast_player: ChromecastPlayer) -> str | None:
     if device_mac and is_valid_mac_address(device_mac):
         return bridge_client_id_from_mac(device_mac)
     return None
-
-
-def _toggle_locally_administered_bit(mac_hex: str) -> str | None:
-    """
-    Toggle bit 1 (locally-administered bit) of the first octet of a hex MAC string.
-
-    :param mac_hex: Lowercase 12-char hex MAC without separators (e.g. "5478c9e60da0").
-    :return: The MAC with the LA bit toggled, or None if input is invalid.
-    """
-    if len(mac_hex) != 12:
-        return None
-    try:
-        first_octet = int(mac_hex[:2], 16)
-        toggled = first_octet ^ 0x02
-        return f"{toggled:02x}{mac_hex[2:]}"
-    except ValueError:
-        return None
 
 
 def is_sendspin_cast_blocked(manufacturer: str, model: str) -> bool:
@@ -868,7 +850,14 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
                 protocol.protocol_id, CONF_SENDSPIN_OPT_OUT_PENDING, True
             )
         await super().evaluate_bridge(protocol)
-        if not client_id or not self._has_bridge(protocol.protocol_id):
+        if not client_id:
+            return
+        if (player := protocol.player) and self._squeezelite_takes_bridge(player):
+            # also the Sendspin output of a Cast bridge that is switched off goes, so the
+            # squeezelite bridge registers the output of the device afresh
+            await self._remove_client_protocol(protocol.protocol_id, client_id)
+            return
+        if not self._has_bridge(protocol.protocol_id):
             return
         if self.mass.config.get_protocol_value(client_id, CONF_PROTOCOL_EXPERIMENTAL_NOTE):
             # the note is written last, so its presence means this output is settled
@@ -990,6 +979,10 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
         # AirPlay or not at all.
         if (player := cast_player.player) and player.get_output_protocol_by_domain("airplay"):
             return False
+        # The squeezelite bridge is preferred as well, while its protocol is attached: the
+        # Cast bridge comes back for a squeezelite player that disconnects.
+        if player and self._squeezelite_takes_bridge(player):
+            return False
         # Same deny before the AirPlay protocol joined the player: another bridge
         # (AirPlay) already registered a client for this device.
         return not self._has_foreign_bridge_client(cast_player.protocol_id, bridge_client_id)
@@ -1052,13 +1045,11 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
         """
         if protocol_id in self._bridges or not (sendspin_server := self.sendspin_server):
             return False
-        client_ids = [bridge_client_id]
         # AirPlay usually registers under the locally-administered form of the MAC
-        if la_variant_mac := _toggle_locally_administered_bit(
-            bridge_client_id[len(BRIDGE_PREFIX) :]
-        ):
-            client_ids.append(f"{BRIDGE_PREFIX}{la_variant_mac}")
-        return any(sendspin_server.is_external_player(client_id) for client_id in client_ids)
+        return any(
+            sendspin_server.is_external_player(client_id)
+            for client_id in bridge_client_id_variants(bridge_client_id)
+        )
 
     def _subscribe_rebridge_on_disconnect(
         self, cast_player: ChromecastPlayer, client_id: str
@@ -1219,4 +1210,17 @@ class SendspinBridgeManager(SendspinBridgeManagerBase[SendspinChromecastBridge])
             "its output is left as it is and retried on the next evaluation",
             client_id,
         )
+        return False
+
+    def _squeezelite_takes_bridge(self, player: Player) -> bool:
+        """
+        Return whether the attached squeezelite protocol of a player qualifies for a bridge.
+
+        :param player: The player of the Chromecast protocol.
+        """
+        for protocol in player.attached_protocols.values():
+            if protocol.provider.domain != "squeezelite":
+                continue
+            manager = getattr(protocol.provider, "bridge_manager", None)
+            return manager is not None and bool(manager.is_bridgeable(protocol))
         return False

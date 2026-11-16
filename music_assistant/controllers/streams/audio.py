@@ -82,6 +82,7 @@ from music_assistant.constants import (
     CONF_VOLUME_NORMALIZATION_TARGET,
     CONF_VOLUME_NORMALIZATION_TRACKS,
     DSP_IRS_DIRNAME,
+    EXTERNAL_ID_PROVIDER,
     FLOW_MODE_SAMPLE_RATE_48000,
     FLOW_MODE_SAMPLE_RATE_96000,
     FLOW_MODE_SAMPLE_RATE_BIT_PERFECT,
@@ -721,6 +722,11 @@ class StreamsAudio:
             details_lock = asyncio.Lock()
             self._stream_details_locks[lock_key] = details_lock
         async with details_lock:
+            media_item = queue_item.media_item
+            if media_item is not None and media_item.provider == EXTERNAL_ID_PROVIDER:
+                # a player that addresses the queue by position asks for items the queue
+                # did not load, and a track known only by an external id has no source
+                await self.mass.player_queues.look_up_external_track(queue_item)
             streamdetails = await self._get_stream_details(
                 queue_item,
                 seek_position,
@@ -5669,21 +5675,26 @@ class StreamsAudio:
         """
         Return the configured output channels for the rendering protocol.
 
-        The value may be stored on the rendering protocol itself (the protocol
-        section of the config UI) or on the own protocol of its player (the
-        native section); the rendering protocol's own stored value wins.
+        The value stored on the rendering protocol itself (the protocol section of
+        the config UI) wins, else the one stored on the protocol it rides on (such
+        as the AirPlay output under a Sendspin bridge), else the one stored on the
+        own protocol of its player (the native section), else stereo.
 
         :param player: The protocol that renders the audio, if it is attached.
         :param protocol_id: The id of the protocol that renders the audio.
         """
         own = player.player.own_protocol if player and player.player else None
-        own_value = (
+        fallback = (
             self.mass.config.get_protocol_value(own.protocol_id, CONF_OUTPUT_CHANNELS, "stereo")
             if own
             else "stereo"
         )
+        if player and (underlying_id := player.underlying_protocol_id):
+            fallback = self.mass.config.get_protocol_value(
+                underlying_id, CONF_OUTPUT_CHANNELS, fallback
+            )
         return self.mass.config.get_protocol_value(
-            player.protocol_id if player else protocol_id, CONF_OUTPUT_CHANNELS, own_value
+            player.protocol_id if player else protocol_id, CONF_OUTPUT_CHANNELS, fallback
         )
 
     def _pick_pcm_bit_depth(
