@@ -253,8 +253,14 @@ class PlayerLifecycleMixin(_PlayerControllerBase):
                 await self._remove_player(player.player_id, rediscover=False)
             removed.append(player.player_id)
         if waits and not removed:
-            msg = f"Players are still being found, try again in {math.ceil(max(waits))} seconds"
-            raise ActionUnavailable(msg)
+            seconds = math.ceil(max(waits))
+            msg = f"Players are still being found, try again in {seconds} seconds"
+            raise ActionUnavailable(
+                msg,
+                translation_key="players_still_being_found",
+                translation_owner=self.translation_owner,
+                translation_args=[seconds],
+            )
         return removed
 
     def keep_player(self, player_id: str) -> None:
@@ -369,10 +375,7 @@ class PlayerLifecycleMixin(_PlayerControllerBase):
             # the attached object goes without anything being published: another object
             # of the protocol takes its place, or it attaches again in another role
             replaced_player = await self._unbind(existing) if existing else None
-            if protocol.role != ProtocolRole.VIRTUAL and protocol.type not in (
-                PlayerType.GROUP,
-                PlayerType.STEREO_PAIR,
-            ):
+            if protocol.role != ProtocolRole.VIRTUAL and protocol.type != PlayerType.GROUP:
                 await self._resolve_mac_addresses(protocol)
                 # the await above may have staled the guards of register()
                 if self._attach_aborted(protocol, attach) or self._teardown_in_progress(protocol):
