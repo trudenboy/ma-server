@@ -115,6 +115,29 @@ def test_support_url_must_be_https() -> None:
         assert any("'support_url' must be" in issue for issue in _validate(manifest, "demo"))
 
 
+def test_valid_media_types_accepted() -> None:
+    """Declared media types that are known MediaType values produce no issues."""
+    manifest = _valid_manifest()
+    manifest["media_types"] = ["radio", "audio_source"]
+    assert _validate(manifest, "demo") == []
+    manifest["media_types"] = []
+    assert _validate(manifest, "demo") == []
+
+
+def test_media_types_breaking_the_rules_rejected() -> None:
+    """Media types that are not a list of known, unique MediaType values are reported."""
+    manifest = _valid_manifest()
+    manifest["media_types"] = "radio"
+    assert _validate(manifest, "demo") == ["'media_types' must be a list"]
+    manifest["media_types"] = ["radio", "radios", "unknown", 1, "radio"]
+    assert _validate(manifest, "demo") == [
+        "media type 'radios' is not a known MediaType",
+        "media type 'unknown' is not a known MediaType",
+        "media type '1' is not a known MediaType",
+        "media type 'radio' is listed more than once",
+    ]
+
+
 def test_real_tree_is_clean() -> None:
     """Every shipped provider manifest passes validation."""
     assert find_violations() == []
@@ -183,6 +206,17 @@ def test_menu_actions_breaking_the_rules_rejected() -> None:
         "menu action 'unknown_type': needs media_types from: album, artist, audiobook, "
         "playlist, podcast, podcast_episode, radio, track",
         "menu action 'twice': another menu action of this provider has the same id",
+    ]
+
+
+def test_page_checked() -> None:
+    """A valid page passes, and one that breaks the server's rules fails the check."""
+    manifest = _valid_manifest()
+    manifest["page"] = {"label": "Picture frame", "scope": "library.read", "icon": "mdi-image"}
+    assert _validate(manifest, "demo") == []
+    manifest["page"] = {"label": "Picture frame", "scope": "everything"}
+    assert _validate(manifest, "demo") == [
+        "page: needs a scope that Music Assistant knows, such as 'library.read'"
     ]
 
 

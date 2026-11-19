@@ -96,8 +96,6 @@ from PIL import Image
 from music_assistant.constants import (
     CONF_ALLOW_AUDIO_ANALYSIS,
     CONF_ENTRY_FLOW_MODE_SAMPLE_RATE,
-    CONF_PLAYER_PROTOCOLS,
-    CONF_UNDERLYING_PLAYER_ID,
 )
 from music_assistant.controllers.streams.audio_analysis import SMART_FADES_ANALYSIS_DOMAIN
 from music_assistant.helpers.util import is_valid_mac_address
@@ -109,7 +107,7 @@ from music_assistant.models.player import (
 from music_assistant.models.player_protocol import AnnouncementFeature, PlayerProtocol
 from music_assistant.models.setup_flow import FINISH_STEP_SILENT, AbortFlow, StepExpiredError
 
-from .bridge_manager import evaluate_bridge_of
+from .bridge_manager import evaluate_bridge_of, hand_static_delay_over
 from .bridge_role import BridgePlayerRole
 from .constants import (
     BRIDGE_PREFIX,
@@ -126,7 +124,6 @@ from .constants import (
     CONF_PAIRING_METHOD,
     CONF_PAIRING_PIN,
     CONF_PAIRING_TOKEN,
-    CONF_SENDSPIN_BRIDGE_STATIC_DELAYS,
     CONF_SENDSPIN_STATIC_DELAY,
     CONF_SOURCE_AUTOSTART_TARGET,
     CONF_SOURCE_INPUT_ACTION,
@@ -352,7 +349,6 @@ if TYPE_CHECKING:
     from music_assistant.models.setup_flow import SetupSession
     from music_assistant.providers.chromecast.sendspin_bridge import SendspinBridgeManager
     from music_assistant.providers.hass import HomeAssistantProvider
-    from music_assistant.providers.sendspin_source.provider import SendspinSourceProvider
 
     from .provider import PinPairingSession, SendspinProvider
 
@@ -553,11 +549,8 @@ class SendspinBasePlayer(PlayerProtocol):
 
     async def on_config_updated(self) -> None:
         """Handle logic when the PlayerConfig is first loaded or updated."""
-        if source_provider := self.mass.get_provider("sendspin_source"):
-            # an input that is playing holds the source it was selected with
-            cast("SendspinSourceProvider", source_provider).on_client_config_updated(
-                self.protocol_id
-            )
+        # an input that is playing holds the source it was selected with
+        cast("SendspinProvider", self.provider).sources.on_client_config_updated(self.protocol_id)
 
     async def handle_config_action(self, action: str) -> list[ConfigEntry]:
         """Run an unpair/management/input action, then re-render the entries."""
@@ -2325,7 +2318,7 @@ class SendspinPlayer(SendspinBasePlayer):
         :param underlying_protocol_id: Id of the protocol the bridge rides on.
         """
         super().ride_on(underlying_protocol_id)
-        self._hand_static_delay_over(underlying_protocol_id)
+        hand_static_delay_over(self.mass, self.protocol_id, underlying_protocol_id)
 
     async def on_attach(self, player: Player) -> None:
         """Follow the client, from the volume, mute and controls it declares now."""
@@ -2707,30 +2700,6 @@ class SendspinPlayer(SendspinBasePlayer):
             self.config.get_value(CONF_SENDSPIN_STATIC_DELAY, self.static_delay_default_ms),
         )
         player_role.set_output_delay(config_value)
-
-    def _hand_static_delay_over(self, underlying_protocol_id: str) -> None:
-        """
-        Let the stored static delay follow the protocol the output rides on from now on.
-
-        :param underlying_protocol_id: Id of the protocol the output rides on from now on.
-        """
-        if (record := self.mass.config.get_protocol_record(self.protocol_id)) is None:
-            return
-        values = dict(record.get("values") or {})
-        previous_id = values.get(CONF_UNDERLYING_PLAYER_ID)
-        if not isinstance(previous_id, str) or previous_id == underlying_protocol_id:
-            return
-        set_aside = dict(values.pop(CONF_SENDSPIN_BRIDGE_STATIC_DELAYS, None) or {})
-        if (delay := values.pop(CONF_SENDSPIN_STATIC_DELAY, None)) is not None:
-            set_aside[previous_id] = delay
-        if (delay := set_aside.pop(underlying_protocol_id, None)) is not None:
-            values[CONF_SENDSPIN_STATIC_DELAY] = delay
-        if set_aside:
-            values[CONF_SENDSPIN_BRIDGE_STATIC_DELAYS] = set_aside
-        # stored with the delays, so a second hand-over before the attach stores it finds
-        # the delays handed over already
-        values[CONF_UNDERLYING_PLAYER_ID] = underlying_protocol_id
-        self.mass.config.set(f"{CONF_PLAYER_PROTOCOLS}/{self.protocol_id}/values", values)
 
     def _take_reported_volume(self, volume: int, muted: bool) -> None:
         """Take the volume and mute the client reported, and the controls it declares with them."""
@@ -3369,7 +3338,7 @@ class SendspinPlayer(SendspinBasePlayer):
 
 
 class SendspinVisualizerPlayer(SendspinBasePlayer):
-    """A non-audio Sendspin player for visualizer/lighting devices."""
+    """A non-audio Sendspin player for display, visualizer, lighting and controller devices."""
 
     _attr_type = PlayerType.VISUALIZER
     # keep in line with SESSION_ONLY_DEFAULTS in controllers/config/player_split.py
@@ -3499,7 +3468,7 @@ class SendspinSourcePlayer(SendspinBasePlayer):
 
     Renders nothing and is never a playback or grouping target. It is listed as an
     audio input so its pairing, enabling and line-in autostart settings are easy to
-    reach. The sendspin_source plugin exposes the audio itself.
+    reach. The Sendspin provider exposes the audio itself, as a line-in source.
     """
 
     _attr_type = PlayerType.SOURCE
