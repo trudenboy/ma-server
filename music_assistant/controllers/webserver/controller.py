@@ -66,7 +66,6 @@ from music_assistant.constants import (
     DEFAULT_HOST,
     INGRESS_SERVER_PORT,
     RESOURCES_DIR,
-    SENDSPIN_SERVER_PORT,
     VERBOSE_LOG_LEVEL,
     WILDCARD_BIND_IPS,
 )
@@ -124,6 +123,7 @@ if TYPE_CHECKING:
 
     from music_assistant import MusicAssistant
     from music_assistant.helpers.api import APICommandHandler
+    from music_assistant.providers.sendspin.provider import SendspinProvider
 
 DEFAULT_SERVER_PORT = 8095
 CONF_BASE_URL = "base_url"
@@ -308,14 +308,17 @@ class WebserverController(CoreController):
         return self.base_url
 
     @property
-    def internal_sendspin_url(self) -> str:
-        """Return the URL to reach the in-process Sendspin server from this host."""
+    def internal_sendspin_url(self) -> str | None:
+        """Return the URL to reach the in-process Sendspin server from this host, while it is loaded."""
+        sendspin = cast("SendspinProvider | None", self.mass.get_provider("sendspin"))
+        if sendspin is None:
+            return None
         # the advertised address is not necessarily dialable here (e.g. a container or
         # NAT setup), so derive the address from what the Sendspin server actually binds to
         connect_ip = _get_internal_connect_ip(
             self.mass.streams.bind_ip, str(self.mass.streams.publish_ip)
         )
-        return f"ws://{format_ip_for_url(connect_ip)}:{SENDSPIN_SERVER_PORT}/sendspin"
+        return f"ws://{format_ip_for_url(connect_ip)}:{sendspin.server_port}/sendspin"
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return all Config Entries for this core module (if any)."""
@@ -569,28 +572,27 @@ class WebserverController(CoreController):
         )
         self.provider_pages.drop_user(user_id)
 
-    def update_active_user_filters(
-        self,
-        user_id: str,
-        player_filter: list[str] | None = None,
-    ) -> None:
+    def update_active_user(self, user: User) -> None:
         """
-        Apply updated access filters to the live sessions of a user.
+        Apply the stored profile, preferences and player filter of a user to its live sessions.
 
-        Call this after the filters of a user were changed in the database, so the
-        change takes effect right away instead of only on the next connection.
+        Call this after the user was changed in the database, so the change takes effect
+        right away instead of only on the next connection. A changed role, or a disabled
+        user, instead needs `disconnect_websockets_for_user`.
 
-        :param user_id: ID of the user whose sessions must be updated.
-        :param player_filter: The new player filter, or None to leave it untouched.
+        :param user: The user as just read back from the database.
         """
         for client in list(self.clients):
-            user = client.authenticated_user
-            if user is None or user.user_id != user_id:
+            live_user = client.authenticated_user
+            if live_user is None or live_user.user_id != user.user_id:
                 continue
             # updated in place: the connection's context holds this very object
-            if player_filter is not None:
-                user.player_filter[:] = player_filter
-            self.logger.debug("Updated the access filters of a live session of %s", user.username)
+            live_user.username = user.username
+            live_user.display_name = user.display_name
+            live_user.avatar_url = user.avatar_url
+            live_user.preferences = dict(user.preferences)
+            live_user.player_filter[:] = user.player_filter
+            self.logger.debug("Updated a live session of %s", live_user.username)
 
     def set_sendspin_player_for_token(self, token: str, player_id: str) -> None:
         """
