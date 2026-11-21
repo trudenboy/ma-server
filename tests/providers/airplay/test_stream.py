@@ -1421,6 +1421,150 @@ async def test_start_sends_command_and_stamps_position() -> None:
 
 
 @pytest.mark.asyncio
+async def test_raop_repeated_starts_anchor_progress_without_metadata() -> None:
+    """Every RAOP start anchors progress even when a live input has no metadata."""
+    player = _make_player()
+    player.current_media = None
+    player.state.current_media = None
+    stream = AirPlayStream(player)
+    stream.active_route = "RAOP"
+    stream._cli_proc = _make_cli_proc()
+    stream._connected.set()
+    tasks: list[asyncio.Task[None]] = []
+
+    def create_task(coro: Coroutine[Any, Any, None], **_kwargs: Any) -> asyncio.Task[None]:
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    player.provider.mass.create_task.side_effect = create_task
+    with (
+        patch.object(
+            stream,
+            "_write_cli_command",
+            new_callable=AsyncMock,
+            side_effect=_acking_write_cli_command(stream, START_UNIX_MS + 3000),
+        ) as write_command,
+        patch(
+            "music_assistant.providers.airplay.stream.time.time", return_value=START_UNIX_MS / 1000
+        ),
+        patch(
+            "music_assistant.providers.airplay.stream.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep,
+    ):
+        for _ in range(2):
+            await stream.start(START_UNIX_MS, 0)
+            await asyncio.gather(*tasks)
+            tasks.clear()
+
+    assert [args.args[0] for args in write_command.await_args_list].count("PROGRESS=0") == 2
+    assert sleep.await_args_list == [call(3.1), call(3.1)]
+
+
+@pytest.mark.asyncio
+async def test_start_progress_anchor_uses_rebased_position() -> None:
+    """The delayed anchor uses the settled position and actual audible start."""
+    stream = AirPlayStream(_make_player())
+    stream._cli_proc = _make_cli_proc()
+    stream._connected.set()
+    stream._start_position = 12.0
+    with (
+        patch.object(stream, "send_cli_command", new_callable=AsyncMock) as send,
+        patch("music_assistant.providers.airplay.stream.asyncio.sleep", new_callable=AsyncMock),
+        patch(
+            "music_assistant.providers.airplay.stream.time.time",
+            return_value=START_UNIX_MS / 1000 + 2,
+        ),
+    ):
+        await stream._send_start_progress_anchor(START_UNIX_MS, 0)
+    send.assert_awaited_once_with("PROGRESS=14")
+    assert stream._last_progress_sent == 14
+
+
+@pytest.mark.asyncio
+async def test_start_progress_anchor_without_an_acked_instant() -> None:
+    """An ASAP start without a usable ack anchors at the start position, not the epoch."""
+    stream = AirPlayStream(_make_player())
+    stream._cli_proc = _make_cli_proc()
+    stream._connected.set()
+    stream._start_position = 12.0
+    with (
+        patch.object(stream, "send_cli_command", new_callable=AsyncMock) as send,
+        patch("music_assistant.providers.airplay.stream.asyncio.sleep", new_callable=AsyncMock),
+        patch(
+            "music_assistant.providers.airplay.stream.time.time",
+            return_value=START_UNIX_MS / 1000,
+        ),
+    ):
+        await stream._send_start_progress_anchor(0, 0)
+    send.assert_awaited_once_with("PROGRESS=12")
+
+
+@pytest.mark.asyncio
+async def test_airplay2_start_does_not_schedule_raop_progress() -> None:
+    """Native AirPlay 2 starts keep their existing metadata scheduling."""
+    player = _make_player()
+    stream = AirPlayStream(player)
+    stream.active_route = "AirPlay 2 (buffered, PTP)"
+    stream._cli_proc = _make_cli_proc()
+    stream._connected.set()
+    with patch.object(
+        stream,
+        "_write_cli_command",
+        new_callable=AsyncMock,
+        side_effect=_acking_write_cli_command(stream),
+    ):
+        await stream.start(START_UNIX_MS, 0)
+    for scheduled in player.provider.mass.create_task.call_args_list:
+        assert not scheduled.kwargs["task_id"].startswith("airplay_progress_after_start_")
+        scheduled.args[0].close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidated_by", ["restart", "flush", "stop"])
+async def test_raop_progress_anchor_does_not_outlive_its_start(invalidated_by: str) -> None:
+    """A deferred progress update cannot act on a stopped, flushed or newer start."""
+    player = _make_player()
+    player.current_media = None
+    player.state.current_media = None
+    stream = AirPlayStream(player)
+    stream.active_route = "RAOP"
+    stream._cli_proc = _make_cli_proc(quiesced=False)
+    stream._connected.set()
+    pending: list[Coroutine[Any, Any, None]] = []
+
+    def create_task(coro: Coroutine[Any, Any, None], **_kwargs: Any) -> MagicMock:
+        pending.append(coro)
+        return MagicMock()
+
+    player.provider.mass.create_task.side_effect = create_task
+    with (
+        patch.object(
+            stream,
+            "_write_cli_command",
+            new_callable=AsyncMock,
+            side_effect=_acking_write_cli_command(stream),
+        ) as write_command,
+        patch("music_assistant.providers.airplay.stream.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        await stream.start(START_UNIX_MS, 0)
+        old_progress = pending.pop()
+        if invalidated_by == "restart":
+            await stream.start(START_UNIX_MS + 1000, 12000)
+        elif invalidated_by == "flush":
+            await stream.flush()
+        else:
+            stream._cli_proc.kill = AsyncMock()
+            with patch.object(stream.commands_pipe, "remove", new_callable=AsyncMock):
+                await stream.stop(force=True)
+        await old_progress
+        for coro in pending:
+            coro.close()
+
+    assert not any(args.args[0].startswith("PROGRESS=") for args in write_command.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_start_join_marks_the_command() -> None:
     """A late-join START carries START_JOIN=1 so the binary enforces clock readiness."""
     player = _make_player()
@@ -1469,7 +1613,7 @@ async def test_start_transition_artwork_settled_or_retried(complete_before_start
     render_count = 0
 
     def create_task(target: Any, **_kwargs: Any) -> asyncio.Task[Any]:
-        task = asyncio.create_task(target())
+        task = asyncio.create_task(target)
         metadata_tasks.append(task)
         return task
 
@@ -2158,6 +2302,23 @@ def test_native_control_failure_warns_once_and_never_touches_config(
     pinned_player.provider.mass.config.set_raw_player_config_value.assert_not_called()
 
 
+def test_compat_route_connection_loss_skips_the_native_keepalive_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The compatibility flow reports a lost connection with the same line, without native keepalives."""
+    player = _make_player()
+    stream = AirPlayStream(player)
+    player.stream = stream
+    stream._parse_route_status(
+        "[STATUS] route protocol=airplay2 flow=raop-compat timing=ntp buffered=0"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        stream._handle_status_line("[ERROR] AirPlay 2 control channel failed")
+
+    assert "native AirPlay 2 control keepalives" not in caplog.text
+
+
 def test_native_control_failure_on_a_superseded_stream_stays_silent() -> None:
     """
     A superseded stream's lost control channel is not reported.
@@ -2785,6 +2946,17 @@ async def test_prepare_artwork_returns_cache_path() -> None:
     )
 
 
+def _binary_confirms_stop(stream: AirPlayStream) -> AsyncMock:
+    """Return a command-pipe write that answers STOP the way the binary does."""
+
+    async def _write(data: bytes) -> bool:
+        if data == b"ACTION=STOP\n":
+            stream._handle_status_line("[STATUS] stopped")
+        return True
+
+    return AsyncMock(side_effect=_write)
+
+
 @pytest.mark.asyncio
 async def test_stop_cleans_up_when_stop_command_fails() -> None:
     """A command-pipe failure cannot skip process and stream cleanup."""
@@ -2838,7 +3010,7 @@ async def test_stop_awaits_cancelled_stdout_reader() -> None:
     await reader_started.wait()
 
     with (
-        patch.object(stream.commands_pipe, "write", new_callable=AsyncMock),
+        patch.object(stream.commands_pipe, "write", _binary_confirms_stop(stream)),
         patch.object(stream.commands_pipe, "remove", new_callable=AsyncMock),
     ):
         await stream.stop(force=True)
@@ -2872,7 +3044,7 @@ async def test_force_stop_does_not_wait_for_artwork_render() -> None:
         return "late.jpg"
 
     with (
-        patch.object(stream.commands_pipe, "write", new_callable=AsyncMock),
+        patch.object(stream.commands_pipe, "write", _binary_confirms_stop(stream)),
         patch.object(stream.commands_pipe, "remove", new_callable=AsyncMock),
         patch.object(
             stream,
@@ -2889,6 +3061,60 @@ async def test_force_stop_does_not_wait_for_artwork_render() -> None:
 
     assert stream._cleanup_complete is True
     process.kill.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_force_stop_kills_only_after_the_binary_confirmed_stop() -> None:
+    """
+    A forced stop leaves the binary time to release the receiver before killing it.
+
+    The binary sends the RTSP TEARDOWN before it confirms STOP; some receivers
+    (squeezelite-esp32) only free their output on that TEARDOWN.
+    """
+    player = _make_player()
+    stream = AirPlayStream(player)
+    events: list[str] = []
+    process = MagicMock()
+    process.closed = False
+    process.kill = AsyncMock(side_effect=lambda: events.append("kill"))
+    stream._cli_proc = process
+
+    async def _confirm_later() -> None:
+        await asyncio.sleep(0.05)
+        events.append("stopped")
+        stream._handle_status_line("[STATUS] stopped")
+
+    with (
+        patch.object(stream.commands_pipe, "write", new_callable=AsyncMock, return_value=True),
+        patch.object(stream.commands_pipe, "remove", new_callable=AsyncMock),
+    ):
+        confirm = asyncio.create_task(_confirm_later())
+        # well within the stop ack timeout: the confirmation ends the wait
+        await asyncio.wait_for(stream.stop(force=True), timeout=1)
+        await confirm
+
+    assert events == ["stopped", "kill"]
+
+
+@pytest.mark.asyncio
+async def test_force_stop_gives_up_on_a_binary_that_never_confirms() -> None:
+    """A binary that never confirms STOP is killed once the stop ack timeout runs out."""
+    player = _make_player()
+    stream = AirPlayStream(player)
+    process = MagicMock()
+    process.closed = False
+    process.kill = AsyncMock()
+    stream._cli_proc = process
+
+    with (
+        patch("music_assistant.providers.airplay.stream.AIRPLAY_STOP_ACK_TIMEOUT", 0.05),
+        patch.object(stream.commands_pipe, "write", new_callable=AsyncMock, return_value=True),
+        patch.object(stream.commands_pipe, "remove", new_callable=AsyncMock),
+    ):
+        await asyncio.wait_for(stream.stop(force=True), timeout=1)
+
+    process.kill.assert_awaited_once()
+    assert stream._cleanup_complete is True
 
 
 async def _run_stderr_reader_to(
@@ -3035,6 +3261,47 @@ async def test_unexpected_death_of_leader_schedules_rejoin_to_members() -> None:
     player.schedule_group_rejoin.assert_called_once_with(["child1", "child2"])
     # the controller sets the leader's final state (transfer or dissolve)
     player.set_state_from_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_receiver_taken_over_leaves_the_group_without_a_rejoin(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A member whose receiver another sender took over is dropped, not re-joined.
+
+    Re-joining would take the receiver back from the other sender (an iPhone).
+    """
+    player = _make_player()
+    player.synced_to = "leader"
+    player.group_members = []
+    leader = MagicMock()
+    leader.group_members = ["leader", player.player_id]
+    player.provider.mass.players.get_player.return_value = leader
+    stream = AirPlayStream(player)
+    player.stream = stream
+    process = MagicMock()
+    stream._cli_proc = process
+
+    async def _stderr_lines() -> AsyncGenerator[str]:
+        yield "[STATUS] receiver_closed"
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch.object(process, "iter_stderr", return_value=_stderr_lines()),
+        patch.object(stream.commands_pipe, "remove", new_callable=AsyncMock),
+    ):
+        await stream._stderr_reader()
+
+    player.provider.mass.players.cmd_set_members.assert_called_once_with(
+        "leader", player_ids_to_remove=[player.player_id]
+    )
+    player.schedule_group_rejoin.assert_not_called()
+    player.set_state_from_stream.assert_called_once_with(
+        state=PlaybackState.IDLE, elapsed_time=0, stream=stream
+    )
+    assert "another sender took over" in caplog.text
+    assert "stopped unexpectedly" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -3799,6 +4066,85 @@ async def test_text_refinement_keeps_delivered_artwork_settled() -> None:
     assert sum(f"ARTWORKFILE={artwork_path}\n" in command for command in commands) == 1
     assert "ARTWORKFILE" not in commands[-1]
     assert "TITLE=Track (Remastered)" in commands[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "item_ids",
+    [("item-1", "item-2"), (None, None)],
+    ids=["queue-items", "audio-source"],
+)
+async def test_next_track_with_the_same_cover_resends_artwork(
+    item_ids: tuple[str | None, str | None],
+) -> None:
+    """A new now-playing item re-sends a cover it shares with the previous track."""
+    stream = AirPlayStream(_make_player())
+
+    def make_metadata(item_id: str | None, title: str) -> MagicMock:
+        return MagicMock(
+            queue_item_id=item_id,
+            duration=180,
+            title=title,
+            artist="Artist",
+            album="Album",
+            image_url="album-cover",
+        )
+
+    artwork_path = "/cache/thumbnails/album-cover.jpg"
+
+    with (
+        patch.object(stream, "_prepare_artwork", new=AsyncMock(return_value=artwork_path)),
+        patch.object(
+            stream, "send_cli_command", new_callable=AsyncMock, return_value=True
+        ) as send_command,
+    ):
+        await stream.send_metadata(None, make_metadata(item_ids[0], "Track 1"))
+        await stream.send_metadata(None, make_metadata(item_ids[1], "Track 2"))
+
+    last_bundle = send_command.await_args_list[-1].args[0]
+    assert "TITLE=Track 2\n" in last_bundle
+    assert f"ARTWORKFILE={artwork_path}\n" in last_bundle
+
+
+@pytest.mark.asyncio
+async def test_new_item_retries_a_shared_cover_that_missed_its_bundle() -> None:
+    """A shared cover whose delivery failed for a new item goes out on its next update."""
+    stream = AirPlayStream(_make_player())
+    first = MagicMock(
+        queue_item_id="item-1",
+        duration=180,
+        title="Track 1",
+        artist="Artist",
+        album="Album",
+        image_url="album-cover",
+    )
+    second = MagicMock(
+        queue_item_id="item-2",
+        duration=180,
+        title="Track 2",
+        artist="Artist",
+        album="Album",
+        image_url="album-cover",
+    )
+    artwork_path = "/cache/thumbnails/album-cover.jpg"
+
+    with (
+        patch.object(
+            stream,
+            "_prepare_artwork",
+            new=AsyncMock(side_effect=[artwork_path, None, artwork_path]),
+        ),
+        patch.object(
+            stream, "send_cli_command", new_callable=AsyncMock, return_value=True
+        ) as send_command,
+    ):
+        await stream.send_metadata(None, first)
+        await stream.send_metadata(None, second)
+        assert "ARTWORK" not in send_command.await_args_list[-1].args[0]
+        await stream.send_metadata(10, second)
+
+    commands = [args.args[0] for args in send_command.await_args_list]
+    assert f"ARTWORK={artwork_path}" in commands
 
 
 # --- Structured connect failures reported by the binary ---

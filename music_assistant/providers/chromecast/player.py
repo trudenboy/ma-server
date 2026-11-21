@@ -48,6 +48,7 @@ from .constants import (
     DASHBOARD_KEEPALIVE_SUFFIXES,
     MASS_APP_ID,
     SENDSPIN_CAST_APP_ID,
+    get_cast_output_codec_entry,
 )
 from .helpers import CastStatusListener, ChromecastInfo, is_google_device
 from .receiver_commands import MassCastCommandController
@@ -68,6 +69,9 @@ class ChromecastPlayer(Player):
     # a quit that is already on the wire cannot be recalled, so a receiver that
     # still reports our app is no longer proof that the session is usable
     app_quit_sent: bool = False
+    # whether the playback the receiver last reported was a Music Assistant session,
+    # taken while it plays: once it ends the receiver may no longer say what it played
+    _playing_own_session: bool = False
 
     def __init__(
         self,
@@ -154,14 +158,17 @@ class ChromecastPlayer(Player):
 
     async def get_config_entries(self) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the given player (if any)."""
+        output_codec_entry = get_cast_output_codec_entry(self.cast_info.model_name)
         if self.type == PlayerType.GROUP:
             return [
+                output_codec_entry,
                 *CAST_PLAYER_CONFIG_ENTRIES,
                 CONF_ENTRY_HTTP_PROFILE_DEFAULT_2,
                 CONF_ENTRY_SAMPLE_RATES_CAST_GROUP,
             ]
 
         return [
+            output_codec_entry,
             *CAST_PLAYER_CONFIG_ENTRIES,
             CONF_ENTRY_HTTP_PROFILE_DEFAULT_2,
             CONF_ENTRY_SAMPLE_RATES_CAST,
@@ -601,6 +608,8 @@ class ChromecastPlayer(Player):
             return
 
         self._report_media_error(status, group_player)
+        if group_player is None:
+            self._restart_lost_stream(status)
 
         # pychromecast reports BUFFERING as 'playing', so a Cast group that underruns the
         # LIVE flow stream at EOF never goes idle. Treat that case as idle so the queue
@@ -656,6 +665,21 @@ class ChromecastPlayer(Player):
             status.content_id or "the loaded media",
         )
 
+    def _restart_lost_stream(self, status: MediaStatus) -> None:
+        """
+        Have the queue restart a stream the receiver gave up on while it played it.
+
+        :param status: Media status as reported by the receiver.
+        """
+        if (
+            status.player_is_idle
+            and status.idle_reason == "ERROR"
+            and self._attr_playback_state == PlaybackState.PLAYING
+            and status.content_id
+        ):
+            # nothing is queued on the receiver after a flow stream, so it stays idle otherwise
+            self.mass.streams.restart_lost_stream(status.content_id)
+
     def _update_playback_state(self, status: MediaStatus, is_playing: bool) -> None:
         """
         Apply the reported playback state, releasing the device once playback ended.
@@ -664,6 +688,8 @@ class ChromecastPlayer(Player):
         :param is_playing: Whether the receiver is really playing audio.
         """
         prev_state = self._attr_playback_state
+        if is_playing or status.player_is_paused:
+            self._playing_own_session = self._is_own_session(status)
         if is_playing:
             self._attr_playback_state = PlaybackState.PLAYING
             self.set_current_media(uri=status.content_id or "", clear_all=True)
@@ -679,11 +705,15 @@ class ChromecastPlayer(Player):
                 prev_state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
                 and self.type != PlayerType.GROUP
                 and self.active_cast_group is None
+                and self._playing_own_session
             ):
                 # Playback that ends on its own never gets a stop command (the queue ran
                 # out, or an announcement finished), so without this the device would stay
                 # claimed forever. A cast group is left alone: quitting its app is what its
                 # power control does, and a group member follows the group's session.
+                # Playback another party cast through the Default Media Receiver is left
+                # to the receiver's own idle timeout: quitting it ends that party's session,
+                # and its next cast then has to start a new one, with the connect chime.
                 self._schedule_app_release()
 
     def _update_elapsed_time(self, status: MediaStatus, is_playing: bool) -> None:
@@ -916,3 +946,13 @@ class ChromecastPlayer(Player):
             self.mass.create_task(queue_command(queue.queue_id))
 
         self.mass.loop.call_soon_threadsafe(dispatch)
+
+    def _is_own_session(self, status: MediaStatus) -> bool:
+        """Return whether the running receiver app plays a Music Assistant session."""
+        if self.cc.app_id == MASS_APP_ID:
+            return True
+        if self.cc.app_id != APP_MEDIA_RECEIVER:
+            return False
+        # other apps cast through the Default Media Receiver too, so only our own stream
+        # (or nothing loaded yet, right after we launched it) makes the session ours
+        return not status.content_id or status.content_id.startswith(self.mass.streams.base_url)

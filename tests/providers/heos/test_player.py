@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
 from music_assistant_models.enums import MediaType, PlaybackState
 from pyheos import PlayState as HeosPlayState
 from pyheos import const as heos_const
 
 from music_assistant.models.player import PlayerMedia
 from music_assistant.providers.heos.player import HeosPlayer
+
+HIRES_SAMPLE_RATES = [
+    (sr, bd) for sr in (44100, 48000, 88200, 96000, 176400, 192000) for bd in (16, 24)
+]
 
 
 def _url_stream_now_playing() -> MagicMock:

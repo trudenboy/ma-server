@@ -550,6 +550,26 @@ class StreamsController(CoreController):
             if (transport := request.transport) is not None:
                 transport.abort()
 
+    def restart_lost_stream(self, stream_url: str) -> bool:
+        """
+        Restart the queue of a stream a player gave up on, at the position that plays now.
+
+        For a player that reports a playback error on a stream it was playing. Only the flow
+        stream of the queue's current session restarts, within the queue's restart limit.
+
+        :param stream_url: The URL of the stream the player gave up on.
+        :return: Whether the queue restarts.
+        """
+        flow_url_prefix = f"{self.base_url}/flow/"
+        if not stream_url.startswith(flow_url_prefix):
+            return False
+        # <session_id>/<queue_id>/<queue_item_id>/<player_id>.<fmt>
+        url_parts = stream_url.removeprefix(flow_url_prefix).split("/")
+        if len(url_parts) != 4:
+            return False
+        session_id, queue_id = url_parts[:2]
+        return self.mass.player_queues.restart_lost_flow_stream(queue_id, session_id)
+
     async def serve_queue_item_stream(self, request: web.Request) -> web.StreamResponse:  # noqa: PLR0915
         """Stream single queueitem audio to a player."""
         self._log_request(request)
@@ -874,6 +894,20 @@ class StreamsController(CoreController):
                     headers={"Content-Range": f"bytes */{range_start}"}
                 )
             raise web.HTTPNotFound(reason=f"Flow stream already finished: {session_id}")
+        if (
+            request.method == "GET"
+            and request.headers.get("Range")
+            and (range_start := request.http_range.start)
+            and (flow_sent := self._flow_bytes_sent.get(player_id))
+            and flow_sent[0] == request.path
+            and range_start <= flow_sent[1]
+            and self.mass.player_queues.restart_lost_flow_stream(queue_id, session_id)
+        ):
+            # the player lost its connection and asks to continue after the bytes it holds,
+            # which a new stream can not do: the queue restarts it where it plays now
+            raise web.HTTPRequestRangeNotSatisfiable(
+                headers={"Content-Range": f"bytes */{range_start}"}
+            )
         start_queue_item_id = request.match_info["queue_item_id"]
         start_queue_item = self._get_flow_start_item(queue, start_queue_item_id)
         if not start_queue_item:
