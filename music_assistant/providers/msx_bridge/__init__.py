@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from music_assistant_models.enums import ProviderFeature
+
 from .provider import MSXBridgeProvider
 
 if TYPE_CHECKING:
@@ -24,4 +26,4 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return MSXBridgeProvider(mass, manifest, config)
+    return MSXBridgeProvider(mass, manifest, config, {ProviderFeature.REMOVE_PLAYER})

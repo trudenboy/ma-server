@@ -9,13 +9,15 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from music_assistant_models.enums import IdentifierType, PlaybackState, PlayerFeature, PlayerType
+from music_assistant_models.enums import PlaybackState, PlayerFeature, PlayerType
 from music_assistant_models.errors import PlayerUnavailableError
 from music_assistant_models.player import DeviceInfo
 
-from music_assistant.constants import CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3
-from music_assistant.models.player import PlayerMedia
-from music_assistant.models.player_protocol import PlayerProtocol
+from music_assistant.constants import (
+    CONF_ENTRY_HTTP_PROFILE_DEFAULT_1,
+    CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3,
+)
+from music_assistant.models.player import Player, PlayerMedia
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigEntry
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
     from .provider import MSXBridgeProvider
 
 
-class MSXPlayer(PlayerProtocol):
+class MSXPlayer(Player):
     """Represents a Smart TV running MSX as a Music Assistant player."""
 
     _skip_ws_depth: int = 0
@@ -40,14 +42,13 @@ class MSXPlayer(PlayerProtocol):
     def __init__(
         self,
         provider: MSXBridgeProvider,
-        protocol_id: str,
+        player_id: str,
         name: str = "MSX TV",
         *,
         ip_address: str | None = None,
-        device_id: str | None = None,
     ) -> None:
         """Initialize the MSX Player."""
-        super().__init__(provider, protocol_id)
+        super().__init__(provider, player_id)
         self._attr_name = name
         self._attr_type = PlayerType.PLAYER
         self._attr_supported_features = {
@@ -62,9 +63,6 @@ class MSXPlayer(PlayerProtocol):
         )
         if ip_address:
             self._attr_device_info.ip_address = ip_address
-        # the device id a client sends tells it apart from the other clients on its host
-        if device_id:
-            self._attr_device_info.add_identifier(IdentifierType.UUID, device_id)
         self._attr_available = True
         self._attr_powered = True
         self._attr_volume_level = 100
@@ -90,18 +88,7 @@ class MSXPlayer(PlayerProtocol):
 
     async def get_config_entries(self) -> list[ConfigEntry]:
         """Return per-player config entries — codec is configurable per TV."""
-        return [CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3]
-
-    async def on_detach(self) -> None:
-        """Report the TV idle until it plays again; stop it when its player is disabled."""
-        await super().on_detach()
-        self._reset_playback()
-        if not self.mass.players.wants_protocol(self.protocol_id):
-            cast("MSXBridgeProvider", self.provider).stop_tv(self.protocol_id)
-
-    async def on_remove(self) -> None:
-        """Stop the TV when its player is removed."""
-        cast("MSXBridgeProvider", self.provider).forget_player(self.protocol_id)
+        return [CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3, CONF_ENTRY_HTTP_PROFILE_DEFAULT_1]
 
     def mark_available(self) -> None:
         """Mark the player available after proof of life from the TV."""
@@ -121,7 +108,7 @@ class MSXPlayer(PlayerProtocol):
 
     async def play_media(self, media: PlayerMedia) -> None:
         """Handle PLAY MEDIA command — store stream URL for the TV to fetch."""
-        if self.player is None:
+        if not self.config.enabled:
             raise PlayerUnavailableError("Player is disabled")
         self.logger.info("play_media on %s: uri=%s", self.display_name, media.uri)
         self._native_completion_token = None
@@ -137,13 +124,13 @@ class MSXPlayer(PlayerProtocol):
         self.update_state()
 
         if self._skip_ws_notify:
-            cast("MSXBridgeProvider", self.provider).notify_native_track_started(self.protocol_id)
+            cast("MSXBridgeProvider", self.provider).notify_native_track_started(self.player_id)
         else:
             self._notify_msx_playback(media)
 
     async def play(self) -> None:
         """Handle PLAY (resume) command."""
-        if self.player is None:
+        if not self.config.enabled:
             raise PlayerUnavailableError("Player is disabled")
         self.logger.info("play (resume) on %s", self.display_name)
         if self._attr_playback_state == PlaybackState.PAUSED:
@@ -163,18 +150,24 @@ class MSXPlayer(PlayerProtocol):
         self._attr_elapsed_time_last_updated = time.time()
         self.update_state()
         if not self._skip_ws_notify:
-            cast("MSXBridgeProvider", self.provider).notify_play_paused(self.protocol_id)
+            cast("MSXBridgeProvider", self.provider).notify_play_paused(self.player_id)
 
     async def stop(self) -> None:
         """Handle STOP command."""
         self.logger.info("stop on %s", self.display_name)
         self.mark_idle()
         provider = cast("MSXBridgeProvider", self.provider)
-        provider.notify_play_stopped(self.protocol_id)
+        provider.notify_play_stopped(self.player_id)
 
     def mark_idle(self) -> None:
         """Report the player idle and drop its media, without sending a stop to the TV."""
-        self._reset_playback()
+        self._attr_playback_state = PlaybackState.IDLE
+        self._native_completion_token = None
+        self.playback_generation = None
+        self._attr_current_media = None
+        self._attr_elapsed_time = None
+        self._attr_elapsed_time_last_updated = None
+        self._last_ws_position = None
         self.update_state()
 
     def clock_context(self) -> dict[str, Any]:
@@ -211,7 +204,7 @@ class MSXPlayer(PlayerProtocol):
 
     def bind_native_completion(self, token: str, media: PlayerMedia | None) -> None:
         """Bind one native decoder request to its current media generation."""
-        if media is not None and self.current_media is media and self.player is not None:
+        if media is not None and self.current_media is media and self.config.enabled:
             self._native_completion_token = token
 
     def claim_native_completion(self, token: str) -> bool:
@@ -220,7 +213,7 @@ class MSXPlayer(PlayerProtocol):
             not token
             or token != self._native_completion_token
             or self.playback_state != PlaybackState.PLAYING
-            or self.player is None
+            or not self.config.enabled
         ):
             return False
         self._native_completion_token = None
@@ -230,7 +223,7 @@ class MSXPlayer(PlayerProtocol):
         """Handle VOLUME_SET command."""
         self._attr_volume_level = volume_level
         self.update_state()
-        cast("MSXBridgeProvider", self.provider).notify_volume(self.protocol_id, volume_level)
+        cast("MSXBridgeProvider", self.provider).notify_volume(self.player_id, volume_level)
 
     async def seek(self, position_seconds: int) -> None:
         """Handle SEEK command — send seek action to MSX player via WebSocket."""
@@ -241,7 +234,7 @@ class MSXPlayer(PlayerProtocol):
             self._track_started_at = time.monotonic() - float(position_seconds)
         self.update_state()
         if not self._skip_ws_notify:
-            cast("MSXBridgeProvider", self.provider).notify_seek(self.protocol_id, position_seconds)
+            cast("MSXBridgeProvider", self.provider).notify_seek(self.player_id, position_seconds)
 
     def update_position(self, position: float) -> None:
         """Update elapsed time from a WebSocket position report while playing."""
@@ -368,16 +361,16 @@ class MSXPlayer(PlayerProtocol):
         if source_id and media.queue_item_id:
             queue = self.mass.player_queues.get(source_id)
             start_index = queue.current_index if queue and queue.current_index is not None else 0
-            provider.notify_play_playlist(self.protocol_id, start_index, queue_id=source_id)
+            provider.notify_play_playlist(self.player_id, start_index, queue_id=source_id)
             return
         provider.notify_play_started(
-            self.protocol_id,
+            self.player_id,
             title=media.title,
             artist=media.artist,
             image_url=media.image_url,
             duration=media.stream_duration or media.duration,
-            next_action=f"execute:/api/next/{self.protocol_id}",
-            prev_action=f"execute:/api/previous/{self.protocol_id}",
+            next_action=f"execute:/api/next/{self.player_id}",
+            prev_action=f"execute:/api/previous/{self.player_id}",
         )
 
     def _served_duration(self) -> float | None:
@@ -403,14 +396,4 @@ class MSXPlayer(PlayerProtocol):
         self._last_ws_position = None
         self.update_state()
         if not self._skip_ws_notify:
-            cast("MSXBridgeProvider", self.provider).notify_play_resumed(self.protocol_id)
-
-    def _reset_playback(self) -> None:
-        """Forget the playback the TV reported, as when it is idle."""
-        self._attr_playback_state = PlaybackState.IDLE
-        self._native_completion_token = None
-        self.playback_generation = None
-        self._attr_current_media = None
-        self._attr_elapsed_time = None
-        self._attr_elapsed_time_last_updated = None
-        self._last_ws_position = None
+            cast("MSXBridgeProvider", self.provider).notify_play_resumed(self.player_id)
