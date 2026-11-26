@@ -173,8 +173,7 @@ async def health(
     else:
         try:
             log_errors = await asyncio.to_thread(SafeLogTail(mass).count_errors_last_5min)
-        except Exception as err:
-            LOGGER.debug("Counting recent log errors failed: %s", err)
+        except ToolError, OSError:
             disabled_capabilities.append("DEBUG_LOGS")
     dynamic_diagnostics = (
         dict(dynamic_diagnostics_provider()) if dynamic_diagnostics_provider is not None else None

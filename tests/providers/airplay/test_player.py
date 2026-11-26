@@ -25,6 +25,7 @@ from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.constants import CONF_PASSWORD, CONF_SYNC_ADJUST
 from music_assistant.controllers.streams.audio import StreamsAudio
+from music_assistant.models.media_capabilities import AudioSourceRefusedError
 from music_assistant.models.player import Player
 from music_assistant.models.player_protocol import AnnouncementFeature
 from music_assistant.providers.airplay.constants import (
@@ -241,6 +242,39 @@ async def test_play_media_clears_transitioning_when_cold_start_raises(
     ):
         await airplay_player.play_media(MagicMock())
 
+    assert airplay_player._transitioning is False
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["cold_start", "warm_replace"])
+async def test_play_media_ends_quietly_when_the_source_refuses_the_player(
+    airplay_player: AirPlayPlayer, warm: bool
+) -> None:
+    """
+    A source refusing the player ends play_media without an error.
+
+    The streams controller logs the refusal and takes the source off the player, so an error
+    here would only add a warning for the command.
+    """
+    refusal = AudioSourceRefusedError("No AirPlay client is streaming to this receiver")
+    session = MagicMock()
+    session.can_replace = MagicMock(return_value=warm)
+    session.replace = AsyncMock(side_effect=refusal)
+    session.stop = AsyncMock()
+    airplay_player.stream = MagicMock(running=True, session=session)
+
+    with (
+        patch.object(airplay_player, "_get_sync_clients", return_value=[airplay_player]),
+        patch.object(airplay_player, "_get_session_pcm_format", new_callable=AsyncMock),
+        patch.object(airplay_player.mass.streams, "get_stream", MagicMock()),
+        patch(
+            "music_assistant.providers.airplay.player.AirPlayStreamSession",
+            return_value=MagicMock(start=AsyncMock(side_effect=refusal)),
+        ) as new_session,
+    ):
+        await airplay_player.play_media(MagicMock())
+
+    # a refused warm replacement is not retried cold, which would be refused as well
+    assert new_session.called is not warm
     assert airplay_player._transitioning is False
 
 
@@ -1489,12 +1523,33 @@ def test_announcements_are_advertised_only_with_live_audio(
     assert PlayerFeature.PLAY_ANNOUNCEMENT not in airplay_player.supported_features
 
 
-def test_player_reports_its_announcement_features(airplay_player: AirPlayPlayer) -> None:
+def test_player_in_a_session_lines_up_its_announcement_start(
+    airplay_player: AirPlayPlayer,
+) -> None:
     """The clip is mixed into live audio at the requested level, in step across members."""
+    airplay_player.stream = MagicMock(running=True, session=MagicMock())
+
     assert airplay_player.announcement_features == {
         AnnouncementFeature.SUPPORTS_VOLUME,
         AnnouncementFeature.APPLIES_VOLUME,
         AnnouncementFeature.COORDINATES_START,
+    }
+
+
+def test_bridged_player_does_not_line_up_its_announcement_start(
+    airplay_player: AirPlayPlayer,
+) -> None:
+    """
+    A Sendspin-bridged player has no stream session to line up its start in.
+
+    A group announcement then plays through the group's own stream, instead of each
+    member picking its own start and the rooms being heard out of step.
+    """
+    airplay_player.stream = MagicMock(running=True, session=None)
+
+    assert airplay_player.announcement_features == {
+        AnnouncementFeature.SUPPORTS_VOLUME,
+        AnnouncementFeature.APPLIES_VOLUME,
     }
 
 
@@ -1952,6 +2007,66 @@ async def test_rejoin_aborts_when_synced_into_foreign_group() -> None:
         await asyncio.wait_for(player._group_rejoin_attempts(["leader"]), timeout=5)
 
     leader.set_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_announcement_that_comes_early_counts() -> None:
+    """A device that announces itself too soon after an attempt is tried later on."""
+    player = _make_idle_player()
+
+    with patch(_NO_DELAYS, (0.01,)):
+        attempt = asyncio.create_task(player._wait_rejoin_attempt(1, "group"))
+        await asyncio.sleep(0)
+        player._announced.set()
+
+        assert await asyncio.wait_for(attempt, 1)
+
+    assert not player._announced.is_set()
+
+
+@pytest.mark.parametrize(
+    ("state", "counted_in"),
+    [
+        ({}, True),
+        ({"active_group": "group"}, True),
+        ({"active_group": "other_group"}, False),
+        ({"synced_to": "member"}, True),
+        ({"synced_to": "other"}, False),
+        ({"player_id": "other"}, False),
+    ],
+    ids=str,
+)
+def test_belongs_to_a_group_it_is_not_taken_out_of(state: dict[str, Any], counted_in: bool) -> None:
+    """A player that its group does not count in, or that is grouped elsewhere, is out of it."""
+    player = _make_idle_player()
+    values = {"player_id": "lost", "active_group": None, "synced_to": None} | state
+    group = MagicMock()
+    group.own_protocol.counts_in = lambda player_id: player_id in ("lost", "member")
+    _players_mock(player).get_player = {"group": group}.get
+
+    with patch.object(AirPlayPlayer, "player", MagicMock(**values)):
+        assert player._group_counting_in("group") is (group if counted_in else None)
+
+
+@pytest.mark.asyncio
+async def test_rejoins_the_group_it_fell_out_of_until_it_is_done() -> None:
+    """A player brings itself back to the group player it fell out of, and to no other one."""
+    player = _make_idle_player()
+    _players_mock(player).get_player.return_value = None
+    cast("MagicMock", player.mass).create_task = lambda coro: (
+        asyncio.get_running_loop().create_task(coro)
+    )
+    assert not player.rejoins_group("group")
+
+    with patch(_NO_DELAYS, (0,)):
+        player.schedule_group_rejoin(["leader"], "group")
+        assert player.rejoins_group("group")
+        assert not player.rejoins_group("other_group")
+        # the group is gone
+        assert player._rejoin_task is not None
+        await player._rejoin_task
+
+    assert not player.rejoins_group("group")
 
 
 def test_resolve_rejoin_target_finds_promoted_sibling() -> None:

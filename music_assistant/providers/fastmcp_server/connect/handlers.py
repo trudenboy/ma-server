@@ -175,7 +175,7 @@ async def _read_json(request: web.Request) -> dict[str, Any]:
     """Best-effort JSON parse; missing/malformed body becomes an empty dict."""
     try:
         body = await request.json()
-    except ValueError:
+    except Exception:  # noqa: BLE001 - any unreadable body counts as empty
         return {}
     return body if isinstance(body, dict) else {}
 
@@ -361,8 +361,7 @@ def make_login(ctx: WizardContext) -> Callable[[web.Request], Any]:
                 live_user = await ctx.mass.webserver.auth.authenticate_with_token(
                     str(session_token)
                 )
-            except Exception as err:
-                LOGGER.debug("Session token authentication failed: %s", err)
+            except Exception:  # noqa: BLE001 - any auth failure means no user
                 live_user = None
             user_id = str(getattr(live_user, "user_id", "") or "")
         if session_token and user_id:
@@ -453,8 +452,7 @@ async def _bind_request_identity(ctx: WizardContext, bearer: object, user: Any) 
             resolved = getter(str(bearer))
             if inspect.isawaitable(resolved):
                 resolved = await resolved
-        except Exception as err:
-            LOGGER.debug("Token id lookup failed: %s", err)
+        except Exception:  # noqa: BLE001 - any lookup failure means no token id
             resolved = None
         if resolved:
             token_id = str(resolved)
