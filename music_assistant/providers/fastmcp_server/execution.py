@@ -24,8 +24,6 @@ from music_assistant_models.errors import (
 )
 from music_assistant_models.translations import TRANSLATION_RESOLVER
 
-from music_assistant.controllers.players.constants import MAX_POWER_ON_WAIT
-
 from .audit import (
     ANONYMOUS_USER_ID,
     NO_TOKEN_CLIENT_ID,
@@ -89,9 +87,7 @@ _COMPACT_BYTES = 12_288
 _FULL_BYTES = 65_536
 _COMPACT_STRING = 2_048
 _FULL_STRING = 8_192
-# a command that starts playback on a player that is switched off first waits for it to
-# start up
-_CALL_TIMEOUT_SECONDS = MAX_POWER_ON_WAIT + 60
+_CALL_TIMEOUT_SECONDS = 60
 CATALOG_REVISION = 2
 
 __all__ = [
@@ -376,11 +372,6 @@ class DynamicAPIAdapter:
         if entry.profile is not None:
             for excluded_name in entry.profile.excluded_arguments:
                 parsed.pop(excluded_name, None)
-        # legacy player ids are resolved here, ahead of the handler call, so the
-        # authorization below checks the players the command reaches
-        from music_assistant.helpers.api import resolve_player_ids  # noqa: PLC0415
-
-        parsed = resolve_player_ids(self.mass, parsed)
 
         initial_invocation = await self._authorize_call_audited(
             entry,
@@ -706,14 +697,14 @@ class DynamicAPIAdapter:
             return None
         try:
             user = await self.mass.webserver.auth.authenticate_with_token(token.token)
-        except Exception:  # noqa: BLE001 - any auth failure rejects the request
+        except Exception:
             return None
         if user is None or getattr(user, "enabled", True) is False:
             return None
         identity = self._identity_provider(token.token)
         try:
             live_token_id = await self.mass.webserver.auth.get_token_id_from_token(token.token)
-        except Exception:  # noqa: BLE001 - any lookup failure rejects the request
+        except Exception:
             return None
         if not request_identity_holds(token, user, identity, live_token_id=live_token_id):
             return None

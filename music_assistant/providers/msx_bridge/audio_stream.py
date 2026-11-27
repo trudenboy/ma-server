@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
@@ -17,7 +17,6 @@ from music_assistant_models.media_items import AudioFormat
 from music_assistant.controllers.streams.audio_processing import get_media_session_id
 from music_assistant.controllers.streams.constants import PacingProfile, output_pacing_args
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
-from music_assistant.models.media_capabilities import AudioSourceRefusedError
 
 from .constants import PRE_BUFFER_BYTES
 
@@ -66,13 +65,13 @@ class AudioPipeline:
         media: PlayerMedia,
     ) -> web.StreamResponse:
         """Serve this player's current media on this request."""
-        player_id = player.protocol_id
-        if player.player is None:
+        player_id = player.player_id
+        if not player.config.enabled:
             raise web.HTTPNotFound(text="Player not found")
 
         if self.provider.is_redirect_stream_mode():
             redirect_url = await self.provider.get_ma_stream_url(player_id, media)
-            if player.player is None:
+            if not player.config.enabled:
                 raise web.HTTPNotFound(text="Player not found")
             if redirect_url:
                 redirect_url = rewrite_stream_host(request, redirect_url)
@@ -88,7 +87,10 @@ class AudioPipeline:
                 player_id,
             )
 
-        effective_format = player.output_codec.value
+        effective_format = cast(
+            "str",
+            player.config.get_value("output_codec", "mp3"),
+        )
 
         pcm_format, out_format, headers = build_audio_params(effective_format)
 
@@ -109,7 +111,7 @@ class AudioPipeline:
         headers: dict[str, str],
     ) -> web.StreamResponse:
         """Serve audio via independent ffmpeg stream."""
-        player_id = player.protocol_id
+        player_id = player.player_id
         audio_source = self.provider.mass.streams.get_stream(
             media,
             pcm_format,
@@ -167,7 +169,7 @@ class AudioPipeline:
         pacing_profile: PacingProfile,
     ) -> None:
         """Pre-buffer audio chunks, then send HTTP headers and stream remaining data."""
-        player_id = player.protocol_id
+        player_id = player.player_id
         chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=32)
         producer_done = asyncio.Event()
 
@@ -241,9 +243,6 @@ class AudioPipeline:
             await stream_task
         except asyncio.CancelledError:
             raise
-        except AudioSourceRefusedError:
-            # the streams controller logs a source refusing this player itself
-            raise
         except MusicAssistantError, OSError:
             logger.exception("Stream error for player %s", player_id)
             raise
@@ -276,7 +275,13 @@ class AudioPipeline:
         """Return the pacing profile for the audio delivered to the TV."""
         if media.media_type == MediaType.AUDIO_SOURCE:
             return PacingProfile.LOW_LATENCY
-        return PacingProfile.REALTIME
+        if media.media_type in (MediaType.RADIO, MediaType.FLOW_STREAM):
+            return PacingProfile.NEAR_REALTIME
+        if media.source_id and media.queue_item_id:
+            item = self.provider.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+            if item and item.streamdetails and item.streamdetails.is_realtime:
+                return PacingProfile.NEAR_REALTIME
+        return PacingProfile.DEFAULT
 
 
 def rewrite_stream_host(request: web.Request, url: str) -> str:
